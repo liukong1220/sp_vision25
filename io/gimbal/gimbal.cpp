@@ -7,7 +7,6 @@
 
 namespace io
 {
- 
 // 构造函数：从配置文件初始化云台串口连接并启动读取线程
 Gimbal::Gimbal(const std::string & config_path)
 {
@@ -22,22 +21,10 @@ Gimbal::Gimbal(const std::string & config_path)
     serial_.open();
   } catch (const std::exception & e) {
     // 串口打开失败时记录错误并退出程序
- 
-Gimbal::Gimbal(const std::string & config_path)
-{
-  auto yaml = tools::load(config_path);
-  auto com_port = tools::read<std::string>(yaml, "com_port");
-
-  try {
-    serial_.setPort(com_port);
-    serial_.open();
-  } catch (const std::exception & e) {
- 
     tools::logger()->error("[Gimbal] Failed to open serial: {}", e.what());
     exit(1);
   }
 
- 
   // 启动数据读取线程，执行read_thread函数
   thread_ = std::thread(&Gimbal::read_thread, this);
 
@@ -62,48 +49,23 @@ Gimbal::~Gimbal()
 GimbalMode Gimbal::mode() const
 {
   // 使用互斥锁保护模式变量的并发访问
- 
-  thread_ = std::thread(&Gimbal::read_thread, this);
-
-  queue_.pop();
-  tools::logger()->info("[Gimbal] First q received.");
-}
-
-Gimbal::~Gimbal()
-{
-  quit_ = true;
-  if (thread_.joinable()) thread_.join();
-  serial_.close();
-}
-
-GimbalMode Gimbal::mode() const
-{
- 
   std::lock_guard<std::mutex> lock(mutex_);
   return mode_;
 }
 
- 
 // 获取当前云台状态信息（线程安全）
 GimbalState Gimbal::state() const
 {
   // 使用互斥锁保护状态变量的并发访问
- 
-GimbalState Gimbal::state() const
-{
- 
   std::lock_guard<std::mutex> lock(mutex_);
   return state_;
 }
 
- 
 // 将云台模式枚举转换为可读字符串
-  
 std::string Gimbal::str(GimbalMode mode) const
 {
   switch (mode) {
     case GimbalMode::IDLE:
- 
       return "IDLE";        // 空闲模式
     case GimbalMode::AUTO_AIM:
       return "AUTO_AIM";    // 自动瞄准模式
@@ -138,37 +100,10 @@ Eigen::Quaterniond Gimbal::q(std::chrono::steady_clock::time_point t)
     if (!(t_a < t && t <= t_b)) continue;
 
     // 返回插值后的四元数
- 
-      return "IDLE";
-    case GimbalMode::AUTO_AIM:
-      return "AUTO_AIM";
-    case GimbalMode::SMALL_BUFF:
-      return "SMALL_BUFF";
-    case GimbalMode::BIG_BUFF:
-      return "BIG_BUFF";
-    default:
-      return "INVALID";
-  }
-}
-
-Eigen::Quaterniond Gimbal::q(std::chrono::steady_clock::time_point t)
-{
-  while (true) {
-    auto [q_a, t_a] = queue_.pop();
-    auto [q_b, t_b] = queue_.front();
-    auto t_ab = tools::delta_time(t_a, t_b);
-    auto t_ac = tools::delta_time(t_a, t);
-    auto k = t_ac / t_ab;
-    Eigen::Quaterniond q_c = q_a.slerp(k, q_b).normalized();
-    if (t < t_a) return q_c;
-    if (!(t_a < t && t <= t_b)) continue;
-
- 
     return q_c;
   }
 }
 
- 
 // 向云台发送控制指令
 void Gimbal::send(io::VisionToGimbal VisionToGimbal)
 {
@@ -187,30 +122,14 @@ void Gimbal::send(io::VisionToGimbal VisionToGimbal)
   // 设置俯仰角加速度目标值
   tx_data_.pitch_acc = VisionToGimbal.pitch_acc;
   // 计算CRC16校验和（排除校验和字段本身）
- 
-void Gimbal::send(io::VisionToGimbal VisionToGimbal)
-{
-  tx_data_.mode = VisionToGimbal.mode;
-  tx_data_.yaw = VisionToGimbal.yaw;
-  tx_data_.yaw_vel = VisionToGimbal.yaw_vel;
-  tx_data_.yaw_acc = VisionToGimbal.yaw_acc;
-  tx_data_.pitch = VisionToGimbal.pitch;
-  tx_data_.pitch_vel = VisionToGimbal.pitch_vel;
-  tx_data_.pitch_acc = VisionToGimbal.pitch_acc;
- 
   tx_data_.crc16 = tools::get_crc16(
     reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
 
   try {
- 
     // 通过串口发送控制数据
     serial_.write(reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_));
   } catch (const std::exception & e) {
     // 串口写入失败时记录警告信息（不退出程序）
- 
-    serial_.write(reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_));
-  } catch (const std::exception & e) {
- 
     tools::logger()->warn("[Gimbal] Failed to write serial: {}", e.what());
   }
 }
@@ -219,7 +138,6 @@ void Gimbal::send(
   bool control, bool fire, float yaw, float yaw_vel, float yaw_acc, float pitch, float pitch_vel,
   float pitch_acc)
 {
- 
   // 设置控制模式：根据control和fire参数确定模式值
   // control为false -> 模式0（不控制）
   // control为true且fire为false -> 模式1（控制云台但不开火）
@@ -247,21 +165,6 @@ void Gimbal::send(
     serial_.write(reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_));
   } catch (const std::exception & e) {
     // 捕获并记录串口写入失败的错误信息
- 
-  tx_data_.mode = control ? (fire ? 2 : 1) : 0;
-  tx_data_.yaw = yaw;
-  tx_data_.yaw_vel = yaw_vel;
-  tx_data_.yaw_acc = yaw_acc;
-  tx_data_.pitch = pitch;
-  tx_data_.pitch_vel = pitch_vel;
-  tx_data_.pitch_acc = pitch_acc;
-  tx_data_.crc16 = tools::get_crc16(
-    reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
-
-  try {
-    serial_.write(reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_));
-  } catch (const std::exception & e) {
- 
     tools::logger()->warn("[Gimbal] Failed to write serial: {}", e.what());
   }
 }
@@ -269,7 +172,6 @@ void Gimbal::send(
 bool Gimbal::read(uint8_t * buffer, size_t size)
 {
   try {
- 
     // 尝试从串口读取指定大小的数据到缓冲区
     // 如果实际读取的字节数等于请求的字节数，则返回true，否则返回false
     return serial_.read(buffer, size) == size;
@@ -278,18 +180,12 @@ bool Gimbal::read(uint8_t * buffer, size_t size)
     // 记录警告日志，显示具体的错误信息
     tools::logger()->warn("[Gimbal] Failed to read serial: {}", e.what());
     // 发生异常时返回false表示读取失败
- 
-    return serial_.read(buffer, size) == size;
-  } catch (const std::exception & e) {
-    // tools::logger()->warn("[Gimbal] Failed to read serial: {}", e.what());
- 
     return false;
   }
 }
 
 void Gimbal::read_thread()
 {
- 
   // 记录读取线程启动日志
   tools::logger()->info("[Gimbal] read_thread started.");
   // 错误计数器，用于跟踪连续读取失败的次数
@@ -393,25 +289,10 @@ void Gimbal::read_thread()
     // 验证数据帧的CRC校验和是否正确
     if (!tools::check_crc16(reinterpret_cast<uint8_t *>(&rx_data_), expected_packet_size)) {
       tools::logger()->warn("[Gimbal] CRC16 check failed. Frame discarded.");
- 
-  tools::logger()->info("[Gimbal] read_thread started.");
-  int error_count = 0;
-
-  while (!quit_) {
-    if (error_count > 5000) {
-      error_count = 0;
-      tools::logger()->warn("[Gimbal] Too many errors, attempting to reconnect...");
-      reconnect();
-      continue;
-    }
-
-    if (!read(reinterpret_cast<uint8_t *>(&rx_data_), sizeof(rx_data_.head))) {
- 
       error_count++;
       continue;
     }
 
- 
     // 数据验证通过，重置错误计数器
     error_count = 0;
     
@@ -451,66 +332,17 @@ void Gimbal::read_thread()
         break;
       default:
         mode_ = GimbalMode::IDLE;        // 默认设为空闲模式
- 
-    if (rx_data_.head[0] != 'S' || rx_data_.head[1] != 'P') continue;
-
-    auto t = std::chrono::steady_clock::now();
-
-    if (!read(
-          reinterpret_cast<uint8_t *>(&rx_data_) + sizeof(rx_data_.head),
-          sizeof(rx_data_) - sizeof(rx_data_.head))) {
-      error_count++;
-      continue;
-    }
-
-    if (!tools::check_crc16(reinterpret_cast<uint8_t *>(&rx_data_), sizeof(rx_data_))) {
-      tools::logger()->debug("[Gimbal] CRC16 check failed.");
-      continue;
-    }
-
-    error_count = 0;
-    Eigen::Quaterniond q(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]);
-    queue_.push({q, t});
-
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    state_.yaw = rx_data_.yaw;
-    state_.yaw_vel = rx_data_.yaw_vel;
-    state_.pitch = rx_data_.pitch;
-    state_.pitch_vel = rx_data_.pitch_vel;
-    state_.bullet_speed = rx_data_.bullet_speed;
-    state_.bullet_count = rx_data_.bullet_count;
-
-    switch (rx_data_.mode) {
-      case 0:
-        mode_ = GimbalMode::IDLE;
-        break;
-      case 1:
-        mode_ = GimbalMode::AUTO_AIM;
-        break;
-      case 2:
-        mode_ = GimbalMode::SMALL_BUFF;
-        break;
-      case 3:
-        mode_ = GimbalMode::BIG_BUFF;
-        break;
-      default:
-        mode_ = GimbalMode::IDLE;
- 
         tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
         break;
     }
   }
 
- 
   // 记录读取线程停止日志
-  
   tools::logger()->info("[Gimbal] read_thread stopped.");
 }
 
 void Gimbal::reconnect()
 {
- 
   // 设置最大重连尝试次数
   int max_retry_count = 10;
   
@@ -541,31 +373,9 @@ void Gimbal::reconnect()
       // 捕获并记录重连失败的具体错误信息
       tools::logger()->warn("[Gimbal] Reconnect failed: {}", e.what());
       // 等待1秒后继续下一次重连尝试
- 
-  int max_retry_count = 10;
-  for (int i = 0; i < max_retry_count && !quit_; ++i) {
-    tools::logger()->warn("[Gimbal] Reconnecting serial, attempt {}/{}...", i + 1, max_retry_count);
-    try {
-      serial_.close();
-      std::this_thread::sleep_for(std::chrono::seconds(1));
-    } catch (...) {
-    }
-
-    try {
-      serial_.open();  // 尝试重新打开
-      queue_.clear();
-      tools::logger()->info("[Gimbal] Reconnected serial successfully.");
-      break;
-    } catch (const std::exception & e) {
-      tools::logger()->warn("[Gimbal] Reconnect failed: {}", e.what());
- 
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
 }
 
- 
 }  // namespace io
- 
-}  // namespace io
- 
