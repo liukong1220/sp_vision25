@@ -30,7 +30,9 @@ add_subdirectory(tasks/omniperception)
 add_executable(standard src/standard.cpp)
 add_executable(mt_standard src/mt_standard.cpp)
 add_executable(standard_mpc src/standard_mpc.cpp)
+ 
 add_executable(mt_standard_mpc src/mt_standard_mpc.cpp)
+  
 add_executable(auto_aim_debug_mpc src/auto_aim_debug_mpc.cpp)
 add_executable(mt_auto_aim_debug src/mt_auto_aim_debug.cpp)
 add_executable(auto_buff_debug src/auto_buff_debug.cpp)
@@ -41,7 +43,9 @@ add_executable(uav_debug src/uav_debug.cpp)
 target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(mt_standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(standard_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
+ 
 target_link_libraries(mt_standard_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
+  
 target_link_libraries(auto_aim_debug_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(mt_auto_aim_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(auto_buff_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io ${CERES_LIBRARIES})
@@ -110,7 +114,11 @@ find_package(rclcpp QUIET)
 find_package(std_msgs QUIET)
 find_package(rosidl_typesupport_cpp QUIET)
 find_package(sp_msgs QUIET)
+ 
 # 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
+ 
+# 只有在没有找到 ROS 环境时才会添加 sentry 和 publish_test
+ 
 if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND sp_msgs_FOUND)
     # 编译 sentry 和 publish_test
     add_executable(sentry src/sentry.cpp)
@@ -128,6 +136,17 @@ if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_
     target_link_libraries(publish_test ${OpenCV_LIBS} fmt::fmt tools io auto_aim)
     target_link_libraries(subscribe_test ${OpenCV_LIBS} fmt::fmt tools io)
     target_link_libraries(topic_loop_test ${OpenCV_LIBS} fmt::fmt tools io)
+ 
+ 
+
+    ament_target_dependencies(sentry rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(sentry_bp rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(sentry_debug rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(sentry_multithread rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(publish_test rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(subscribe_test rclcpp std_msgs sp_msgs)
+    ament_target_dependencies(topic_loop_test rclcpp std_msgs sp_msgs)
+ 
 else()
     message(STATUS "ROS2 environment not found, skipping ROS2-related code.")
 endif()

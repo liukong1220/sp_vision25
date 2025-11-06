@@ -1,6 +1,10 @@
 # enemy_color: "red"
 enemy_color: "blue"
+ 
 #轮腿
+ 
+
+ 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
 classify_model: assets/tiny_resnet.onnx
