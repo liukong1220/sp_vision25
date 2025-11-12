@@ -198,14 +198,14 @@ void Gimbal::read_thread()
 
   // 主循环：持续读取云台数据直到收到退出信号
   while (!quit_) {
-    // // 如果错误计数超过阈值（5000次），执行重连操作
-    // if (error_count > 5000) {
-    //   error_count = 0;
-    //   tools::logger()->warn("[Gimbal] Too many errors, attempting to reconnect...");
-    //   // 调用重连函数尝试重新建立串口连接
-    //   reconnect();
-    //   continue;
-    // }
+    // 如果错误计数超过阈值（5000次），执行重连操作
+    if (error_count > 5000) {
+      error_count = 0;
+      tools::logger()->warn("[Gimbal] Too many errors, attempting to reconnect...");
+      // 调用重连函数尝试重新建立串口连接
+      reconnect();
+      continue;
+    }
 
     // 帧同步：逐个字节读取直到找到正确的帧头
     bool frame_synced = false;

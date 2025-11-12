@@ -5,7 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <thread>
-
+#include "tasks/auto_aim/target.hpp"
 #include "io/camera.hpp"
 #include "io/gimbal/gimbal.hpp"
 #include "tasks/auto_aim/planner/planner.hpp"
@@ -186,6 +186,12 @@ int main(int argc, char * argv[])
       auto image_points =
         solver.reproject_armor(aim_xyza.head(3), aim_xyza[3], target.armor_type, target.name);
       tools::draw_points(img, image_points, {0, 0, 255});
+
+      // 在图像上显示 l 和 h
+      auto l = target.ekf_x()[9];
+      auto h = target.ekf_x()[10];
+      std::string text = fmt::format("l: {:.2f}, h: {:.2f}", l, h);
+      cv::putText(img, text, cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 1, {255, 255, 255}, 2);
     }
 
     // 调整图像大小并显示
