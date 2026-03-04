@@ -1,25 +1,25 @@
 #include <chrono>
+#include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <thread>
 
 #include "io/camera.hpp"
-#include "io/dm_imu/dm_imu.hpp"
-#include "tasks/auto_aim/aimer.hpp"
-#include "tasks/auto_aim/multithread/commandgener.hpp"
-#include "tasks/auto_aim/multithread/mt_detector.hpp"
-#include "tasks/auto_aim/shooter.hpp"
+#include "io/gimbal/gimbal.hpp"
+#include "tasks/auto_aim/planner/planner.hpp"
 #include "tasks/auto_aim/solver.hpp"
 #include "tasks/auto_aim/tracker.hpp"
+#include "tasks/auto_aim/target.hpp"
+#include "tasks/auto_aim/yolo.hpp"
 #include "tasks/auto_buff/buff_aimer.hpp"
 #include "tasks/auto_buff/buff_detector.hpp"
 #include "tasks/auto_buff/buff_solver.hpp"
 #include "tasks/auto_buff/buff_target.hpp"
 #include "tasks/auto_buff/buff_type.hpp"
 #include "tools/exiter.hpp"
-#include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
+#include "tools/thread_safe_queue.hpp"
 #include "tools/recorder.hpp"
 
 const std::string keys =
@@ -36,12 +36,8 @@ int main(int argc, char * argv[])
     cli.printMessage();
     return 0;
   }
-
-
-
   tools::Exiter exiter;
   tools::Plotter plotter;
-  tools::Recorder recorder;
 
   io::Gimbal gimbal(config_path);
   io::Camera camera(config_path);
@@ -61,7 +57,6 @@ int main(int argc, char * argv[])
   auto_buff::Aimer buff_aimer(config_path);
 
   cv::Mat img;
-  Eigen::Quaterniond q;
   std::chrono::steady_clock::time_point t;
 
   std::atomic<bool> quit = false;
@@ -74,24 +69,60 @@ int main(int argc, char * argv[])
     uint16_t last_bullet_count = 0;
 
     while (!quit) {
+      nlohmann::json data;
+      data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
+      data["mode"] = static_cast<int>(mode.load());
+
+      auto gs = gimbal.state();
+      data["gimbal_yaw"] = gs.yaw;      
+      data["gimbal_yaw_vel"] = gs.yaw_vel;
+      data["gimbal_pitch"] = gs.pitch;
+      data["gimbal_pitch_vel"] = gs.pitch_vel;
+      data["bullet_speed"] = gs.bullet_speed;
+
       if (!target_queue.empty() && mode == io::GimbalMode::AUTO_AIM) {
         auto target = target_queue.front();
-        auto gs = gimbal.state();
         auto plan = planner.plan(target, gs.bullet_speed);
 
         gimbal.send(
           plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel,
           plan.pitch_acc);
 
+        auto fired = gs.bullet_count > last_bullet_count;
+        last_bullet_count = gs.bullet_count;
+
+        data["plan_control"] = plan.control ? 1 : 0;
+        data["plan_fire"] = plan.fire ? 1 : 0;
+        data["fired"] = fired ? 1 : 0;
+        data["target_yaw"] = plan.target_yaw;
+        data["target_pitch"] = plan.target_pitch;
+        data["plan_yaw"] = plan.yaw;
+        data["plan_yaw_vel"] = plan.yaw_vel;
+        data["plan_yaw_acc"] = plan.yaw_acc;
+        data["plan_pitch"] = plan.pitch;
+        data["plan_pitch_vel"] = plan.pitch_vel;
+        data["plan_pitch_acc"] = plan.pitch_acc;
+
+        if (target.has_value()) {
+          data["target_x"] = target->ekf_x()[0];
+          data["target_y"] = target->ekf_x()[2];
+          data["target_z"] = target->ekf_x()[4];
+          data["target_w"] = target->ekf_x()[7];
+        }
+
+        plotter.plot(data);
         std::this_thread::sleep_for(10ms);
-      } else
-        std::this_thread::sleep_for(200ms);
+      } else {
+        data["plan_control"] = 0;
+        data["plan_fire"] = 0;
+        data["fired"] = 0;
+        plotter.plot(data);
+        std::this_thread::sleep_for(50ms);
+      }
     }
   });
 
   while (!exiter.exit()) {
-
-
     mode = gimbal.mode();
 
     if (last_mode != mode) {
@@ -102,7 +133,7 @@ int main(int argc, char * argv[])
     camera.read(img, t);
     auto q = gimbal.q(t);
     auto gs = gimbal.state();
-    recorder.record(img, q, t);
+    // recorder.record(img, q, t);  // 需要录像时再开启
     solver.set_R_gimbal2world(q);
 
     /// 自瞄

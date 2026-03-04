@@ -1,5 +1,7 @@
 #include "target.hpp"
 
+#include <algorithm>
+#include <array>
 #include <numeric>
 
 #include "tools/logger.hpp"
@@ -155,8 +157,9 @@ void Target::update(const Armor & armor)
       return ypd1[2] < ypd2[2];
     });
 
-  // 取前3个distance最小的装甲板
-  for (int i = 0; i < 3; i++) {
+  // 取前3个distance最小的装甲板（候选数量不超过现有装甲板数）
+  const int candidate_num = std::min<int>(3, xyza_i_list.size());
+  for (int i = 0; i < candidate_num; i++) {
     const auto & xyza = xyza_i_list[i].first;
     Eigen::Vector3d ypd = tools::xyz2ypd(xyza.head(3));
     auto angle_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - xyza[3])) +
@@ -181,7 +184,21 @@ void Target::update(const Armor & armor)
   last_id = id;
   update_count_++;
 
-  update_ypda(armor, id);
+  auto compensated_armor = compensate_outpost_height(armor, id);
+  update_ypda(compensated_armor, id);
+}
+
+Armor Target::compensate_outpost_height(const Armor & armor, int id) const
+{
+  if (name != ArmorName::outpost || armor_num_ != 3) return armor;
+
+  Armor compensated = armor;
+  constexpr std::array<double, 3> kOutpostZOffsetById{{0.0, -0.102, 0.102}};
+  const int normalized_id = (id % 3 + 3) % 3;
+
+  compensated.xyz_in_world.z() += kOutpostZOffsetById[normalized_id];
+  compensated.ypd_in_world = tools::xyz2ypd(compensated.xyz_in_world);
+  return compensated;
 }
 
 void Target::update_ypda(const Armor & armor, int id)
