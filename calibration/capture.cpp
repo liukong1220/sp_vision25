@@ -3,12 +3,12 @@
 #include <filesystem>
 #include <fstream>
 #include <opencv2/opencv.hpp>
-
+#include "io/gimbal/gimbal.hpp"
 #include "io/camera.hpp"
+#include "io/cboard.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
-#include "io/gimbal/gimbal.hpp"
 
 const std::string keys =
   "{help h usage ?  |                          | 输出命令行参数说明}"
@@ -37,13 +37,12 @@ void capture_loop(
     camera.read(img, timestamp);
     Eigen::Quaterniond q = gimbal.q(timestamp);
 
-
     // 在图像上显示欧拉角，用来判断imuabs系的xyz正方向，同时判断imu是否存在零漂
     auto img_with_ypr = img.clone();
     Eigen::Vector3d zyx = tools::eulers(q, 2, 1, 0) * 57.3;  // degree
-    tools::draw_text(img_with_ypr, fmt::format(" {:.2f}", zyx[0]), {40, 40}, {0, 0, 255});
-    tools::draw_text(img_with_ypr, fmt::format("Y {:.2f}", zyx[1]), {40, 80}, {0, 0, 255});
-    tools::draw_text(img_with_ypr, fmt::format("X {:.2f}", zyx[2]), {40, 120}, {0, 0, 255});
+    tools::draw_text(img_with_ypr, fmt::format("Yaw {:.2f}", zyx[0]), {40, 40}, {0, 0, 255});
+    tools::draw_text(img_with_ypr, fmt::format("Pitch {:.2f}", zyx[1]), {40, 80}, {0, 0, 255});
+    tools::draw_text(img_with_ypr, fmt::format("Roll {:.2f}", zyx[2]), {40, 120}, {0, 0, 255});
 
     std::vector<cv::Point2f> centers_2d;
     auto success = cv::findCirclesGrid(img, cv::Size(10, 7), centers_2d);  // 默认是对称圆点图案

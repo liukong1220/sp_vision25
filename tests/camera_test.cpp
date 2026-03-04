@@ -8,7 +8,7 @@
 
 const std::string keys =
   "{help h usage ? |                     | 输出命令行参数说明}"
-  "{config-path c  | configs/camera.yaml | yaml配置文件路径 }"
+  "{config-path c  | configs/sentry.yaml | yaml配置文件路径 }"
   "{d display      |                     | 显示视频流       }";
 
 int main(int argc, char * argv[])

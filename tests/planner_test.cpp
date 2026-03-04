@@ -52,10 +52,10 @@ int main(int argc, char * argv[])
     nlohmann::json data;
     data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
 
-    data["gimbal_yaw"] = gs.yaw;
-    data["gimbal_yaw_vel"] = gs.yaw_vel;
-    data["gimbal_pitch"] = gs.pitch;
-    data["gimbal_pitch_vel"] = gs.pitch_vel;
+    data["gimbal_yaw"] = gs.yaw * CV_PI / 180.0;      // 角度转弧度
+    data["gimbal_yaw_vel"] = gs.yaw_vel * CV_PI / 180.0; // 角度转弧度
+    data["gimbal_pitch"] = gs.pitch * CV_PI / 180.0;  // 角度转弧度
+    data["gimbal_pitch_vel"] = gs.pitch_vel * CV_PI / 180.0; // 角度转弧度
 
     data["target_yaw"] = plan.target_yaw;
     data["target_pitch"] = plan.target_pitch;

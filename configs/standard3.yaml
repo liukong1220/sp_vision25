@@ -7,7 +7,7 @@ classify_model: assets/tiny_resnet.onnx
 yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
-device: GPU
+device: CPU
 min_confidence: 0.8
 use_traditional: true
 
@@ -32,28 +32,28 @@ max_side_ratio: 1.5
 max_rectangular_error: 25 # degree
 
 #####-----tracker参数-----#####
-min_detect_count: 5
-max_temp_lost_count: 15
+min_detect_count: 3
+max_temp_lost_count: 10
 outpost_max_temp_lost_count: 75
 
-#####-----aimer参数-----#####
-yaw_offset: 2 # degree -2.5
-pitch_offset: 6.5 # degree 2
-comming_angle: 55 # degree
-leaving_angle: 20 # degree
-decision_speed: 7 # rad/s
-high_speed_delay_time: 0.0 # s
-low_speed_delay_time: 0.0 # s planner use this value
+#####-----aimer参数-----
+yaw_offset: -1.4
+pitch_offset: 0.9
+comming_angle: 60
+leaving_angle: 15
+decision_speed: 4
+high_speed_delay_time: -0.48  # 略微减少高速延迟，进一步提高响应速度
+low_speed_delay_time: -0.068  # 略微减少低速延迟
 
 #####-----shooter参数-----#####
-first_tolerance: 3 # 近距离射击容差，degree
-second_tolerance: 2 # 远距离射击容差，degree
+first_tolerance: 3 # 近距离射击容差，degree 降低容差提高精度
+second_tolerance: 2 # 远距离射击容差，degree 降低容差提高精度
 judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
-exposure_ms: 2.5
-gain: 16.9
+exposure_ms: 1.0
+gain: 16.0
 vid_pid: "2bdf:0001"
 
 #  1  0  0
@@ -61,15 +61,19 @@ vid_pid: "2bdf:0001"
 #  0  0  1
 R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
-# 重投影误差: 0.1820px
-camera_matrix: [1785.4881526822305, 0, 672.4806478241826, 0, 1785.026019470562, 559.89603224794314, 0, 0, 1]
-distort_coeffs: [-0.076005079619881746, 0.11182817466388446, 0.0005362204787722057, -0.0027546300984895122, 0]
+# 重投影误差: 0.0430px
+camera_matrix: [2450.9723746520576, 0, 742.7181066016492, 0, 2452.6741548613691, 526.91671562286535, 0, 0, 1]
+distort_coeffs: [-0.01871543751314814, 0.060011566736044429, -0.0042735757854047039, 0.0021636264421155496, 0]
 
-# 相机同理想情况的偏角: yaw1.44 pitch-7.28 roll0.96 degree
-# 标定板到世界坐标系原点的水平距离: 1.13 m
-# 标定板同竖直摆放时的偏角: yaw7.61 pitch13.92 roll-0.46 degree
-R_camera2gimbal: [-0.027182119030230909, -0.12616154330853446, 0.99163723074269183, -0.99949106557517331, 0.019998323121329122, -0.024853106601381177, -0.016695575474690555, -0.99180811252093692, -0.12664093215554434]
-t_camera2gimbal: [0.13160669975045827, 0.10377721766577375, 0.024908271912914642]
+# 相机同理想情况的偏角: yaw-1.55 pitch1.88 roll-0.58 degree
+# 标定板到世界坐标系原点的水平距离: 1.89 m
+# 标定板同竖直摆放时的偏角: yaw0.44 pitch14.94 roll-0.03 degree
+# R_camera2gimbal: [0.026720298730418812, 0.033113861017628955, 0.9990943388110366, -0.99959110810279173, -0.0092934479199013632, 0.027041605492152676, 0.010180483170769592, -0.99940837700825036, 0.032851997323518164]
+# t_camera2gimbal: [-0.041098967871920619, 0.084275111093168681, 0.13270812750159233]
+
+# 相机同理想情况的偏角: yaw-2.16 pitch2.15 roll-0.93 degree
+R_camera2gimbal: [0.098804797586225623, -0.039947755186193305, 0.99430467605735873, -0.99226253766782069, 0.071537921703336282, 0.1014760173606756, -0.075184229163846567, -0.99663759843483291, -0.032570371061547698]
+t_camera2gimbal: [-0.51596226784770838, -0.23629886964756361, 0.25997675265353731]
 
 #####-----cboard参数-----#####
 quaternion_canid: 0x100
@@ -77,27 +81,26 @@ bullet_speed_canid: 0x101
 send_canid: 0xff
 can_interface: "can0"
 
-#####-----gimbal参数-----#####
-com_port: "/dev/gimbal"
-yaw_kp: 0
-yaw_kd: 0
-pitch_kp: 0
-pitch_kd: 0
+#####-----gimbal参数-----
+com_port: "/dev/ttyACM0"
+# yaw_kp: 0  # 进一步增加yaw轴比例增益，提高响应速度
+# yaw_kd: 0  # 进一步增加yaw轴微分增益，减少剩余震荡
+# pitch_kp: 0  # 进一步增加pitch轴比例增益，原先是0.22
+# pitch_kd: 0  # 进一步增加pitch轴微分增益，原先是0.15
 
 #####-----planner-----#####
-fire_thresh: 0.0035
+fire_thresh: 0.0006  # 当前设置为0.0035弧度（约0.2度）
 
-max_yaw_acc: 50
-Q_yaw: [9e6, 0]
-R_yaw: [1]
-
-max_pitch_acc: 100
-Q_pitch: [9e6, 0]
-R_pitch: [1]
+max_yaw_acc: 60  # 当前设置为60度/秒²
+Q_yaw: [4e6, 6e6]  # 当前位置权重为4e6，速度权重为0
+R_yaw: [1] # 当前设置为0.7
+max_pitch_acc: 52  # 当前设置为100度/秒²
+Q_pitch: [3e6, 2e5]  # 当前位置权重为6e6，速度权重为0
+R_pitch: [1.1]  # 当前设置为0.7                           
 
 #####-----buff_detector参数-----#####
 model: "assets/yolo11_buff_int8.xml"
 
 #####-----buff_aimer参数-----#####
 fire_gap_time: 0.700   # s
-predict_time: 0.120     # s
+predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况调整

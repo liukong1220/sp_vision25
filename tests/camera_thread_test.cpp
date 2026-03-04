@@ -24,7 +24,7 @@
 
 const std::string keys =
   "{help h usage ? |                        | 输出命令行参数说明}"
-  "{@config-path   | configs/ascento.yaml | 位置参数，yaml配置文件路径 }";
+  "{@config-path   | configs/sentry.yaml | 位置参数yaml配置文件路径 }";
 
 tools::OrderedQueue frame_queue;
 

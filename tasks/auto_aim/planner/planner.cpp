@@ -19,7 +19,7 @@ Planner::Planner(const std::string & config_path)
   decision_speed_ = tools::read<double>(yaml, "decision_speed");
   high_speed_delay_time_ = tools::read<double>(yaml, "high_speed_delay_time");
   low_speed_delay_time_ = tools::read<double>(yaml, "low_speed_delay_time");
-
+  
   setup_yaw_solver(config_path);
   setup_pitch_solver(config_path);
 }
@@ -83,6 +83,10 @@ Plan Planner::plan(Target target, double bullet_speed)
   plan.pitch = pitch_solver_->work->x(0, HALF_HORIZON);
   plan.pitch_vel = pitch_solver_->work->x(1, HALF_HORIZON);
   plan.pitch_acc = pitch_solver_->work->u(0, HALF_HORIZON);
+
+  tools::logger()->debug(
+    "yaw: {:.4f}, yaw_vel: {:.4f}, yaw_acc: {:.4f}, pitch: {:.4f}, pitch_vel: {:.4f}, pitch_acc: {:.4f}",
+    plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel, plan.pitch_acc);
 
   auto shoot_offset_ = 2;
   plan.fire =
@@ -178,28 +182,40 @@ Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_sp
 
 Trajectory Planner::get_trajectory(Target & target, double yaw0, double bullet_speed)
 {
-  Trajectory traj;
+    Trajectory traj;
 
-  target.predict(-DT * (HALF_HORIZON + 1));
-  auto yaw_pitch_last = aim(target, bullet_speed);
+    target.predict(-DT * (HALF_HORIZON + 1));
+    auto yaw_pitch_last = aim(target, bullet_speed);
 
-  target.predict(DT);  // [0] = -HALF_HORIZON * DT -> [HHALF_HORIZON] = 0
-  auto yaw_pitch = aim(target, bullet_speed);
-
-  for (int i = 0; i < HORIZON; i++) {
     target.predict(DT);
-    auto yaw_pitch_next = aim(target, bullet_speed);
+    auto yaw_pitch = aim(target, bullet_speed);
 
-    auto yaw_vel = tools::limit_rad(yaw_pitch_next(0) - yaw_pitch_last(0)) / (2 * DT);
-    auto pitch_vel = (yaw_pitch_next(1) - yaw_pitch_last(1)) / (2 * DT);
+    for (int i = 0; i < HORIZON; i++) {
+        target.predict(DT);
+        auto yaw_pitch_next = aim(target, bullet_speed);
 
-    traj.col(i) << tools::limit_rad(yaw_pitch(0) - yaw0), yaw_vel, yaw_pitch(1), pitch_vel;
+        auto yaw_vel = tools::limit_rad(yaw_pitch_next(0) - yaw_pitch_last(0)) / (2 * DT);
+        
+        // 添加转折点检测
+        static double last_yaw_vel = 0;
+        double yaw_acc = (yaw_vel - last_yaw_vel) / DT;
+        last_yaw_vel = yaw_vel;
+        
+        // 如果检测到剧烈加速度变化（转折点）
+        if (std::abs(yaw_acc) > 10.0) {  // 10 rad/s²阈值
+            // 使用更平滑的速度过渡
+            yaw_vel = yaw_vel * 0.7;  // 衰减速度
+        }
+        
+        auto pitch_vel = (yaw_pitch_next(1) - yaw_pitch_last(1)) / (2 * DT);
 
-    yaw_pitch_last = yaw_pitch;
-    yaw_pitch = yaw_pitch_next;
-  }
+        traj.col(i) << tools::limit_rad(yaw_pitch(0) - yaw0), yaw_vel, yaw_pitch(1), pitch_vel;
 
-  return traj;
+        yaw_pitch_last = yaw_pitch;
+        yaw_pitch = yaw_pitch_next;
+    }
+
+    return traj;
 }
 
 }  // namespace auto_aim

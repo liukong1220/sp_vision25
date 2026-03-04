@@ -32,7 +32,6 @@ private:
   {
     std::list<auto_aim::Target> targets_;
     std::chrono::steady_clock::time_point t;
-    // std::function<void()> decide;
     double bullet_speed;
     Eigen::Vector3d gimbal_pos;
   };
@@ -47,6 +46,12 @@ private:
   std::condition_variable cv_;
   std::thread thread_;
   bool stop_, debug_;
+  
+  // 添加新成员变量
+  io::Command last_sent_command_;  // 上一次发送的命令
+  double yaw_threshold_ = 0.2;     // yaw阈值
+  double pitch_threshold_ = 0.2;   // pitch阈值
+  int round_precision_ = 0;        // 四舍五入精度
 
   void generate_command();
 };

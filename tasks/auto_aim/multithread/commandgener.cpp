@@ -1,6 +1,7 @@
 #include "commandgener.hpp"
 
 #include "tools/math_tools.hpp"
+#include "tools/yaml.hpp"  // 添加yaml头文件
 
 namespace auto_aim
 {
@@ -10,8 +11,15 @@ namespace multithread
 CommandGener::CommandGener(
   auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::CBoard & cboard,
   tools::Plotter & plotter, bool debug)
-: shooter_(shooter), aimer_(aimer), cboard_(cboard), plotter_(plotter), stop_(false), debug_(debug)
+: shooter_(shooter), aimer_(aimer), cboard_(cboard), plotter_(plotter), 
+  stop_(false), debug_(debug), last_sent_command_({false, false, 0, 0})
 {
+  // 从配置文件加载阈值参数（假设从aimer或shooter的配置中获取）
+  // 这里简化处理，实际应该从配置文件读取
+  yaw_threshold_ = 0.2;  // 单位：弧度
+  pitch_threshold_ = 0.2; // 单位：弧度
+  round_precision_ = 0;   // 四舍五入到整数
+  
   thread_ = std::thread(&CommandGener::generate_command, this);
 }
 
@@ -54,7 +62,39 @@ void CommandGener::generate_command()
                                    : std::sqrt(
                                        tools::square(input->targets_.front().ekf_x()[0]) +
                                        tools::square(input->targets_.front().ekf_x()[2]));
-      cboard_.send(command);
+      
+      // 实现范围阈值和四舍五入逻辑
+      if (command.control) {
+        // 计算yaw和pitch的变化量
+        double yaw_diff = std::abs(command.yaw - last_sent_command_.yaw);
+        double pitch_diff = std::abs(command.pitch - last_sent_command_.pitch);
+        
+        // 如果变化量小于阈值，进行四舍五入
+        if (yaw_diff < yaw_threshold_) {
+          // 四舍五入到指定精度
+          double multiplier = std::pow(10, round_precision_);
+          command.yaw = std::round(command.yaw * multiplier) / multiplier;
+        }
+        
+        if (pitch_diff < pitch_threshold_) {
+          // 四舍五入到指定精度
+          double multiplier = std::pow(10, round_precision_);
+          command.pitch = std::round(command.pitch * multiplier) / multiplier;
+        }
+        
+        // 只有当命令与上一次发送的命令不同时，才发送新命令
+        if (command.yaw != last_sent_command_.yaw || 
+            command.pitch != last_sent_command_.pitch ||
+            command.shoot != last_sent_command_.shoot) {
+          cboard_.send(command);
+          last_sent_command_ = command;
+        }
+      } else {
+        // 当不控制时，直接发送并更新last_sent_command_
+        cboard_.send(command);
+        last_sent_command_ = command;
+      }
+      
       if (debug_) {
         nlohmann::json data;
         data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);

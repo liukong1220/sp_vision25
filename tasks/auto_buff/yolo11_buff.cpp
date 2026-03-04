@@ -1,6 +1,6 @@
 #include "yolo11_buff.hpp"
 
-const double ConfidenceThreshold = 0.7f;
+const double ConfidenceThreshold = 0.5f;
 const double IouThreshold = 0.4f;
 namespace auto_buff
 {

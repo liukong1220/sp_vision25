@@ -59,45 +59,67 @@ void DM_IMU::init_serial()
 
 void DM_IMU::get_imu_data_thread()
 {
+  // 持续读取IMU数据直到线程停止标志被设置
   while (!stop_thread_) {
+    // 检查串口是否打开，如果没有则记录警告日志
     if (!serial_.isOpen()) {
       tools::logger()->warn("In get_imu_data_thread,imu serial port unopen");
     }
 
+    // 从串口读取数据帧头部的4个字节
     serial_.read((uint8_t *)(&receive_data.FrameHeader1), 4);
 
+    // 验证数据帧头部是否符合预期格式
+    // 检查帧头(0x55)、标志位(0xAA)、从设备ID(0x01)和寄存器地址(0x01)是否正确
     if (
       receive_data.FrameHeader1 == 0x55 && receive_data.flag1 == 0xAA &&
       receive_data.slave_id1 == 0x01 && receive_data.reg_acc == 0x01)
 
     {
+      // 读取剩余的数据帧内容(总共57字节，已读取4字节)
       serial_.read((uint8_t *)(&receive_data.accx_u32), 57 - 4);
 
+      // 验证加速度数据的CRC校验和并解析加速度值
       if (tools::get_crc16((uint8_t *)(&receive_data.FrameHeader1), 16) == receive_data.crc1) {
         data.accx = *((float *)(&receive_data.accx_u32));
         data.accy = *((float *)(&receive_data.accy_u32));
         data.accz = *((float *)(&receive_data.accz_u32));
       }
+      
+      // 验证角速度数据的CRC校验和并解析角速度值
       if (tools::get_crc16((uint8_t *)(&receive_data.FrameHeader2), 16) == receive_data.crc2) {
         data.gyrox = *((float *)(&receive_data.gyrox_u32));
         data.gyroy = *((float *)(&receive_data.gyroy_u32));
         data.gyroz = *((float *)(&receive_data.gyroz_u32));
       }
+      
+      // 验证姿态角数据的CRC校验和并解析欧拉角值
       if (tools::get_crc16((uint8_t *)(&receive_data.FrameHeader3), 16) == receive_data.crc3) {
         data.roll = *((float *)(&receive_data.roll_u32));
         data.pitch = *((float *)(&receive_data.pitch_u32));
         data.yaw = *((float *)(&receive_data.yaw_u32));
+        // 可选的日志输出，用于调试显示当前的姿态角
         // tools::logger()->debug(
         //   "yaw: {:.2f}, pitch: {:.2f}, roll: {:.2f}", static_cast<double>(data.yaw),
         //   static_cast<double>(data.pitch), static_cast<double>(data.roll));
       }
+      
+      // 获取当前时间戳
       auto timestamp = std::chrono::steady_clock::now();
+      
+      // 将欧拉角转换为四元数表示
+      // 使用Z-Y-X旋转顺序：偏航(Yaw) -> 俯仰(Pitch) -> 翻滚(Roll)
       Eigen::Quaterniond q = Eigen::AngleAxisd(data.yaw * M_PI / 180, Eigen::Vector3d::UnitZ()) *
                              Eigen::AngleAxisd(data.pitch * M_PI / 180, Eigen::Vector3d::UnitY()) *
                              Eigen::AngleAxisd(data.roll * M_PI / 180, Eigen::Vector3d::UnitX());
+      
+      // 标准化四元数以确保其为单位四元数
       q.normalize();
+      
+      // 将四元数和时间戳推入队列供其他线程使用
       queue_.push({q, timestamp});
     } else {
+      // 如果数据帧格式不正确，记录信息日志
       tools::logger()->info("[DM_IMU] failed to get correct data");
     }
   }

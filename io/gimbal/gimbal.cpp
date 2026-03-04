@@ -7,6 +7,12 @@
 
 namespace io
 {
+    // 帧率计算相关变量
+  auto frame_start_time = std::chrono::steady_clock::now();
+  int frame_count = 0;
+  double fps = 0.0;
+  auto last_fps_update = std::chrono::steady_clock::now();
+
 // 构造函数：从配置文件初始化云台串口连接并启动读取线程
 Gimbal::Gimbal(const std::string & config_path)
 {
@@ -124,7 +130,6 @@ void Gimbal::send(io::VisionToGimbal VisionToGimbal)
   // 计算CRC16校验和（排除校验和字段本身）
   tx_data_.crc16 = tools::get_crc16(
     reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
-
   try {
     // 通过串口发送控制数据
     serial_.write(reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_));
@@ -145,19 +150,23 @@ void Gimbal::send(
   tx_data_.mode = control ? (fire ? 2 : 1) : 0;
   
   // 设置偏航角相关参数
-  tx_data_.yaw = yaw;           // 目标偏航角（单位：度）
-  tx_data_.yaw_vel = yaw_vel;   // 目标偏航角速度（单位：度/秒）
-  tx_data_.yaw_acc = yaw_acc;   // 目标偏航角加速度（单位：度/秒²）
+  tx_data_.yaw = yaw;           // 目标偏航角（单位：弧度）
+  tx_data_.yaw_vel = yaw_vel;   // 目标偏航角速度（单位：弧度/秒）
+  tx_data_.yaw_acc = yaw_acc;   // 目标偏航角加速度（单位：弧度/秒²）
   
   // 设置俯仰角相关参数
-  tx_data_.pitch = pitch;       // 目标俯仰角（单位：度）
-  tx_data_.pitch_vel = pitch_vel; // 目标俯仰角速度（单位：度/秒）
-  tx_data_.pitch_acc = pitch_acc; // 目标俯仰角加速度（单位：度/秒²）
+  tx_data_.pitch = pitch;       // 目标俯仰角（单位：弧度）
+  tx_data_.pitch_vel = pitch_vel; // 目标俯仰角速度（单位：弧度/秒）
+  tx_data_.pitch_acc = pitch_acc; // 目标俯仰角加速度（单位：弧度/秒²）
   
   // 计算CRC16校验和，确保数据传输的完整性
   // 计算范围不包括crc16字段本身（sizeof(tx_data_) - sizeof(tx_data_.crc16)）
   tx_data_.crc16 = tools::get_crc16(
     reinterpret_cast<uint8_t *>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
+
+  // uint8_t mode_value = tx_data_.mode;
+  // tools::logger()->info("[Gimbal] 发送到下位机 :  yaw: {:.2f}°, pitch: {:.2f}°, mode: {}", 
+  //   yaw, pitch, mode_value);
 
   // 尝试通过串口发送控制数据
   try {
@@ -192,12 +201,11 @@ void Gimbal::read_thread()
   int error_count = 0;
   // 缓冲区用于帧同步
   uint8_t sync_buffer[1];
-  // 数据包大小检测标志
-  bool packet_size_detected = false;
-  size_t expected_packet_size = sizeof(rx_data_); // 初始期望大小
 
   // 主循环：持续读取云台数据直到收到退出信号
   while (!quit_) {
+    // 记录帧开始时间
+    frame_start_time = std::chrono::steady_clock::now();
     // 如果错误计数超过阈值（5000次），执行重连操作
     if (error_count > 5000) {
       error_count = 0;
@@ -215,7 +223,7 @@ void Gimbal::read_thread()
         error_count++;
         continue;
       }
-
+      
       // 检查是否为正确的帧头
       if (sync_buffer[0] == 0x5A) {
         frame_synced = true;
@@ -231,63 +239,17 @@ void Gimbal::read_thread()
     // 记录当前时间戳，用于后续数据同步
     auto t = std::chrono::steady_clock::now();
 
-    // 如果还没有检测到数据包大小，先尝试读取完整数据包进行检测
-    if (!packet_size_detected) {
-      // 尝试读取较大的缓冲区来检测实际数据包大小
-      uint8_t large_buffer[64]; // 足够大的缓冲区
-      large_buffer[0] = 0x5A; // 设置帧头
-      
-      // 尝试读取剩余数据
-      if (read(large_buffer + 1, 63)) {
-        // 分析数据包大小：寻找可能的CRC校验码位置
-        // 从你的cutecom数据看，数据包大小是48字节
-        // 让我们检查48字节位置是否有合理的CRC值
-        size_t test_size = 48;
-        if (test_size <= 64) {
-          // 检查CRC校验
-          if (tools::check_crc16(large_buffer, test_size)) {
-            expected_packet_size = test_size;
-            packet_size_detected = true;
-            tools::logger()->info("[Gimbal] Detected packet size: {} bytes", expected_packet_size);
-            
-            // 将检测到的数据复制到rx_data_
-            if (expected_packet_size <= sizeof(rx_data_)) {
-              memcpy(&rx_data_, large_buffer, expected_packet_size);
-            } else {
-              // 如果检测到的包比预期大，只复制预期大小的部分
-              memcpy(&rx_data_, large_buffer, sizeof(rx_data_));
-            }
-          } else {
-            tools::logger()->warn("[Gimbal] CRC check failed for size {}", test_size);
-          }
-        }
-      }
-      
-      // 如果检测失败，继续使用默认大小
-      if (!packet_size_detected) {
-        tools::logger()->warn("[Gimbal] Packet size detection failed, using default size: {} bytes", expected_packet_size);
-        // 读取剩余数据
-        if (!read(
-              reinterpret_cast<uint8_t *>(&rx_data_) + sizeof(rx_data_.head),
-              expected_packet_size - sizeof(rx_data_.head))) {
-          tools::logger()->warn("[Gimbal] Failed to read remaining {} bytes", expected_packet_size - sizeof(rx_data_.head));
-          error_count++;
-          continue;
-        }
-      }
-    } else {
-      // 已经检测到数据包大小，使用检测到的大小读取
-      if (!read(
-            reinterpret_cast<uint8_t *>(&rx_data_) + sizeof(rx_data_.head),
-            expected_packet_size - sizeof(rx_data_.head))) {
-        tools::logger()->warn("[Gimbal] Failed to read remaining {} bytes", expected_packet_size - sizeof(rx_data_.head));
-        error_count++;
-        continue;
-      }
+    // 读取数据帧的剩余部分（除了头部之外的数据）
+    if (!read(
+          reinterpret_cast<uint8_t *>(&rx_data_) + sizeof(rx_data_.head),
+          sizeof(rx_data_) - sizeof(rx_data_.head))) {
+      tools::logger()->warn("[Gimbal] Failed to read remaining {} bytes of data frame", sizeof(rx_data_) - sizeof(rx_data_.head));
+      error_count++;
+      continue;
     }
 
     // 验证数据帧的CRC校验和是否正确
-    if (!tools::check_crc16(reinterpret_cast<uint8_t *>(&rx_data_), expected_packet_size)) {
+    if (!tools::check_crc16(reinterpret_cast<uint8_t *>(&rx_data_), sizeof(rx_data_))) {
       tools::logger()->warn("[Gimbal] CRC16 check failed. Frame discarded.");
       error_count++;
       continue;
@@ -313,8 +275,23 @@ void Gimbal::read_thread()
     state_.bullet_count = rx_data_.bullet_count; // 子弹计数
 
     // 使用临时变量输出
-    tools::logger()->info("yaw: {:.2f}°, pitch: {:.2f}°\n yaw_vel: {:.2f}°m/s pitch_vel: {:.2f}°m/s\n bullet_speed: {:.2f}m/s bullet_count: {}", 
-      state_.yaw, state_.pitch, state_.yaw_vel, state_.pitch_vel, state_.bullet_speed, state_.bullet_count);
+    // tools::logger()->info("yaw: {:.2f}°, pitch: {:.2f}°\n yaw_vel: {:.2f}°m/s pitch_vel: {:.2f}°m/s\n bullet_speed: {:.2f}m/s bullet_count: {}", 
+    //   state_.yaw, state_.pitch, state_.yaw_vel, state_.pitch_vel, state_.bullet_speed, state_.bullet_count);
+          // 帧率计算
+    frame_count++;
+    auto current_time = std::chrono::steady_clock::now();
+    auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_update).count();
+    
+    // 每秒更新一次帧率并在终端显示
+    
+      fps = frame_count * 1000.0 / time_diff;
+      // 在终端显示帧率（使用fmt库格式化输出）
+      //tools::logger()->info("\nFPS: {:.1f}", fps);
+      std::fflush(stdout);  // 确保立即输出
+      frame_count = 0;
+      last_fps_update = current_time;
+    
+
       
     // 根据接收到的模式值设置云台工作模式
     switch (rx_data_.mode) {

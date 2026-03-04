@@ -16,8 +16,9 @@
 #include "tools/plotter.hpp"
 
 const std::string keys =
-  "{help h usage ? | | 输出命令行参数说明}"
-  "{@config-path   | | yaml配置文件路径 }";
+  "{help h usage ? |                        | 输出命令行参数说明 }"
+  "{@config-path   | configs/sentry.yaml    | yaml配置文件的路径}"
+  "{tradition t    |  false                 | 是否使用传统方法识别}";
 
 int main(int argc, char * argv[])
 {
