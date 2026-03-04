@@ -42,29 +42,6 @@ std::list<Target> Tracker::track(
   // 过滤掉非我方装甲板
   armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
 
-  // --- 新增：前哨站高度补偿逻辑 ---
-  for (auto & armor : armors) {
-    if (armor.name == ArmorName::outpost) {
-      // 1. 获取当前 EKF 追踪的预测角度
-      double predicted_yaw = target_.ekf_x()(6);
-
-      // 2. 计算当前观测到的装甲板相对于预测位置的角度差
-      double armor_yaw = std::atan2(
-        armor.xyz_in_world.y() - target_.ekf_x()(2), armor.xyz_in_world.x() - target_.ekf_x()(0));
-      double diff_yaw = armor_yaw - predicted_yaw;
-
-      // 归一化角度到 [-PI, PI]
-      while (diff_yaw > CV_PI) diff_yaw -= 2 * CV_PI;
-      while (diff_yaw < -CV_PI) diff_yaw += 2 * CV_PI;
-
-      // 3. 确定装甲板索引 (-1, 0, 1)，间隔 120度 (120° = 2*PI/3)
-      int armor_idx = std::round(diff_yaw / (2.0 * CV_PI / 3.0));
-
-      // 4. 执行高度补偿：每级 10.2cm
-      // armor_idx 为 -1, 0, 1, 分别对应 +10.2cm, 0, -10.2cm 的高度补偿
-      armor.xyz_in_world.z() -= armor_idx * 0.102;
-    }
-  }
 
   // 过滤前哨站顶部装甲板
   // armors.remove_if([this](const auto_aim::Armor & a) {
@@ -309,6 +286,30 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
       continue;
 
     solver_.solve(armor);
+
+      // --- 新增：前哨站高度补偿逻辑 ---
+    for (auto & armor : armors) {
+      if (armor.name == ArmorName::outpost) {
+        // 1. 获取当前 EKF 追踪的预测角度
+        double predicted_yaw = target_.ekf_x()(6);
+
+        // 2. 计算当前观测到的装甲板相对于预测位置的角度差
+        double armor_yaw = std::atan2(
+          armor.xyz_in_world.y() - target_.ekf_x()(2), armor.xyz_in_world.x() - target_.ekf_x()(0));
+        double diff_yaw = armor_yaw - predicted_yaw;
+
+        // 归一化角度到 [-PI, PI]
+        while (diff_yaw > CV_PI) diff_yaw -= 2 * CV_PI;
+        while (diff_yaw < -CV_PI) diff_yaw += 2 * CV_PI;
+
+        // 3. 确定装甲板索引 (-1, 0, 1)，间隔 120度 (120° = 2*PI/3)
+        int armor_idx = std::round(diff_yaw / (2.0 * CV_PI / 3.0));
+
+        // 4. 执行高度补偿：每级 10.2cm
+        // armor_idx 为 -1, 0, 1, 分别对应 +10.2cm, 0, -10.2cm 的高度补偿
+        armor.xyz_in_world.z() -= armor_idx * 0.102;
+      }
+    }
 
     target_.update(armor);
   }
