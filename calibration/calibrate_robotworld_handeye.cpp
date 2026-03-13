@@ -1,41 +1,57 @@
 #include <fmt/core.h>
 #include <yaml-cpp/yaml.h>
 
-#include <Eigen/Dense>  // 必须在opencv2/core/eigen.hpp上面
+#include <cmath>
+#include <Eigen/Dense>
 #include <fstream>
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/opencv.hpp>
+
+#include <vector>
 
 #include "tools/img_tools.hpp"
 #include "tools/math_tools.hpp"
 
 const std::string keys =
-  "{help h usage ? |                          | 输出命令行参数说明}"
-  "{config-path c  | configs/calibration.yaml | yaml配置文件路径 }"
-  "{@input-folder  | assets/img_with_q        | 输入文件夹路径   }";
+  "{help h usage ? |                          | print help message }"
+  "{config-path c  | configs/calibration.yaml | path to calibration yaml }"
+  "{@input-folder  | assets/img_with_q        | folder containing image and quaternion pairs }";
 
-std::vector<cv::Point3f> centers_3d(const cv::Size & pattern_size, const float center_distance)
+std::vector<cv::Point3f> centers_3d(const cv::Size & pattern_size, float center_distance)
 {
-  std::vector<cv::Point3f> centers_3d;
+  std::vector<cv::Point3f> points;
+  points.reserve(pattern_size.width * pattern_size.height);
 
   for (int i = 0; i < pattern_size.height; i++) {
     for (int j = 0; j < pattern_size.width; j++) {
       float x = 0;
-      float y = (-j + 0.5 * pattern_size.width) * center_distance;
-      float z = (-i + 0.5 * pattern_size.height) * center_distance;
-      centers_3d.push_back({x, y, z});
+      float y = static_cast<float>((-j + 0.5 * pattern_size.width) * center_distance);
+      float z = static_cast<float>((-i + 0.5 * pattern_size.height) * center_distance);
+      points.push_back({x, y, z});
     }
   }
 
-  return centers_3d;
+  return points;
 }
 
-Eigen::Quaterniond read_q(const std::string & q_path)
+bool read_q(const std::string & q_path, Eigen::Quaterniond & q)
 {
   std::ifstream q_file(q_path);
-  double w, x, y, z;
-  q_file >> w >> x >> y >> z;
-  return {w, x, y, z};
+  if (!q_file.is_open()) {
+    return false;
+  }
+
+  double w = 0, x = 0, y = 0, z = 0;
+  if (!(q_file >> w >> x >> y >> z)) {
+    return false;
+  }
+
+  q = Eigen::Quaterniond(w, x, y, z);
+  if (q.norm() < 1e-8) {
+    return false;
+  }
+  q.normalize();
+  return true;
 }
 
 void load(
@@ -44,7 +60,6 @@ void load(
   std::vector<cv::Mat> & t_world2gimbal_list, std::vector<cv::Mat> & rvecs,
   std::vector<cv::Mat> & tvecs)
 {
-  // 读取yaml参数
   auto yaml = YAML::LoadFile(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
@@ -59,50 +74,53 @@ void load(
   cv::Mat distort_coeffs(distort_coeffs_data);
 
   for (int i = 1; true; i++) {
-    // 读取图片和对应四元数
     auto img_path = fmt::format("{}/{}.jpg", input_folder, i);
     auto q_path = fmt::format("{}/{}.txt", input_folder, i);
     auto img = cv::imread(img_path);
-    Eigen::Quaterniond q = read_q(q_path);
     if (img.empty()) break;
 
-    // 计算云台的欧拉角
+    Eigen::Quaterniond q;
+    if (!read_q(q_path, q)) {
+      fmt::print("[failure] {} (invalid or missing quaternion file)\n", q_path);
+      continue;
+    }
+
     Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
     Eigen::Matrix3d R_gimbal2world =
       R_gimbal2imubody.transpose() * R_imubody2imuabs * R_gimbal2imubody;
     Eigen::Vector3d ypr = tools::eulers(R_gimbal2world, 2, 1, 0) * 57.3;  // degree
 
-    // 在图片上显示云台的欧拉角，用来检验R_gimbal2imubody是否正确
     auto drawing = img.clone();
     tools::draw_text(drawing, fmt::format("yaw   {:.2f}", ypr[0]), {40, 40}, {0, 0, 255});
     tools::draw_text(drawing, fmt::format("pitch {:.2f}", ypr[1]), {40, 80}, {0, 0, 255});
     tools::draw_text(drawing, fmt::format("roll  {:.2f}", ypr[2]), {40, 120}, {0, 0, 255});
 
-    // 识别标定板
     std::vector<cv::Point2f> centers_2d;
-    auto success = cv::findCirclesGrid(img, pattern_size, centers_2d);  // 默认是对称圆点图案
+    auto success = cv::findCirclesGrid(
+      img, pattern_size, centers_2d, cv::CALIB_CB_SYMMETRIC_GRID);
 
-    // 显示识别结果
     cv::drawChessboardCorners(drawing, pattern_size, centers_2d, success);
-    cv::resize(drawing, drawing, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
+    cv::resize(drawing, drawing, {}, 0.5, 0.5);
     cv::imshow("Press any to continue", drawing);
     cv::waitKey(0);
 
-    // 输出识别结果
     fmt::print("[{}] {}\n", success ? "success" : "failure", img_path);
     if (!success) continue;
 
-    // 计算所需的数据
     Eigen::Matrix3d R_world2gimbal = R_gimbal2world.transpose();
     cv::Mat t_world2gimbal = (cv::Mat_<double>(3, 1) << 0, 0, 0);
     cv::Mat R_world2gimbal_cv;
     cv::eigen2cv(R_world2gimbal, R_world2gimbal_cv);
-    cv::Mat rvec, tvec;
-    auto centers_3d_ = centers_3d(pattern_size, center_distance_mm);
-    cv::solvePnP(
-      centers_3d_, centers_2d, camera_matrix, distort_coeffs, rvec, tvec, false, cv::SOLVEPNP_IPPE);
 
-    // 记录所需的数据
+    cv::Mat rvec, tvec;
+    auto points_3d = centers_3d(pattern_size, static_cast<float>(center_distance_mm));
+    auto pnp_ok = cv::solvePnP(
+      points_3d, centers_2d, camera_matrix, distort_coeffs, rvec, tvec, false, cv::SOLVEPNP_IPPE);
+    if (!pnp_ok) {
+      fmt::print("[failure] {} (solvePnP failed)\n", img_path);
+      continue;
+    }
+
     R_world2gimbal_list.emplace_back(R_world2gimbal_cv);
     t_world2gimbal_list.emplace_back(t_world2gimbal);
     rvecs.emplace_back(rvec);
@@ -127,14 +145,15 @@ void print_yaml(
   result << YAML::Newline;
   result << YAML::Newline;
   result << YAML::Comment(fmt::format(
-    "相机同理想情况的偏角: yaw{:.2f} pitch{:.2f} roll{:.2f} degree", camera_ypr[0], camera_ypr[1],
-    camera_ypr[2]));
-  result << YAML::Newline;
-  result << YAML::Comment(fmt::format("标定板到世界坐标系原点的水平距离: {:.2f} m", distance));
+    "camera offset from ideal mount: yaw{:.2f} pitch{:.2f} roll{:.2f} degree", camera_ypr[0],
+    camera_ypr[1], camera_ypr[2]));
   result << YAML::Newline;
   result << YAML::Comment(fmt::format(
-    "标定板同竖直摆放时的偏角: yaw{:.2f} pitch{:.2f} roll{:.2f} degree", board_ypr[0], board_ypr[1],
-    board_ypr[2]));
+    "horizontal distance from board origin to world origin: {:.2f} m", distance));
+  result << YAML::Newline;
+  result << YAML::Comment(fmt::format(
+    "board attitude when it is vertically placed: yaw{:.2f} pitch{:.2f} roll{:.2f} degree",
+    board_ypr[0], board_ypr[1], board_ypr[2]));
   result << YAML::Key << "R_camera2gimbal";
   result << YAML::Value << YAML::Flow << R_camera2gimbal_data;
   result << YAML::Key << "t_camera2gimbal";
@@ -147,7 +166,6 @@ void print_yaml(
 
 int main(int argc, char * argv[])
 {
-  // 读取命令行参数
   cv::CommandLineParser cli(argc, argv, keys);
   if (cli.has("help")) {
     cli.printMessage();
@@ -156,7 +174,6 @@ int main(int argc, char * argv[])
   auto input_folder = cli.get<std::string>(0);
   auto config_path = cli.get<std::string>("config-path");
 
-  // 从输入文件夹中加载标定所需的数据
   std::vector<double> R_gimbal2imubody_data;
   std::vector<cv::Mat> R_world2gimbal_list, t_world2gimbal_list;
   std::vector<cv::Mat> rvecs, tvecs;
@@ -164,16 +181,23 @@ int main(int argc, char * argv[])
     input_folder, config_path, R_gimbal2imubody_data, R_world2gimbal_list, t_world2gimbal_list,
     rvecs, tvecs);
 
-  // 手眼标定
+  if (rvecs.size() < 6) {
+    fmt::print(
+      "Robot-world hand-eye calibration aborted: only {} valid image-q pairs found, at least 6 are required.\n",
+      rvecs.size());
+    return 1;
+  }
+
+  fmt::print("Valid pair count: {}\n", rvecs.size());
+
   cv::Mat R_gimbal2camera, t_gimbal2camera;
   cv::Mat R_world2board, t_world2board;
   cv::calibrateRobotWorldHandEye(
     rvecs, tvecs, R_world2gimbal_list, t_world2gimbal_list, R_world2board, t_world2board,
     R_gimbal2camera, t_gimbal2camera);
-  t_gimbal2camera /= 1e3;  // mm to m
-  t_world2board /= 1e3;    // mm to m
+  t_gimbal2camera /= 1e3;  // mm -> m
+  t_world2board /= 1e3;    // mm -> m
 
-  // 计算所需的数据
   cv::Mat R_camera2gimbal, t_camera2gimbal;
   cv::Mat R_board2world, t_board2world;
   cv::transpose(R_gimbal2camera, R_camera2gimbal);
@@ -181,24 +205,21 @@ int main(int argc, char * argv[])
   t_camera2gimbal = -R_camera2gimbal * t_gimbal2camera;
   t_board2world = -R_board2world * t_world2board;
 
-  // 计算相机同理想情况的偏角
   Eigen::Matrix3d R_camera2gimbal_eigen;
   cv::cv2eigen(R_camera2gimbal, R_camera2gimbal_eigen);
   Eigen::Matrix3d R_gimbal2ideal{{0, -1, 0}, {0, 0, -1}, {1, 0, 0}};
   Eigen::Matrix3d R_camera2ideal = R_gimbal2ideal * R_camera2gimbal_eigen;
   Eigen::Vector3d camera_ypr = tools::eulers(R_camera2ideal, 1, 0, 2) * 57.3;  // degree
 
-  // 计算标定板到世界坐标系原点的水平距离
   auto x = t_board2world.at<double>(0);
   auto y = t_board2world.at<double>(1);
   auto distance = std::sqrt(x * x + y * y);
 
-  // 计算标定板同竖直摆放时的偏角
   Eigen::Matrix3d R_board2world_eigen;
   cv::cv2eigen(R_board2world, R_board2world_eigen);
   Eigen::Vector3d board_ypr = tools::eulers(R_board2world_eigen, 2, 1, 0) * 57.3;  // degree
 
-  // 输出yaml
   print_yaml(
     R_gimbal2imubody_data, R_camera2gimbal, t_camera2gimbal, camera_ypr, distance, board_ypr);
+  return 0;
 }
