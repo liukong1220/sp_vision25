@@ -9,16 +9,18 @@
 #include <opencv2/core/eigen.hpp>
 
 #include "io/camera.hpp"
-#include "io/cboard.hpp"
+#include "io/gimbal/gimbal.hpp"
 #include "tasks/auto_aim/solver.hpp"
 #include "tools/exiter.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 
+using namespace std::chrono_literals;
+
 const std::string keys =
   "{help h usage ? |                     | 输出命令行参数说明}"
   "{config-path c  | configs/handeye.yaml | yaml配置文件路径 }"
-  "{d display      |                     | 显示视频流       }";
+  "{d display      |          display           | 显示视频流       }";
 
 // 世界坐标到像素坐标的转换
 
@@ -39,7 +41,7 @@ int main(int argc, char * argv[])
   auto grid_num = yaml["grid_num"].as<int>();
   auto grid_size = yaml["grid_size"].as<double>();
   auto delay = yaml["delay"].as<int>();
-  io::CBoard cboard(config_path);
+  io::Gimbal gimbal(config_path);
   io::Camera camera(config_path);
   auto_aim::Solver solver(config_path);
 
@@ -55,7 +57,7 @@ int main(int argc, char * argv[])
   }
   while (!exiter.exit()) {
     camera.read(img, t);
-    q = cboard.imu_at(t - 1ms * delay);
+    q = gimbal.q(t - 1ms * delay);
     solver.set_R_gimbal2world(q);
     cv::Mat result = img.clone();
     std::vector<cv::Point2f> projectedPoints = solver.world2pixel(points);

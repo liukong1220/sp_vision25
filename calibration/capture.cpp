@@ -1,33 +1,31 @@
 #include <fmt/core.h>
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <opencv2/opencv.hpp>
-
-#include "io/camera.hpp"
 #include "io/gimbal/gimbal.hpp"
+#include "io/camera.hpp"
+#include "io/cboard.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
-#include "tools/yaml.hpp"
 
 const std::string keys =
-  "{help h usage ?  |                          | print help message }"
-  "{config-path c   | configs/calibration.yaml | path to calibration yaml }"
-  "{output-folder o | assets/img_with_q        | output folder for img and q }";
+  "{help h usage ?  |                          | 输出命令行参数说明}"
+  "{@config-path c  | configs/calibration.yaml | yaml配置文件路径 }"
+  "{output-folder o |      assets/img_with_q   | 输出文件夹路径   }";
 
-void write_q(const std::string & q_path, const Eigen::Quaterniond & q)
+void write_q(const std::string q_path, const Eigen::Quaterniond & q)
 {
   std::ofstream q_file(q_path);
   Eigen::Vector4d xyzw = q.coeffs();
-  // Save quaternion in wxyz order.
+  // 输出顺序为wxyz
   q_file << fmt::format("{} {} {} {}", xyzw[3], xyzw[0], xyzw[1], xyzw[2]);
   q_file.close();
 }
 
 void capture_loop(
-  const std::string & config_path, const std::string & output_folder, const cv::Size & pattern_size)
+  const std::string & config_path, const std::string & output_folder)
 {
   io::Gimbal gimbal(config_path);
   io::Camera camera(config_path);
@@ -39,6 +37,7 @@ void capture_loop(
     camera.read(img, timestamp);
     Eigen::Quaterniond q = gimbal.q(timestamp);
 
+    // 在图像上显示欧拉角，用来判断imuabs系的xyz正方向，同时判断imu是否存在零漂
     auto img_with_ypr = img.clone();
     Eigen::Vector3d zyx = tools::eulers(q, 2, 1, 0) * 57.3;  // degree
     tools::draw_text(img_with_ypr, fmt::format("Yaw {:.2f}", zyx[0]), {40, 40}, {0, 0, 255});
@@ -46,11 +45,11 @@ void capture_loop(
     tools::draw_text(img_with_ypr, fmt::format("Roll {:.2f}", zyx[2]), {40, 120}, {0, 0, 255});
 
     std::vector<cv::Point2f> centers_2d;
-    auto success = cv::findCirclesGrid(
-      img, pattern_size, centers_2d, cv::CALIB_CB_SYMMETRIC_GRID);
-    cv::drawChessboardCorners(img_with_ypr, pattern_size, centers_2d, success);
-    cv::resize(img_with_ypr, img_with_ypr, {}, 0.5, 0.5);
+    auto success = cv::findCirclesGrid(img, cv::Size(10, 7), centers_2d);  // 默认是对称圆点图案
+    cv::drawChessboardCorners(img_with_ypr, cv::Size(10, 7), centers_2d, success);  // 显示识别结果
+    cv::resize(img_with_ypr, img_with_ypr, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
 
+    // 按“s”保存图片和对应四元数，按“q”退出程序
     cv::imshow("Press s to save, q to quit", img_with_ypr);
     auto key = cv::waitKey(1);
     if (key == 'q')
@@ -58,11 +57,7 @@ void capture_loop(
     else if (key != 's')
       continue;
 
-    if (!success) {
-      tools::logger()->warn("Pattern not found, sample not saved.");
-      continue;
-    }
-
+    // 保存图片和四元数
     count++;
     auto img_path = fmt::format("{}/{}.jpg", output_folder, count);
     auto q_path = fmt::format("{}/{}.txt", output_folder, count);
@@ -70,29 +65,29 @@ void capture_loop(
     write_q(q_path, q);
     tools::logger()->info("[{}] Saved in {}", count, output_folder);
   }
+
+  // 离开该作用域时，camera和cboard会自动关闭
 }
 
 int main(int argc, char * argv[])
 {
+  // 读取命令行参数
   cv::CommandLineParser cli(argc, argv, keys);
   if (cli.has("help")) {
     cli.printMessage();
     return 0;
   }
-  auto config_path = cli.get<std::string>("config-path");
+  auto config_path = cli.get<std::string>(0);
   auto output_folder = cli.get<std::string>("output-folder");
 
-  auto yaml = tools::load(config_path);
-  auto pattern_cols = tools::read<int>(yaml, "pattern_cols");
-  auto pattern_rows = tools::read<int>(yaml, "pattern_rows");
-  cv::Size pattern_size(pattern_cols, pattern_rows);
+  // 新建输出文件夹
+  std::filesystem::create_directory(output_folder);
 
-  std::filesystem::create_directories(output_folder);
+  tools::logger()->info("默认标定板尺寸为10列7行");
+  // 主循环，保存图片和对应四元数
+  capture_loop(config_path, output_folder);
 
-  tools::logger()->info("Pattern size: {} x {}", pattern_cols, pattern_rows);
-  capture_loop(config_path, output_folder, pattern_size);
-
-  tools::logger()->warn("Quaternion output order is wxyz");
+  tools::logger()->warn("注意四元数输出顺序为wxyz");
 
   return 0;
 }
