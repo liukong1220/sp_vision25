@@ -51,7 +51,7 @@ private:
   io::Command last_sent_command_;  // 上一次发送的命令
   double yaw_threshold_ = 0.2;     // yaw阈值
   double pitch_threshold_ = 0.2;   // pitch阈值
-  int round_precision_ = 0;        // 四舍五入精度
+  // 移除四舍五入精度变量 int round_precision_ = 0;        // 四舍五入精度
 
   void generate_command();
 };
