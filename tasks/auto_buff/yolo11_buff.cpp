@@ -1,5 +1,7 @@
 #include "yolo11_buff.hpp"
 
+#include "tools/openvino_utils.hpp"
+
 const double ConfidenceThreshold = 0.5f;
 const double IouThreshold = 0.4f;
 namespace auto_buff
@@ -8,10 +10,13 @@ YOLO11_BUFF::YOLO11_BUFF(const std::string & config)
 {
   auto yaml = YAML::LoadFile(config);
   std::string model_path = yaml["model"].as<std::string>();
+  device_ = yaml["device"] ? yaml["device"].as<std::string>() : "AUTO:GPU,CPU";
   model = core.read_model(model_path);
   // printInputAndOutputsInfo(*model);  // 打印模型信息
   /// 载入并编译模型
-  compiled_model = core.compile_model(model, "CPU");
+  compiled_model = tools::ov_utils::compile_model_with_fallback(
+    core, model, device_, "YOLO11_BUFF",
+    ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
   /// 创建推理请求
   infer_request = compiled_model.create_infer_request();
   // 获取模型输入节点
@@ -33,20 +38,7 @@ std::vector<YOLO11_BUFF::Object> YOLO11_BUFF::get_multicandidateboxes(cv::Mat & 
   }
 
   cv::Mat bgr_img = image;
-
-  auto x_scale = static_cast<double>(640) / bgr_img.rows;
-  auto y_scale = static_cast<double>(640) / bgr_img.cols;
-  auto scale = std::min(x_scale, y_scale);
-  auto h = static_cast<int>(bgr_img.rows * scale);
-  auto w = static_cast<int>(bgr_img.cols * scale);
-
-  double factor = scale;  
-
-  // preproces
-  auto input = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
-  auto roi = cv::Rect(0, 0, w, h);
-  cv::resize(bgr_img, input(roi), {w, h});
-  ov::Tensor input_tensor(ov::element::u8, {1, 640, 640, 3}, input.data);
+  const float factor = fill_tensor_data_image(input_tensor, bgr_img);
 
   /// 执行推理计算
   infer_request.infer();
@@ -85,7 +77,7 @@ std::vector<YOLO11_BUFF::Object> YOLO11_BUFF::get_multicandidateboxes(cv::Mat & 
 
       // 获取关键点
       std::vector<float> keypoints;
-      cv::Mat kpts = det_output.col(i).rowRange(NUM_POINTS, 15);
+      cv::Mat kpts = det_output.col(i).rowRange(5, 5 + NUM_POINTS * 2);
       for (int j = 0; j < NUM_POINTS; ++j) {
         const float x = kpts.at<float>(j * 2 + 0, 0) * factor;
         const float y = kpts.at<float>(j * 2 + 1, 0) * factor;

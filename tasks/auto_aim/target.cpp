@@ -283,8 +283,8 @@ bool Target::diverged() const
   auto l_ok = ekf_.x[8] + ekf_.x[9] > 0.10 && ekf_.x[8] + ekf_.x[9] < 0.4;
   
   // 检查参数是否过度收缩或异常（放宽边界条件，避免边界值问题）
-  auto r_too_small = ekf_.x[8] < 0.18;  // 半径r小于18cm，认为过度收缩（从20cm放宽）
-  auto l_abnormal = std::abs(ekf_.x[9]) > 0.25;  // 长短轴差值l绝对值大于25cm，认为异常（从20cm放宽）
+  auto r_too_small = ekf_.x[8] < 0.14;  // 半径r小于18cm，认为过度收缩（从20cm放宽）
+  auto l_abnormal = std::abs(ekf_.x[9]) > 0.4;  // 长短轴差值l绝对值大于25cm，认为异常（从20cm放宽）
   auto h_abnormal = std::abs(ekf_.x[10]) > 0.20;  // 高度差值h绝对值大于20cm，认为异常（从15cm放宽）
 
   // 如果参数在合理范围内且没有过度收缩/异常，返回false（未发散）

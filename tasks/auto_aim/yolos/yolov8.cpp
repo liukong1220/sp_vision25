@@ -11,6 +11,7 @@
 #include "tasks/auto_aim/classifier.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
+#include "tools/openvino_utils.hpp"
 
 namespace auto_aim
 {
@@ -54,8 +55,9 @@ YOLOV8::YOLOV8(const std::string & config_path, bool debug)
 
   // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
   model = ppp.build();
-  compiled_model_ = core_.compile_model(
-    model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  compiled_model_ = tools::ov_utils::compile_model_with_fallback(
+    core_, model, device_, "YOLOV8",
+    ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
 }
 
 std::list<Armor> YOLOV8::detect(const cv::Mat & raw_img, int frame_count)

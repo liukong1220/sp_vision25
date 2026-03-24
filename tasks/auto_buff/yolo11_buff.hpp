@@ -32,6 +32,7 @@ public:
   std::vector<Object> get_onecandidatebox(cv::Mat & image);
 
 private:
+  std::string device_;
   ov::Core core;  // 创建OpenVINO Runtime Core对象
   std::shared_ptr<ov::Model> model;
   ov::CompiledModel compiled_model;

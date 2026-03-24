@@ -2,6 +2,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "tools/openvino_utils.hpp"
+
 namespace auto_aim
 {
 namespace multithread
@@ -34,8 +36,9 @@ MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool d
     .scale(255.0);
 
   model = ppp.build();
-  compiled_model_ = core_.compile_model(
-    model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::THROUGHPUT));
+  compiled_model_ = tools::ov_utils::compile_model_with_fallback(
+    core_, model, device_, "MultiThreadDetector",
+    ov::hint::performance_mode(ov::hint::PerformanceMode::THROUGHPUT));
 
   tools::logger()->info("[MultiThreadDetector] initialized !");
 }

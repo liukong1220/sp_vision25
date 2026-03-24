@@ -1,5 +1,10 @@
 # src 运行入口与文件关系清单
 
+## 0. 相关调参文档
+
+- `docs/MPC_DEBUG_DIFF_STANDARD3_TUNING.md`：`standard3.yaml` 与 `standard_mpc/auto_aim_debug_mpc` 的整体调参说明
+- `docs/offset_delay_mpc.md`：配合 `Ballistic Debug` 窗口使用的 `offset / delay / MPC` 联调指南
+
 ## 1. 先回答你的核心问题：哪个是“最主要运行文件”
 
 结论不是单一文件，而是按机器人形态分组：
