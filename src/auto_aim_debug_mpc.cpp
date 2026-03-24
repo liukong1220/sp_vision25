@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <thread>
@@ -20,16 +22,29 @@
 #include "tools/plotter.hpp"
 #include "tools/trajectory.hpp"
 #include "tools/thread_safe_queue.hpp"
+#include "tools/web_debugger.hpp"
 #include "tools/yaml.hpp"
 
 using namespace std::chrono_literals;
 
 const std::string keys =
   "{help h usage ? |                        | 输出命令行参数说明}"
-  "{@config-path   | configs/standard3.yaml | 位置参数yaml配置文件路径 }";
+  "{@config-path   | configs/standard3.yaml | 位置参数yaml配置文件路径 }"
+  "{show-local     | false                  | 保留本地OpenCV调试窗口(显式传参时覆盖yaml) }"
+  "{disable-web    | false                  | 禁用内置网页调试器(显式传参时覆盖yaml) }"
+  "{web-host       | 0.0.0.0                | 网页调试器绑定地址(显式传参时覆盖yaml) }"
+  "{web-port       | 8090                   | 网页调试器端口(显式传参时覆盖yaml) }"
+  "{web-fps        | 8.0                    | 网页图像刷新帧率(显式传参时覆盖yaml) }"
+  "{web-scale      | 0.7                    | 网页图像缩放系数(显式传参时覆盖yaml) }"
+  "{web-jpeg-quality | 70                   | 网页JPEG质量(30-95, 显式传参时覆盖yaml) }"
+  "{web-client-ttl-ms | 2000                | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }";
 
 double rad2deg(double rad) {
   return rad * 180.0 / M_PI;
+}
+
+double deg2rad(double deg) {
+  return deg * M_PI / 180.0;
 }
 
 namespace
@@ -38,6 +53,7 @@ constexpr double kGravity = 9.7833;
 constexpr double kLightbarLength = 56e-3;
 constexpr double kBigArmorWidth = 230e-3;
 constexpr double kSmallArmorWidth = 135e-3;
+constexpr double kGimbalRadiansSanityThreshold = 4.0 * M_PI;
 
 struct BallisticDiagnostic
 {
@@ -64,6 +80,84 @@ struct BallisticDiagnostic
   double vertical_error = 0.0;
   double total_error = 0.0;
 };
+
+struct NormalizedAngle
+{
+  double raw = 0.0;
+  double rad = 0.0;
+  double deg = 0.0;
+};
+
+enum class GimbalStateUnitMode
+{
+  auto_detect,
+  rad,
+  deg,
+};
+
+struct NormalizedGimbalState
+{
+  bool source_is_degree = false;
+  NormalizedAngle yaw;
+  NormalizedAngle yaw_vel;
+  NormalizedAngle pitch;
+  NormalizedAngle pitch_vel;
+};
+
+NormalizedAngle normalize_angle_value(double raw, bool source_is_degree)
+{
+  NormalizedAngle value;
+  value.raw = raw;
+  if (source_is_degree) {
+    value.deg = raw;
+    value.rad = deg2rad(raw);
+  } else {
+    value.rad = raw;
+    value.deg = rad2deg(raw);
+  }
+  return value;
+}
+
+GimbalStateUnitMode parse_gimbal_state_unit_mode(const std::string & unit)
+{
+  if (unit == "deg" || unit == "degree" || unit == "degrees") {
+    return GimbalStateUnitMode::deg;
+  }
+  if (unit == "rad" || unit == "radian" || unit == "radians") {
+    return GimbalStateUnitMode::rad;
+  }
+  return GimbalStateUnitMode::auto_detect;
+}
+
+NormalizedGimbalState normalize_gimbal_state(
+  const io::GimbalState & gs, GimbalStateUnitMode unit_mode)
+{
+  bool source_is_degree = false;
+  switch (unit_mode) {
+    case GimbalStateUnitMode::deg:
+      source_is_degree = true;
+      break;
+    case GimbalStateUnitMode::rad:
+      source_is_degree = false;
+      break;
+    case GimbalStateUnitMode::auto_detect:
+    default:
+      source_is_degree =
+        std::abs(gs.yaw) > kGimbalRadiansSanityThreshold ||
+        std::abs(gs.pitch) > kGimbalRadiansSanityThreshold ||
+        std::abs(gs.yaw_vel) > kGimbalRadiansSanityThreshold ||
+        std::abs(gs.pitch_vel) > kGimbalRadiansSanityThreshold;
+      break;
+  }
+
+  return {
+    source_is_degree,
+    normalize_angle_value(gs.yaw, source_is_degree),
+    normalize_angle_value(gs.yaw_vel, source_is_degree),
+    normalize_angle_value(gs.pitch, source_is_degree),
+    normalize_angle_value(gs.pitch_vel, source_is_degree),
+  };
+}
 
 double bullet_height(double horizontal_dist, double bullet_speed, double launch_pitch)
 {
@@ -268,14 +362,83 @@ void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag)
                        kLightbarLength * 1000.0),
     {text_rect.x + 390, text_rect.y + 162}, 0.50, cv::Scalar(230, 230, 230));
 }
+
+std::string armor_type_to_string(auto_aim::ArmorType armor_type)
+{
+  switch (armor_type) {
+    case auto_aim::ArmorType::big:
+      return "big";
+    case auto_aim::ArmorType::small:
+      return "small";
+    default:
+      return "unknown";
+  }
+}
+
+std::string armor_name_to_string(auto_aim::ArmorName armor_name)
+{
+  const auto index = static_cast<size_t>(armor_name);
+  if (index < auto_aim::ARMOR_NAMES.size()) return auto_aim::ARMOR_NAMES[index];
+  return "unknown";
+}
+
+int64_t unix_time_ms()
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+           std::chrono::system_clock::now().time_since_epoch())
+    .count();
+}
+
+bool has_cli_option(int argc, char * argv[], const std::string & long_option)
+{
+  const std::string exact = "--" + long_option;
+  const std::string prefix = exact + "=";
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg(argv[i]);
+    if (arg == exact) return true;
+    if (arg.rfind(prefix, 0) == 0) return true;
+  }
+  return false;
+}
+
+nlohmann::json ballistic_to_json(const BallisticDiagnostic & diag)
+{
+  nlohmann::json data;
+  data["valid"] = diag.valid;
+  data["unsolvable"] = diag.unsolvable;
+  data["hit"] = diag.hit;
+  data["fire"] = diag.fire;
+  data["armor_type"] = armor_type_to_string(diag.armor_type);
+  data["bullet_speed_mps"] = diag.bullet_speed;
+  data["yaw_offset_deg"] = rad2deg(diag.yaw_offset);
+  data["pitch_offset_deg"] = rad2deg(diag.pitch_offset);
+  data["target_x_m"] = diag.target_xyz.x();
+  data["target_y_m"] = diag.target_xyz.y();
+  data["target_z_m"] = diag.target_xyz.z();
+  data["target_dist_xy_m"] = diag.target_dist_xy;
+  data["target_dist_3d_m"] = diag.target_dist_3d;
+  data["target_geo_yaw_deg"] = rad2deg(diag.target_geo_yaw);
+  data["target_geo_pitch_deg"] = rad2deg(diag.target_geo_pitch);
+  data["required_cmd_yaw_deg"] = rad2deg(diag.required_cmd_yaw);
+  data["required_cmd_pitch_deg"] = rad2deg(diag.required_cmd_pitch);
+  data["command_yaw_deg"] = rad2deg(diag.command_yaw);
+  data["command_pitch_deg"] = rad2deg(diag.command_pitch);
+  data["yaw_residual_deg"] = rad2deg(diag.yaw_residual);
+  data["pitch_residual_deg"] = rad2deg(diag.pitch_residual);
+  data["lateral_error_mm"] = diag.lateral_error * 1000.0;
+  data["vertical_error_mm"] = diag.vertical_error * 1000.0;
+  data["total_error_mm"] = diag.total_error * 1000.0;
+  return data;
+}
 }  // namespace
 
-int main(int argc, char * argv[]) {
+int main(int argc, char * argv[])
+{
   tools::Exiter exiter;
   tools::Plotter plotter;
 
   cv::CommandLineParser cli(argc, argv, keys);
-  auto config_path = cli.get<std::string>(0);
+  const auto config_path = cli.get<std::string>(0);
   if (cli.has("help") || config_path.empty()) {
     cli.printMessage();
     return 0;
@@ -284,6 +447,58 @@ int main(int argc, char * argv[]) {
   const auto yaml = tools::load(config_path);
   const double yaw_offset = tools::read<double>(yaml, "yaw_offset") / 57.3;
   const double pitch_offset = tools::read<double>(yaml, "pitch_offset") / 57.3;
+  const auto gimbal_state_unit_mode = parse_gimbal_state_unit_mode(
+    tools::read_or<std::string>(yaml, "gimbal_state_unit", "auto"));
+  const bool show_local = has_cli_option(argc, argv, "show-local") ?
+    cli.get<bool>("show-local") : tools::read_or<bool>(yaml, "show_local", false);
+  const bool disable_web = has_cli_option(argc, argv, "disable-web") ?
+    cli.get<bool>("disable-web") : tools::read_or<bool>(yaml, "disable_web", false);
+  const std::string web_host = has_cli_option(argc, argv, "web-host") ?
+    cli.get<std::string>("web-host") : tools::read_or<std::string>(yaml, "web_host", "0.0.0.0");
+  const uint16_t web_port = static_cast<uint16_t>(std::clamp(
+    has_cli_option(argc, argv, "web-port") ?
+      cli.get<int>("web-port") : tools::read_or<int>(yaml, "web_port", 8090),
+    1, 65535));
+  const double web_fps = std::clamp(
+    has_cli_option(argc, argv, "web-fps") ?
+      cli.get<double>("web-fps") : tools::read_or<double>(yaml, "web_fps", 8.0),
+    1.0, 60.0);
+  const double display_scale = std::clamp(
+    has_cli_option(argc, argv, "web-scale") ?
+      cli.get<double>("web-scale") : tools::read_or<double>(yaml, "web_scale", 0.7),
+    0.25, 1.0);
+  const int web_jpeg_quality = std::clamp(
+    has_cli_option(argc, argv, "web-jpeg-quality") ?
+      cli.get<int>("web-jpeg-quality") : tools::read_or<int>(yaml, "web_jpeg_quality", 70),
+    30, 95);
+  const auto web_client_ttl = std::chrono::milliseconds(std::max(
+    250,
+    has_cli_option(argc, argv, "web-client-ttl-ms") ?
+      cli.get<int>("web-client-ttl-ms") : tools::read_or<int>(yaml, "web_client_ttl_ms", 2000)));
+  const auto web_frame_interval =
+    std::chrono::milliseconds(static_cast<int>(1000.0 / web_fps));
+  const auto web_state_interval = 80ms;
+
+  std::unique_ptr<tools::WebDebugger> web_debugger;
+  if (!disable_web) {
+    web_debugger = std::make_unique<tools::WebDebugger>(web_host, web_port);
+    if (web_debugger->good()) {
+      tools::logger()->info(
+        "Web debugger listening on {}:{} (open {})", web_host, web_port, web_debugger->url());
+      tools::logger()->info(
+        "Web debugger config: fps={} scale={} jpeg={} ttl={}ms", web_fps, display_scale,
+        web_jpeg_quality, web_client_ttl.count());
+    } else {
+      tools::logger()->warn("Web debugger disabled because the server failed to start.");
+      web_debugger.reset();
+    }
+  }
+
+  if (show_local) {
+    tools::logger()->info("Local OpenCV debug windows enabled.");
+  } else if (!web_debugger) {
+    tools::logger()->warn("Both local window and web debugger are disabled.");
+  }
 
   io::Gimbal gimbal(config_path);
   io::Camera camera(config_path);
@@ -298,64 +513,108 @@ int main(int argc, char * argv[]) {
   target_queue.push(std::nullopt);
 
   std::atomic<bool> quit = false;
-  // 添加原子变量来存储开火状态，确保线程安全
-  std::atomic<bool> allow_fire = false;
-  
+  std::mutex command_state_mutex;
+  nlohmann::json command_state = nlohmann::json::object();
+
   auto plan_thread = std::thread([&]() {
     auto t0 = std::chrono::steady_clock::now();
     uint16_t last_bullet_count = 0;
 
     while (!quit) {
-      auto target = target_queue.front();
-      auto gs = gimbal.state();
-      auto plan = planner.plan(target, gs.bullet_speed);
+      const auto target = target_queue.front();
+      const auto gs = gimbal.state();
+      const auto normalized_gimbal = normalize_gimbal_state(gs, gimbal_state_unit_mode);
+      const auto plan = planner.plan(target, gs.bullet_speed);
 
       gimbal.send(
         plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel,
         plan.pitch_acc);
 
-      // 更新开火状态
-      allow_fire = plan.fire;
-      
-      auto fired = gs.bullet_count > last_bullet_count;
+      const bool fired = gs.bullet_count > last_bullet_count;
       last_bullet_count = gs.bullet_count;
 
       nlohmann::json data;
       data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
-
-      data["gimbal_yaw"] = gs.yaw;
-      data["gimbal_yaw_vel"] = gs.yaw_vel;
-      data["gimbal_pitch"] = gs.pitch;
-      data["gimbal_pitch_vel"] = gs.pitch_vel;
-
+      data["gimbal_yaw"] = normalized_gimbal.yaw.deg;
+      data["gimbal_yaw_vel"] = normalized_gimbal.yaw_vel.deg;
+      data["gimbal_pitch"] = normalized_gimbal.pitch.deg;
+      data["gimbal_pitch_vel"] = normalized_gimbal.pitch_vel.deg;
       data["target_yaw"] = rad2deg(plan.target_yaw);
       data["target_pitch"] = rad2deg(plan.target_pitch);
-
       data["plan_yaw"] = rad2deg(plan.yaw);
       data["plan_yaw_vel"] = rad2deg(plan.yaw_vel);
       data["plan_yaw_acc"] = rad2deg(plan.yaw_acc);
-
       data["plan_pitch"] = rad2deg(plan.pitch);
       data["plan_pitch_vel"] = rad2deg(plan.pitch_vel);
       data["plan_pitch_acc"] = rad2deg(plan.pitch_acc);
-
       data["fire"] = plan.fire ? 1 : 0;
       data["fired"] = fired ? 1 : 0;
 
-      if (target.has_value()) {
-        data["target_z"] = target->ekf_x()[4];   //z
-        data["target_vz"] = target->ekf_x()[5];  //vz
-        data["target_h"] = target->ekf_x()[10];  // 高低装甲板高度差估计
-      }
+      nlohmann::json snapshot;
+      snapshot["has_target"] = target.has_value();
+      snapshot["fire"] = plan.fire;
+      snapshot["fired"] = fired;
+      snapshot["gimbal_source_unit"] = normalized_gimbal.source_is_degree ? "deg" : "rad";
+      snapshot["gimbal_yaw_raw"] = normalized_gimbal.yaw.raw;
+      snapshot["gimbal_yaw_deg"] = normalized_gimbal.yaw.deg;
+      snapshot["gimbal_yaw_rad"] = normalized_gimbal.yaw.rad;
+      snapshot["gimbal_pitch_raw"] = normalized_gimbal.pitch.raw;
+      snapshot["gimbal_pitch_deg"] = normalized_gimbal.pitch.deg;
+      snapshot["gimbal_pitch_rad"] = normalized_gimbal.pitch.rad;
+      snapshot["gimbal_yaw_vel_raw"] = normalized_gimbal.yaw_vel.raw;
+      snapshot["gimbal_yaw_vel_deg"] = normalized_gimbal.yaw_vel.deg;
+      snapshot["gimbal_yaw_vel_rad"] = normalized_gimbal.yaw_vel.rad;
+      snapshot["gimbal_pitch_vel_raw"] = normalized_gimbal.pitch_vel.raw;
+      snapshot["gimbal_pitch_vel_deg"] = normalized_gimbal.pitch_vel.deg;
+      snapshot["gimbal_pitch_vel_rad"] = normalized_gimbal.pitch_vel.rad;
+      snapshot["target_yaw_deg"] = rad2deg(plan.target_yaw);
+      snapshot["target_yaw_rad"] = plan.target_yaw;
+      snapshot["target_pitch_deg"] = rad2deg(plan.target_pitch);
+      snapshot["target_pitch_rad"] = plan.target_pitch;
+      snapshot["plan_yaw_deg"] = rad2deg(plan.yaw);
+      snapshot["plan_yaw_rad"] = plan.yaw;
+      snapshot["plan_pitch_deg"] = rad2deg(plan.pitch);
+      snapshot["plan_pitch_rad"] = plan.pitch;
+      snapshot["plan_yaw_vel_deg"] = rad2deg(plan.yaw_vel);
+      snapshot["plan_yaw_vel_rad"] = plan.yaw_vel;
+      snapshot["plan_pitch_vel_deg"] = rad2deg(plan.pitch_vel);
+      snapshot["plan_pitch_vel_rad"] = plan.pitch_vel;
+      snapshot["plan_yaw_acc_deg"] = rad2deg(plan.yaw_acc);
+      snapshot["plan_yaw_acc_rad"] = plan.yaw_acc;
+      snapshot["plan_pitch_acc_deg"] = rad2deg(plan.pitch_acc);
+      snapshot["plan_pitch_acc_rad"] = plan.pitch_acc;
+      snapshot["bullet_speed_mps"] = gs.bullet_speed;
 
       if (target.has_value()) {
+        data["target_z"] = target->ekf_x()[4];
+        data["target_vz"] = target->ekf_x()[5];
+        data["target_h"] = target->ekf_x()[10];
         data["w"] = target->ekf_x()[7];
+
+        snapshot["target_z_m"] = target->ekf_x()[4];
+        snapshot["target_vz_mps"] = target->ekf_x()[5];
+        snapshot["target_h_m"] = target->ekf_x()[10];
+        snapshot["target_w_rad_s"] = target->ekf_x()[7];
       } else {
         data["w"] = 0.0;
+        snapshot["target_z_m"] = nullptr;
+        snapshot["target_vz_mps"] = nullptr;
+        snapshot["target_h_m"] = nullptr;
+        snapshot["target_w_rad_s"] = nullptr;
       }
+
       data["planner_selected_armor"] = planner.debug_armor_id;
       data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
       data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
+
+      snapshot["selected_armor"] = planner.debug_armor_id;
+      snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
+      snapshot["spin_gate"] = planner.debug_used_spin_gate;
+
+      {
+        std::lock_guard<std::mutex> lock(command_state_mutex);
+        command_state = std::move(snapshot);
+      }
 
       plotter.plot(data);
 
@@ -366,20 +625,22 @@ int main(int argc, char * argv[]) {
   cv::Mat img;
   std::chrono::steady_clock::time_point t;
   cv::Mat ballistic_panel(460, 840, CV_8UC3);
+  auto last_web_frame_time = std::chrono::steady_clock::now() - web_frame_interval;
+  auto last_web_state_time = std::chrono::steady_clock::now() - web_state_interval;
 
   while (!exiter.exit()) {
     camera.read(img, t);
-    auto q = gimbal.q(t);
+    const auto q = gimbal.q(t);
 
     solver.set_R_gimbal2world(q);
     auto armors = yolo.detect(img);
     auto targets = tracker.track(armors, t);
-    auto gs = gimbal.state();
+    const auto gs = gimbal.state();
+
     std::optional<auto_aim::Target> current_target;
-    if (!targets.empty()) {
-      current_target = targets.front();
-    }
-    auto current_plan = debug_planner.plan(current_target, gs.bullet_speed);
+    if (!targets.empty()) current_target = targets.front();
+
+    const auto current_plan = debug_planner.plan(current_target, gs.bullet_speed);
     BallisticDiagnostic ballistic_diag;
     if (current_target.has_value() && current_plan.control) {
       ballistic_diag = build_ballistic_diagnostic(
@@ -392,211 +653,271 @@ int main(int argc, char * argv[]) {
     else
       target_queue.push(std::nullopt);
 
-    if (!targets.empty()) {
-      auto target = targets.front();
+    const double latency_ms =
+      tools::delta_time(std::chrono::steady_clock::now(), t) * 1000.0;
+    const double current_w = current_target.has_value() ? current_target->ekf_x()[7] : 0.0;
+    const double current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
 
-      // 当前帧target更新后
-      std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
-      int armor_idx = 0;
-      for (const Eigen::Vector4d & xyza : armor_xyza_list) {
-        auto image_points =
-          solver.reproject_armor(xyza.head(3), xyza[3], target.armor_type, target.name);
-        tools::draw_points(img, image_points, {0, 255, 0});
-        if (image_points.empty()) {
+    nlohmann::json latest_command_state;
+    {
+      std::lock_guard<std::mutex> lock(command_state_mutex);
+      latest_command_state = command_state;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool need_web_frame =
+      web_debugger && web_debugger->has_active_client(web_client_ttl) &&
+      (now - last_web_frame_time >= web_frame_interval);
+    const bool need_visual_output = show_local || need_web_frame;
+
+    if (web_debugger && now - last_web_state_time >= web_state_interval) {
+      nlohmann::json web_state;
+      web_state["server"]["unix_ms"] = unix_time_ms();
+      web_state["frame"]["latency_ms"] = latency_ms;
+      web_state["frame"]["image_width"] = img.cols;
+      web_state["frame"]["image_height"] = img.rows;
+      web_state["preview"]["has_target"] = current_target.has_value();
+      web_state["preview"]["fire"] = current_plan.fire;
+      web_state["preview"]["target_name"] =
+        current_target.has_value() ? armor_name_to_string(current_target->name) : "none";
+      web_state["preview"]["armor_type"] =
+        current_target.has_value() ? armor_type_to_string(current_target->armor_type) : "none";
+      web_state["preview"]["target_yaw_deg"] = rad2deg(current_plan.target_yaw);
+      web_state["preview"]["target_yaw_rad"] = current_plan.target_yaw;
+      web_state["preview"]["target_pitch_deg"] = rad2deg(current_plan.target_pitch);
+      web_state["preview"]["target_pitch_rad"] = current_plan.target_pitch;
+      web_state["preview"]["plan_yaw_deg"] = rad2deg(current_plan.yaw);
+      web_state["preview"]["plan_yaw_rad"] = current_plan.yaw;
+      web_state["preview"]["plan_pitch_deg"] = rad2deg(current_plan.pitch);
+      web_state["preview"]["plan_pitch_rad"] = current_plan.pitch;
+      if (current_target.has_value()) {
+        web_state["preview"]["target_x_m"] = debug_planner.debug_xyza[0];
+        web_state["preview"]["target_y_m"] = debug_planner.debug_xyza[1];
+        web_state["preview"]["target_z_m"] = debug_planner.debug_xyza[2];
+      } else {
+        web_state["preview"]["target_x_m"] = nullptr;
+        web_state["preview"]["target_y_m"] = nullptr;
+        web_state["preview"]["target_z_m"] = nullptr;
+      }
+      web_state["planner"]["selected_armor"] = debug_planner.debug_armor_id;
+      web_state["planner"]["spin_gate"] = debug_planner.debug_used_spin_gate;
+      web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
+      web_state["planner"]["w_rad_s"] = current_w;
+      web_state["planner"]["h_m"] = current_h;
+      web_state["ballistic"] = ballistic_to_json(ballistic_diag);
+      web_state["command"] = latest_command_state;
+      web_debugger->update_state(web_state);
+      last_web_state_time = now;
+    }
+
+    if (need_visual_output) {
+      cv::Mat annotated_img = img.clone();
+
+      if (current_target.has_value()) {
+        const auto & target = *current_target;
+
+        std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
+        int armor_idx = 0;
+        for (const Eigen::Vector4d & xyza : armor_xyza_list) {
+          auto image_points =
+            solver.reproject_armor(xyza.head(3), xyza[3], target.armor_type, target.name);
+          tools::draw_points(annotated_img, image_points, {0, 255, 0});
+          if (image_points.empty()) {
+            ++armor_idx;
+            continue;
+          }
+
+          float min_x = image_points.front().x;
+          float max_y = image_points.front().y;
+          for (const auto & pt : image_points) {
+            min_x = std::min(min_x, pt.x);
+            max_y = std::max(max_y, pt.y);
+          }
+
+          int text_x = static_cast<int>(min_x);
+          int text_y = static_cast<int>(max_y) + 22;
+          text_x = std::max(0, std::min(text_x, annotated_img.cols - 220));
+          text_y = std::max(30, std::min(text_y, annotated_img.rows - 130));
+
+          const std::vector<std::string> armor_lines = {
+            fmt::format("armor:{}", armor_idx),
+            fmt::format("yaw: {:.1f}", rad2deg(xyza[3])),
+            fmt::format("x: {:.2f}", xyza[1]),
+            fmt::format("y: {:.2f}", xyza[0]),
+            fmt::format("z: {:.2f}", xyza[2]),
+          };
+          const double font_scale_local = 0.50;
+          const int line_gap = 22;
+          for (size_t line_i = 0; line_i < armor_lines.size(); ++line_i) {
+            cv::Point org(text_x, text_y + static_cast<int>(line_i) * line_gap);
+            cv::putText(
+              annotated_img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX,
+              font_scale_local, cv::Scalar(0, 0, 0), 3);
+            cv::putText(
+              annotated_img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX,
+              font_scale_local, cv::Scalar(255, 0, 255), 2);
+          }
           ++armor_idx;
-          continue;
         }
 
-        // 在每个装甲板正下方绘制解算结果: yaw, x, y, z
+        auto target_future = target;
+        constexpr int kRawTrajSteps = 18;
+        constexpr double kRawTrajDt = 0.03;
+        constexpr double kArrowMinPixelStep = 8.0;
+        std::vector<cv::Point> raw_traj_centers;
+        std::vector<int> raw_traj_ids;
+        raw_traj_centers.reserve(kRawTrajSteps);
+        raw_traj_ids.reserve(kRawTrajSteps);
 
-        float min_x = image_points.front().x;
-        float max_y = image_points.front().y;
-        for (const auto & pt : image_points) {
-          min_x = std::min(min_x, pt.x);
-          max_y = std::max(max_y, pt.y);
-        }
+        for (int step = 0; step < kRawTrajSteps; ++step) {
+          const auto future_selection = debug_planner.preview_aim_selection(target_future);
+          if (!future_selection.valid) break;
 
-        int text_x = static_cast<int>(min_x);
-        int text_y = static_cast<int>(max_y) + 22;
-        text_x = std::max(0, std::min(text_x, img.cols - 220));
-        text_y = std::max(30, std::min(text_y, img.rows - 130));
+          auto pred_points = solver.reproject_armor(
+            future_selection.xyza.head(3), future_selection.xyza[3], target.armor_type,
+            target.name);
+          if (!pred_points.empty()) {
+            cv::Point2f center(0.0f, 0.0f);
+            for (const auto & pt : pred_points) {
+              center.x += pt.x;
+              center.y += pt.y;
+            }
+            center.x /= static_cast<float>(pred_points.size());
+            center.y /= static_cast<float>(pred_points.size());
 
-        // 竖排显示每个装甲板的解算值，使用高对比颜色（洋红）并加黑色描边
-        std::vector<std::string> armor_lines = {
-          fmt::format("armor:{}", armor_idx),
-          fmt::format("yaw: {:.1f}", rad2deg(xyza[3])),
-          fmt::format("x: {:.2f}", xyza[1]),
-          fmt::format("y: {:.2f}", xyza[0]),
-          fmt::format("z: {:.2f}", xyza[2]),
-        };
-        const double font_scale_local = 0.50;
-        const int line_gap = 22;
-        for (size_t line_i = 0; line_i < armor_lines.size(); ++line_i) {
-          cv::Point org(text_x, text_y + static_cast<int>(line_i) * line_gap);
-          cv::putText(
-            img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX, font_scale_local,
-            cv::Scalar(0, 0, 0), 3);
-          cv::putText(
-            img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX, font_scale_local,
-            cv::Scalar(255, 0, 255), 2);
-        }
-        ++armor_idx;
-      }
-
-      // 预测装甲板转换轨迹：
-      // 这里不再用“最近装甲板”做预览，而是复用 Planner 的选板逻辑，
-      // 这样画面中的切板箭头才会和真正下发给云台的板号保持一致。
-      auto target_future = target;
-      constexpr int kRawTrajSteps = 18;
-      constexpr double kRawTrajDt = 0.03;
-      constexpr double kArrowMinPixelStep = 8.0;
-      std::vector<cv::Point> raw_traj_centers;
-      std::vector<int> raw_traj_ids;
-      raw_traj_centers.reserve(kRawTrajSteps);
-      raw_traj_ids.reserve(kRawTrajSteps);
-
-      for (int step = 0; step < kRawTrajSteps; ++step) {
-        const auto future_selection = debug_planner.preview_aim_selection(target_future);
-        if (!future_selection.valid) break;
-
-        auto pred_points = solver.reproject_armor(
-          future_selection.xyza.head(3), future_selection.xyza[3], target.armor_type, target.name);
-        if (!pred_points.empty()) {
-          cv::Point2f center(0.0f, 0.0f);
-          for (const auto & pt : pred_points) {
-            center.x += pt.x;
-            center.y += pt.y;
+            raw_traj_centers.emplace_back(
+              static_cast<int>(center.x), static_cast<int>(center.y));
+            raw_traj_ids.push_back(future_selection.armor_id);
           }
-          center.x /= static_cast<float>(pred_points.size());
-          center.y /= static_cast<float>(pred_points.size());
 
-          raw_traj_centers.emplace_back(static_cast<int>(center.x), static_cast<int>(center.y));
-          raw_traj_ids.push_back(future_selection.armor_id);
+          target_future.predict(kRawTrajDt);
         }
 
-        target_future.predict(kRawTrajDt);
-      }
+        std::vector<cv::Point> traj_centers;
+        std::vector<int> traj_ids;
+        if (!raw_traj_centers.empty()) {
+          traj_centers.push_back(raw_traj_centers.front());
+          traj_ids.push_back(raw_traj_ids.front());
 
-      std::vector<cv::Point> traj_centers;
-      std::vector<int> traj_ids;
-      if (!raw_traj_centers.empty()) {
-        traj_centers.push_back(raw_traj_centers.front());
-        traj_ids.push_back(raw_traj_ids.front());
-
-        for (size_t i = 1; i < raw_traj_centers.size(); ++i) {
-          const bool switched = raw_traj_ids[i] != traj_ids.back();
-          const double pixel_step = cv::norm(raw_traj_centers[i] - traj_centers.back());
-          const bool is_last = i + 1 == raw_traj_centers.size();
-          if (switched || pixel_step >= kArrowMinPixelStep || is_last) {
-            traj_centers.push_back(raw_traj_centers[i]);
-            traj_ids.push_back(raw_traj_ids[i]);
+          for (size_t i = 1; i < raw_traj_centers.size(); ++i) {
+            const bool switched = raw_traj_ids[i] != traj_ids.back();
+            const double pixel_step = cv::norm(raw_traj_centers[i] - traj_centers.back());
+            const bool is_last = i + 1 == raw_traj_centers.size();
+            if (switched || pixel_step >= kArrowMinPixelStep || is_last) {
+              traj_centers.push_back(raw_traj_centers[i]);
+              traj_ids.push_back(raw_traj_ids[i]);
+            }
           }
         }
-      }
 
-      for (size_t i = 0; i < traj_centers.size(); ++i) {
-        cv::circle(img, traj_centers[i], 3, cv::Scalar(0, 0, 0), -1, cv::LINE_AA);
-        cv::circle(img, traj_centers[i], 2, cv::Scalar(255, 255, 0), -1, cv::LINE_AA);
-      }
+        for (size_t i = 0; i < traj_centers.size(); ++i) {
+          cv::circle(annotated_img, traj_centers[i], 3, cv::Scalar(0, 0, 0), -1, cv::LINE_AA);
+          cv::circle(
+            annotated_img, traj_centers[i], 2, cv::Scalar(255, 255, 0), -1, cv::LINE_AA);
+        }
 
-      for (size_t i = 1; i < traj_centers.size(); ++i) {
-        const bool switched = traj_ids[i] != traj_ids[i - 1];
-        const cv::Scalar traj_color = switched ? cv::Scalar(0, 165, 255) : cv::Scalar(255, 255, 0);
+        for (size_t i = 1; i < traj_centers.size(); ++i) {
+          const bool switched = traj_ids[i] != traj_ids[i - 1];
+          const cv::Scalar traj_color =
+            switched ? cv::Scalar(0, 165, 255) : cv::Scalar(255, 255, 0);
 
-        cv::arrowedLine(
-          img, traj_centers[i - 1], traj_centers[i], cv::Scalar(0, 0, 0), 5, cv::LINE_AA, 0, 0.32);
-        cv::arrowedLine(
-          img, traj_centers[i - 1], traj_centers[i], traj_color, 2, cv::LINE_AA, 0, 0.32);
+          cv::arrowedLine(
+            annotated_img, traj_centers[i - 1], traj_centers[i], cv::Scalar(0, 0, 0), 5,
+            cv::LINE_AA, 0, 0.32);
+          cv::arrowedLine(
+            annotated_img, traj_centers[i - 1], traj_centers[i], traj_color, 2, cv::LINE_AA, 0,
+            0.32);
 
-        if (switched) {
+          if (switched) {
+            cv::putText(
+              annotated_img, "switch", traj_centers[i] + cv::Point(6, -6),
+              cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 165, 255), 1);
+          }
+        }
+
+        if (!traj_centers.empty()) {
           cv::putText(
-            img, "switch", traj_centers[i] + cv::Point(6, -6), cv::FONT_HERSHEY_SIMPLEX, 0.45,
-            cv::Scalar(0, 165, 255), 1);
+            annotated_img, "pred traj", traj_centers.front() + cv::Point(8, -10),
+            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 0), 2);
+        }
+
+        if (current_plan.control) {
+          const Eigen::Vector4d aim_xyza = debug_planner.debug_xyza;
+          auto image_points = solver.reproject_armor(
+            aim_xyza.head(3), aim_xyza[3], target.armor_type, target.name);
+          tools::draw_points(annotated_img, image_points, {0, 0, 255});
         }
       }
 
-      if (!traj_centers.empty()) {
+      cv::Mat display_img;
+      cv::resize(annotated_img, display_img, {}, display_scale, display_scale);
+
+      const int font_face = cv::FONT_HERSHEY_SIMPLEX;
+      const double font_scale = 0.4;
+      const cv::Scalar color(0, 255, 255);
+      const int thickness = 1;
+
+      if (current_plan.fire) {
+        const std::string fire_text = "fire!";
+        int fire_baseline = 0;
+        const cv::Size fire_size =
+          cv::getTextSize(fire_text, cv::FONT_HERSHEY_SIMPLEX, 1.0, 2, &fire_baseline);
+        const cv::Point fire_org(
+          (display_img.cols - fire_size.width) / 2, fire_size.height + 10);
         cv::putText(
-          img, "pred traj", traj_centers.front() + cv::Point(8, -10), cv::FONT_HERSHEY_SIMPLEX,
-          0.5, cv::Scalar(255, 255, 0), 2);
+          display_img, fire_text, fire_org, cv::FONT_HERSHEY_SIMPLEX, 1.0,
+          cv::Scalar(0, 0, 255), 2);
       }
 
-      if (current_plan.control) {
-        Eigen::Vector4d aim_xyza = debug_planner.debug_xyza;
-        auto image_points =
-          solver.reproject_armor(aim_xyza.head(3), aim_xyza[3], target.armor_type, target.name);
-        tools::draw_points(img, image_points, {0, 0, 255});
+      const std::string latency_info = fmt::format("latency: {:.2f} ms", latency_ms);
+      int latency_baseline = 0;
+      const cv::Size latency_size =
+        cv::getTextSize(latency_info, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &latency_baseline);
+      const cv::Point latency_org(
+        display_img.cols - latency_size.width - 10, latency_size.height + 10);
+      cv::putText(
+        display_img, latency_info, latency_org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+        cv::Scalar(0, 255, 255), 1);
+
+      const int info_x = 12;
+      const int info_y = 20;
+      const int info_line_gap = 18;
+      const std::vector<std::string> planner_lines = {
+        fmt::format("armor_id: {}", debug_planner.debug_armor_id),
+        fmt::format("spin_gate: {}", debug_planner.debug_used_spin_gate ? "on" : "off"),
+        fmt::format("delay: {:.1f} ms", debug_planner.debug_delay_time * 1000.0),
+        fmt::format("w: {:.2f} rad/s", current_w),
+        fmt::format("h: {:.3f} m", current_h),
+      };
+      for (size_t i = 0; i < planner_lines.size(); ++i) {
+        const cv::Point org(info_x, info_y + static_cast<int>(i) * info_line_gap);
+        cv::putText(
+          display_img, planner_lines[i], org, font_face, font_scale, cv::Scalar(0, 0, 0),
+          thickness + 2);
+        cv::putText(display_img, planner_lines[i], org, font_face, font_scale, color, thickness);
+      }
+
+      draw_ballistic_panel(ballistic_panel, ballistic_diag);
+
+      if (need_web_frame && web_debugger) {
+        web_debugger->update_main_frame(display_img, web_jpeg_quality);
+        web_debugger->update_ballistic_frame(ballistic_panel, web_jpeg_quality);
+        last_web_frame_time = now;
+      }
+
+      if (show_local) {
+        cv::imshow("Auto Aim Debug", display_img);
+        cv::imshow("Ballistic Debug", ballistic_panel);
+        const auto key = cv::waitKey(1);
+        if (key == 'q') break;
       }
     }
-    
-    // 创建一个新的图像来显示信息
-    cv::Mat display_img;
-    cv::resize(img, display_img, {}, 0.7, 0.7);  // 显示时缩小图片尺寸
-
-    // 在图像上绘制文本信息
-    int baseline = 0;
-    int font_face = cv::FONT_HERSHEY_SIMPLEX;
-    double font_scale = 0.4;
-    cv::Scalar color = cv::Scalar(0, 255, 255);  // 黄色
-    int thickness = 1;
-    
-
-    // 画面中心上方显示开火提示（仅可开火时显示）
-    if (current_plan.fire) {
-      std::string fire_text = "fire!";
-      int fire_baseline = 0;
-      cv::Size fire_size =
-        cv::getTextSize(fire_text, cv::FONT_HERSHEY_SIMPLEX, 1.0, 2, &fire_baseline);
-      cv::Point fire_org((display_img.cols - fire_size.width) / 2, fire_size.height + 10);
-      cv::putText(
-        display_img, fire_text, fire_org, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
-    }
-
-    // 右上角显示当前端到端延迟（从图像时间戳到当前显示）
-    double latency_ms = tools::delta_time(std::chrono::steady_clock::now(), t) * 1000.0;
-    std::string latency_info = fmt::format("latency: {:.2f} ms", latency_ms);
-    int latency_baseline = 0;
-    cv::Size latency_size =
-      cv::getTextSize(latency_info, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &latency_baseline);
-    cv::Point latency_org(display_img.cols - latency_size.width - 10, latency_size.height + 10);
-    cv::putText(
-      display_img, latency_info, latency_org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-      cv::Scalar(0, 255, 255), 1);
-
-    // 左上角直接显示 MPC 当前真正使用的诊断量。
-    // 这几项就是现场判断“切错板 / 提前量过大 / 高低板高度差漂移”的最快入口。
-    int info_x = 12;
-    int info_y = 20;
-    const int info_line_gap = 18;
-    const auto current_w = current_target.has_value() ? current_target->ekf_x()[7] : 0.0;
-    const auto current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
-    const std::vector<std::string> planner_lines = {
-      fmt::format("armor_id: {}", debug_planner.debug_armor_id),
-      fmt::format("spin_gate: {}", debug_planner.debug_used_spin_gate ? "on" : "off"),
-      fmt::format("delay: {:.1f} ms", debug_planner.debug_delay_time * 1000.0),
-      fmt::format("w: {:.2f} rad/s", current_w),
-      fmt::format("h: {:.3f} m", current_h),
-    };
-    for (size_t i = 0; i < planner_lines.size(); ++i) {
-      cv::Point org(info_x, info_y + static_cast<int>(i) * info_line_gap);
-      cv::putText(
-        display_img, planner_lines[i], org, font_face, font_scale, cv::Scalar(0, 0, 0),
-        thickness + 2);
-      cv::putText(
-        display_img, planner_lines[i], org, font_face, font_scale, color, thickness);
-    }
-
-    draw_ballistic_panel(ballistic_panel, ballistic_diag);
-
-    cv::imshow("Auto Aim Debug", display_img);  // 单一窗口显示所有信息
-    cv::imshow("Ballistic Debug", ballistic_panel);
-    auto key = cv::waitKey(1); 
-    if (key == 'q') break; 
   }
 
   quit = true;
   if (plan_thread.joinable()) plan_thread.join();
   gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
+  if (show_local) cv::destroyAllWindows();
 
   return 0;
 }

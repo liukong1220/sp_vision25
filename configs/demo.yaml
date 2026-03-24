@@ -119,3 +119,13 @@ aim_time: 0.150         # s
 wait_time: 0.300        # s
 command_fire_gap: 0.080 # s
 predict_time: 0.150     # s
+
+#####-----web_debugger参数-----#####
+show_local: false
+disable_web: false
+web_host: "0.0.0.0"
+web_port: 8090
+web_fps: 8.0
+web_scale: 0.7
+web_jpeg_quality: 70
+web_client_ttl_ms: 2000

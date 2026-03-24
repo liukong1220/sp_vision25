@@ -28,6 +28,13 @@ inline T read(const YAML::Node & yaml, const std::string & key)
   exit(1);
 }
 
+template <typename T>
+inline T read_or(const YAML::Node & yaml, const std::string & key, const T & default_value)
+{
+  if (yaml[key]) return yaml[key].as<T>();
+  return default_value;
+}
+
 }  // namespace tools
 
 #endif  // TOOLS__YAML_HPP

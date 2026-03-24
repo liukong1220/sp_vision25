@@ -7,6 +7,7 @@ add_library(tools OBJECT
     img_tools.cpp
     math_tools.cpp
     plotter.cpp
+    web_debugger.cpp
     trajectory.cpp
     recorder.cpp
     logger.cpp
