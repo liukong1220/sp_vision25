@@ -744,7 +744,6 @@ std::string WebDebugger::index_html()
     <section class="panel hero">
       <div>
         <h1>Artisans战队<br />自瞄网页调试器</h1>
-        <p>保留现场调试节奏，拆成两个更聚焦的页面：一页看主图像和弹道，另一页看主图像和紧凑曲线。主画面优先级更高，曲线区收紧，减少“图被挤小”的问题。</p>
       </div>
       <div class="status-grid">
         <div class="status-chip">
@@ -814,7 +813,7 @@ std::string WebDebugger::index_html()
 
       <section class="panel charts-panel">
         <div class="panel-head">
-          <h2>紧凑曲线</h2>
+          <h2>曲线调节</h2>
           <div class="meta" id="curve-meta">angles in rad</div>
         </div>
         <div class="charts-grid">
