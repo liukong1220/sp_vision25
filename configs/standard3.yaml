@@ -1,4 +1,4 @@
-enemy_color: "red"
+#enemy_color: "red"
 # enemy_color: "blue"
 
 # #####-----神经网络参数-----#####
@@ -107,8 +107,8 @@ enemy_color: "red"
 # fire_gap_time: 0.700   # s
 # predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况调整
 
-enemy_color: "red"
-#enemy_color: "blue"
+#enemy_color: "red"
+enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -148,10 +148,10 @@ outpost_max_temp_lost_count: 75
 #####-----aimer参数----
 yaw_offset: -2.59
 pitch_offset: 1.47
-comming_angle: 60
-leaving_angle: 25
+comming_angle: 55
+leaving_angle: 20
 decision_speed: 8
-high_speed_delay_time: 0.07  # 略微减少高速延迟，进一步提高响应速度 
+high_speed_delay_time: 0.056  # 略微减少高速延迟，进一步提高响应速度 
 low_speed_delay_time: 0.10  # 略微减少低速延迟
 
 #####-----shooter参数-----#####
@@ -226,3 +226,9 @@ web_fps: 30.0
 web_scale: 0.8
 web_jpeg_quality: 55
 web_client_ttl_ms: 1000
+
+#####-----debug_record参数-----#####
+record_raw_video: false
+record_debug_video: false
+record_debug_fps: 30.0
+record_debug_dir: "records"

@@ -125,7 +125,13 @@ show_local: false
 disable_web: false
 web_host: "0.0.0.0"
 web_port: 8090
-web_fps: 8.0
+web_fps: 45.0
 web_scale: 0.7
 web_jpeg_quality: 70
 web_client_ttl_ms: 2000
+
+#####-----debug_record参数-----#####
+record_raw_video: false
+record_debug_video: false
+record_debug_fps: 30.0
+record_debug_dir: "records"

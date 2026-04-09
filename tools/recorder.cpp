@@ -10,25 +10,28 @@
 
 namespace tools
 {
-Recorder::Recorder(double fps) : init_(false), fps_(fps), queue_(1), stop_thread_(false)
+Recorder::Recorder(double fps, const std::string & output_dir, const std::string & file_prefix)
+: init_(false),
+  stop_thread_(false),
+  fps_(fps),
+  output_dir_(output_dir.empty() ? "records" : output_dir),
+  file_prefix_(file_prefix),
+  queue_(128)
 {
   start_time_ = std::chrono::steady_clock::now();
   last_time_ = start_time_;
 
-  auto folder_path = "records";
-  auto file_name = fmt::format("{:%Y-%m-%d_%H-%M-%S}", std::chrono::system_clock::now());
-  text_path_ = fmt::format("{}/{}.txt", folder_path, file_name);
-  video_path_ = fmt::format("{}/{}.avi", folder_path, file_name);
-
-  std::filesystem::create_directory(folder_path);
+  std::filesystem::create_directories(output_dir_);
+  const auto stem = build_record_stem();
+  text_path_ = fmt::format("{}/{}.txt", output_dir_, stem);
+  video_path_ = fmt::format("{}/{}.avi", output_dir_, stem);
 }
 
 Recorder::~Recorder()
 {
   stop_thread_ = true;
-  // 退出时给队列中额外推入一个空帧，避免pop一直等待
   queue_.push({cv::Mat::zeros(0, 0, 0), {0, 0, 0, 0}, std::chrono::steady_clock::now()});
-  if (saving_thread_.joinable()) saving_thread_.join();  // 等待视频保存线程结束
+  if (saving_thread_.joinable()) saving_thread_.join();
 
   if (!init_) return;
   text_writer_.close();
@@ -39,30 +42,36 @@ void Recorder::save_to_file()
 {
   while (!stop_thread_) {
     FrameData frame;
-    queue_.pop(frame);  // 从队列中取出帧数据
+    queue_.pop(frame);
     if (frame.img.empty()) {
       tools::logger()->debug("Recorder received empty img. Skip this frame.");
       continue;
     }
-    // 写入视频文件
+
     video_writer_.write(frame.img);
 
-    // 写入文本文件（输出顺序为wxyz）
-    Eigen::Vector4d xyzw = frame.q.coeffs();
-    auto since_begin = tools::delta_time(frame.timestamp, start_time_);
+    const Eigen::Vector4d xyzw = frame.q.coeffs();
+    const auto since_begin = tools::delta_time(frame.timestamp, start_time_);
     text_writer_ << fmt::format(
       "{} {} {} {} {}\n", since_begin, xyzw[3], xyzw[0], xyzw[1], xyzw[2]);
   }
 }
+
+const std::string & Recorder::video_path() const { return video_path_; }
+
+const std::string & Recorder::text_path() const { return text_path_; }
 
 void Recorder::record(
   const cv::Mat & img, const Eigen::Quaterniond & q,
   const std::chrono::steady_clock::time_point & timestamp)
 {
   if (img.empty()) return;
-  if (!init_) init(img);
+  if (!init_) {
+    init(img);
+    if (!init_) return;
+  }
 
-  auto since_last = tools::delta_time(timestamp, last_time_);
+  const auto since_last = tools::delta_time(timestamp, last_time_);
   if (since_last < 1.0 / fps_) return;
 
   last_time_ = timestamp;
@@ -72,10 +81,39 @@ void Recorder::record(
 void Recorder::init(const cv::Mat & img)
 {
   text_writer_.open(text_path_);
-  auto fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+  const auto fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
   video_writer_ = cv::VideoWriter(video_path_, fourcc, fps_, img.size());
-  saving_thread_ = std::thread(&Recorder::save_to_file, this);  // 启动保存线程
+  if (!text_writer_.is_open()) {
+    tools::logger()->error("Recorder failed to open text file: {}", text_path_);
+    return;
+  }
+  if (!video_writer_.isOpened()) {
+    tools::logger()->error("Recorder failed to open video file: {}", video_path_);
+    text_writer_.close();
+    return;
+  }
+
+  saving_thread_ = std::thread(&Recorder::save_to_file, this);
   init_ = true;
+  tools::logger()->info("Recorder saving video to {}", video_path_);
+  tools::logger()->info("Recorder saving pose data to {}", text_path_);
+}
+
+std::string Recorder::build_record_stem() const
+{
+  const auto timestamp = fmt::format("{:%Y-%m-%d_%H-%M}", std::chrono::system_clock::now());
+  const std::string prefix = file_prefix_.empty() ? "" : file_prefix_ + "_";
+  const std::string base_stem = prefix + timestamp;
+
+  std::string stem = base_stem;
+  int index = 1;
+  while (
+    std::filesystem::exists(fmt::format("{}/{}.avi", output_dir_, stem)) ||
+    std::filesystem::exists(fmt::format("{}/{}.txt", output_dir_, stem)))
+  {
+    stem = fmt::format("{}_{:02}", base_stem, index++);
+  }
+  return stem;
 }
 
 }  // namespace tools

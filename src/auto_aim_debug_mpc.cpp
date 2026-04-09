@@ -20,6 +20,7 @@
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
+#include "tools/recorder.hpp"
 #include "tools/trajectory.hpp"
 #include "tools/thread_safe_queue.hpp"
 #include "tools/web_debugger.hpp"
@@ -37,7 +38,11 @@ const std::string keys =
   "{web-fps        | 8.0                    | 网页图像刷新帧率(显式传参时覆盖yaml) }"
   "{web-scale      | 0.7                    | 网页图像缩放系数(显式传参时覆盖yaml) }"
   "{web-jpeg-quality | 70                   | 网页JPEG质量(30-95, 显式传参时覆盖yaml) }"
-  "{web-client-ttl-ms | 2000                | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }";
+  "{web-client-ttl-ms | 2000                | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }"
+  "{record-raw-video | false                | 录制原始相机画面(显式传参时覆盖yaml) }"
+  "{record-debug-video | false              | 录制主调试画面(显式传参时覆盖yaml) }"
+  "{record-debug-fps | 30.0                 | 调试录制帧率(显式传参时覆盖yaml) }"
+  "{record-debug-dir | records              | 调试录制输出目录(显式传参时覆盖yaml) }";
 
 double rad2deg(double rad) {
   return rad * 180.0 / M_PI;
@@ -475,6 +480,17 @@ int main(int argc, char * argv[])
     250,
     has_cli_option(argc, argv, "web-client-ttl-ms") ?
       cli.get<int>("web-client-ttl-ms") : tools::read_or<int>(yaml, "web_client_ttl_ms", 2000)));
+  const bool record_raw_video = has_cli_option(argc, argv, "record-raw-video") ?
+    cli.get<bool>("record-raw-video") : tools::read_or<bool>(yaml, "record_raw_video", false);
+  const bool record_debug_video = has_cli_option(argc, argv, "record-debug-video") ?
+    cli.get<bool>("record-debug-video") : tools::read_or<bool>(yaml, "record_debug_video", false);
+  const double record_debug_fps = std::clamp(
+    has_cli_option(argc, argv, "record-debug-fps") ?
+      cli.get<double>("record-debug-fps") : tools::read_or<double>(yaml, "record_debug_fps", 30.0),
+    1.0, 120.0);
+  const std::string record_debug_dir = has_cli_option(argc, argv, "record-debug-dir") ?
+    cli.get<std::string>("record-debug-dir") :
+    tools::read_or<std::string>(yaml, "record_debug_dir", "records");
   const auto web_frame_interval =
     std::chrono::milliseconds(static_cast<int>(1000.0 / web_fps));
   const auto web_state_interval = 80ms;
@@ -498,6 +514,21 @@ int main(int argc, char * argv[])
     tools::logger()->info("Local OpenCV debug windows enabled.");
   } else if (!web_debugger) {
     tools::logger()->warn("Both local window and web debugger are disabled.");
+  }
+
+  std::unique_ptr<tools::Recorder> raw_recorder;
+  std::unique_ptr<tools::Recorder> debug_recorder;
+  if (record_raw_video) {
+    raw_recorder = std::make_unique<tools::Recorder>(
+      record_debug_fps, record_debug_dir, "auto_aim_debug_mpc_raw");
+    tools::logger()->info(
+      "Raw recording enabled: fps={} dir={}", record_debug_fps, record_debug_dir);
+  }
+  if (record_debug_video) {
+    debug_recorder = std::make_unique<tools::Recorder>(
+      record_debug_fps, record_debug_dir, "auto_aim_debug_mpc_debug");
+    tools::logger()->info(
+      "Debug recording enabled: fps={} dir={}", record_debug_fps, record_debug_dir);
   }
 
   io::Gimbal gimbal(config_path);
@@ -631,6 +662,9 @@ int main(int argc, char * argv[])
   while (!exiter.exit()) {
     camera.read(img, t);
     const auto q = gimbal.q(t);
+    if (raw_recorder) {
+      raw_recorder->record(img, q, t);
+    }
 
     solver.set_R_gimbal2world(q);
     auto armors = yolo.detect(img);
@@ -668,7 +702,7 @@ int main(int argc, char * argv[])
     const bool need_web_frame =
       web_debugger && web_debugger->has_active_client(web_client_ttl) &&
       (now - last_web_frame_time >= web_frame_interval);
-    const bool need_visual_output = show_local || need_web_frame;
+    const bool need_visual_output = show_local || need_web_frame || debug_recorder != nullptr;
 
     if (web_debugger && now - last_web_state_time >= web_state_interval) {
       nlohmann::json web_state;
@@ -898,6 +932,10 @@ int main(int argc, char * argv[])
       }
 
       draw_ballistic_panel(ballistic_panel, ballistic_diag);
+
+      if (debug_recorder) {
+        debug_recorder->record(display_img, q, t);
+      }
 
       if (need_web_frame && web_debugger) {
         web_debugger->update_main_frame(display_img, web_jpeg_quality);
