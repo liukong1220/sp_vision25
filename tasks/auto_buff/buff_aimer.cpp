@@ -3,12 +3,13 @@
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/trajectory.hpp"
+#include "tools/yaml.hpp"
 
 namespace auto_buff
 {
 Aimer::Aimer(const std::string & config_path)
 {
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
   yaw_offset_ = yaml["yaw_offset"].as<double>() / 57.3;      // degree to rad
   pitch_offset_ = yaml["pitch_offset"].as<double>() / 57.3;  // degree to rad
   fire_gap_time_ = yaml["fire_gap_time"].as<double>();

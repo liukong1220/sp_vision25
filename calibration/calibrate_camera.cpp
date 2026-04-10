@@ -5,6 +5,8 @@
 #include <opencv2/opencv.hpp>
 
 #include "tools/img_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/yaml.hpp"
 
 const std::string keys =
   "{help h usage ? |                          | 输出命令行参数说明}"
@@ -28,7 +30,7 @@ void load(
   std::vector<std::vector<cv::Point2f>> & img_points)
 {
   // 读取yaml参数
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
   auto center_distance_mm = yaml["center_distance_mm"].as<double>();
@@ -94,6 +96,11 @@ int main(int argc, char * argv[])
   }
   auto input_folder = cli.get<std::string>(0);
   auto config_path = cli.get<std::string>("config-path");
+
+  // 这里把命令行里的相对路径提前解析成运行时绝对路径，
+  // 这样无论是从源码目录、工作区根目录，还是 `ros2 run` 启动都能找到同一份资源。
+  input_folder = tools::resolve_runtime_path_string(input_folder);
+  config_path = tools::resolve_config_path_string(config_path);
 
   // 从输入文件夹中加载标定所需的数据
   cv::Size img_size;

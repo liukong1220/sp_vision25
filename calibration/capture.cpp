@@ -9,6 +9,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 
 const std::string keys =
   "{help h usage ?  |                          | 输出命令行参数说明}"
@@ -80,8 +81,16 @@ int main(int argc, char * argv[])
   auto config_path = cli.get<std::string>(0);
   auto output_folder = cli.get<std::string>("output-folder");
 
+  // 标定输出是用户生成数据，不适合写回安装空间。
+  // 因此这里把相对输出目录显式落到“当前执行目录”下，绝对路径则保持不变。
+  const auto output_folder_path =
+    std::filesystem::path(output_folder).is_absolute() ?
+    std::filesystem::path(output_folder) :
+    std::filesystem::absolute(output_folder);
+  output_folder = output_folder_path.string();
+
   // 新建输出文件夹
-  std::filesystem::create_directory(output_folder);
+  std::filesystem::create_directories(output_folder_path);
 
   tools::logger()->info("默认标定板尺寸为10列7行");
   // 主循环，保存图片和对应四元数

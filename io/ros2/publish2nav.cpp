@@ -1,47 +1,54 @@
 #include "publish2nav.hpp"
 
-#include <Eigen/Dense>
-#include <chrono>
 #include <memory>
-#include <thread>
-
-#include "tools/logger.hpp"
 
 namespace io
 {
 
-Publish2Nav::Publish2Nav() : Node("auto_aim_target_pos_publisher")
+Publish2Nav::Publish2Nav() : Node("vision_target_publisher")
 {
-  publisher_ = this->create_publisher<std_msgs::msg::String>("auto_aim_target_pos", 10);
+  // 统一把视觉对外接口收敛到 `vision/target`，
+  // 这样行为树、调试脚本和 rviz/ros2 topic 都只需要盯一个话题。
+  publisher_ = this->create_publisher<sp_msgs::msg::VisionTargetMsg>("vision/target", 10);
 
-  RCLCPP_INFO(this->get_logger(), "auto_aim_target_pos_publisher node initialized.");
+  RCLCPP_INFO(this->get_logger(), "vision_target_publisher node initialized.");
 }
 
 Publish2Nav::~Publish2Nav()
 {
-  RCLCPP_INFO(this->get_logger(), "auto_aim_target_pos_publisher node shutting down.");
+  RCLCPP_INFO(this->get_logger(), "vision_target_publisher node shutting down.");
 }
 
-void Publish2Nav::send_data(const Eigen::Vector4d & target_pos)
+void Publish2Nav::send_data(const VisionTargetState & data)
 {
-  // 创建消息
-  auto message = std::make_shared<std_msgs::msg::String>();
+  // 这里把内部结构体显式展开成 ROS 消息，
+  // 目的是让每个字段都能在 topic echo 里直观看见，方便比赛现场调试。
+  sp_msgs::msg::VisionTargetMsg message;
+  message.timestamp = this->now();
+  message.tracking = data.tracking;
+  message.nav_hold = data.nav_hold;
+  message.fire_permitted = data.fire_permitted;
+  message.target_id = data.target_id;
+  message.suggested_goal_index = data.suggested_goal_index;
+  message.confidence = static_cast<float>(data.confidence);
+  message.target_distance = static_cast<float>(data.target_distance);
+  message.target_yaw = static_cast<float>(data.target_yaw);
+  message.target_pitch = static_cast<float>(data.target_pitch);
 
-  // 将 Eigen::Vector3d 数据转换为字符串并存储在消息中
-  message->data = std::to_string(target_pos[0]) + "," + std::to_string(target_pos[1]) + "," +
-                  std::to_string(target_pos[2]) + "," + std::to_string(target_pos[3]);
+  message.target_position_gimbal.x = data.target_position_gimbal.x();
+  message.target_position_gimbal.y = data.target_position_gimbal.y();
+  message.target_position_gimbal.z = data.target_position_gimbal.z();
 
-  // 发布消息
-  publisher_->publish(*message);
+  message.target_position_map.x = data.target_position_map.x();
+  message.target_position_map.y = data.target_position_map.y();
+  message.target_position_map.z = data.target_position_map.z();
 
-  // RCLCPP_INFO(
-  //   this->get_logger(), "auto_aim_target_pos_publisher node sent message: '%s'",
-  //   message->data.c_str());
+  publisher_->publish(message);
 }
 
 void Publish2Nav::start()
 {
-  RCLCPP_INFO(this->get_logger(), "auto_aim_target_pos_publisher node starting to spin...");
+  RCLCPP_INFO(this->get_logger(), "vision_target_publisher node starting to spin...");
   rclcpp::spin(this->shared_from_this());
 }
 

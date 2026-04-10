@@ -8,6 +8,8 @@
 
 #include "tools/img_tools.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/yaml.hpp"
 
 const std::string keys =
   "{help h usage ? |                          | 输出命令行参数说明}"
@@ -45,7 +47,7 @@ void load(
   std::vector<cv::Mat> & tvecs)
 {
   // 读取yaml参数
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
   auto center_distance_mm = yaml["center_distance_mm"].as<double>();
@@ -155,6 +157,10 @@ int main(int argc, char * argv[])
   }
   auto input_folder = cli.get<std::string>(0);
   auto config_path = cli.get<std::string>("config-path");
+
+  // 统一解析运行时路径，保证 `colcon build` 后通过安装空间启动时也能正确定位数据。
+  input_folder = tools::resolve_runtime_path_string(input_folder);
+  config_path = tools::resolve_config_path_string(config_path);
 
   // 从输入文件夹中加载标定所需的数据
   std::vector<double> R_gimbal2imubody_data;

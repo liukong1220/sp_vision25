@@ -4,13 +4,14 @@
 #include <yaml-cpp/yaml.h>
 
 #include "tools/logger.hpp"
+#include "tools/path.hpp"
 
 namespace tools
 {
 inline YAML::Node load(const std::string & path)
 {
   try {
-    return YAML::LoadFile(path);
+    return YAML::LoadFile(resolve_config_path_string(path));
   } catch (const YAML::BadFile & e) {
     logger()->error("[YAML] Failed to load file: {}", e.what());
     exit(1);

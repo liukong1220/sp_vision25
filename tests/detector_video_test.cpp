@@ -7,6 +7,8 @@
 #include "tasks/auto_aim/yolo.hpp"
 #include "tools/exiter.hpp"
 #include "tools/img_tools.hpp"
+#include "tools/logger.hpp"
+#include "tools/path.hpp"
 #include "tools/plotter.hpp"
 
 const std::string keys =
@@ -34,7 +36,14 @@ int main(int argc, char * argv[])
   tools::Exiter exiter;
   tools::Plotter plotter;
 
+  // 视频检测测试既可能读包内 demo，也可能读用户自己的录像，
+  // 因此这里统一按运行时资源路径解析。
+  video_path = tools::resolve_runtime_path_string(video_path);
   cv::VideoCapture video(video_path);
+  if (!video.isOpened()) {
+    tools::logger()->error("无法打开检测测试视频: {}", video_path);
+    return 1;
+  }
 
   auto_aim::Detector detector(config_path);
   auto_aim::YOLO yolo(config_path);

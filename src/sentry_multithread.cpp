@@ -116,9 +116,9 @@ int main(int argc, char * argv[])
     cboard.send(command);
 
     /// ROS2通信
-    Eigen::Vector4d target_info = decider.get_target_info(armors, targets);
-
-    ros2.publish(target_info);
+    // 多线程入口同样走统一封装，避免单线程 / 多线程版本的导航建议点不一致。
+    const auto target_info = decider.get_target_info(armors, targets);
+    ros2.publish(decider.build_vision_target_state(command, target_info));
   }
 
   return 0;

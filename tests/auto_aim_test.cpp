@@ -13,14 +13,15 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 #include "tools/plotter.hpp"
 
 const std::string keys =
   "{help h usage ? |                   | 输出命令行参数说明 }"
-  "{config-path c  | configs/standard3.yaml | yaml配置文件的路径}"
+  "{config-path c  | configs/demo.yaml | yaml配置文件的路径}"
   "{start-index s  | 0                 | 视频起始帧下标    }"
   "{end-index e    | 0                 | 视频结束帧下标    }"
-  "{@input-path    | assets/demo/test.mp4 | avi和txt文件的路径}";
+  "{@input-path    | assets/demo/demo  | avi和txt文件的路径}";
 
 int main(int argc, char * argv[])
 {
@@ -38,10 +39,17 @@ int main(int argc, char * argv[])
   tools::Plotter plotter;
   tools::Exiter exiter;
 
+  // demo 录像通常使用包内自带资源，因此这里对相对路径做统一解析，
+  // 这样离线测试也能直接通过 `ros2 run sp_vision25 auto_aim_test` 调起。
+  input_path = tools::resolve_runtime_prefix_string(input_path, {".avi", ".txt"});
   auto video_path = fmt::format("{}.avi", input_path);
   auto text_path = fmt::format("{}.txt", input_path);
   cv::VideoCapture video(video_path);
   std::ifstream text(text_path);
+  if (!video.isOpened() || !text.is_open()) {
+    tools::logger()->error("无法打开自瞄离线测试输入: {} / {}", video_path, text_path);
+    return 1;
+  }
 
   auto_aim::YOLO yolo(config_path);
   auto_aim::Solver solver(config_path);

@@ -14,6 +14,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 #include "tools/plotter.hpp"
 
 const std::string keys =
@@ -39,10 +40,17 @@ int main(int argc, char * argv[])
   tools::Plotter plotter;
   tools::Exiter exiter;
 
+  // 离线打符测试和自瞄测试一致，统一解析录像基路径，
+  // 这样包安装后也能直接复用录制数据做回归验证。
+  input_path = tools::resolve_runtime_prefix_string(input_path, {".avi", ".txt"});
   auto video_path = fmt::format("{}.avi", input_path);
   auto text_path = fmt::format("{}.txt", input_path);
   cv::VideoCapture video(video_path);
   std::ifstream text(text_path);
+  if (!video.isOpened() || !text.is_open()) {
+    tools::logger()->error("无法打开打符离线测试输入: {} / {}", video_path, text_path);
+    return 1;
+  }
 
   auto_buff::Buff_Detector detector(config_path);
   auto_buff::Solver solver(config_path);

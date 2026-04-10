@@ -1,6 +1,7 @@
 #include <fmt/format.h>
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -10,6 +11,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 
 // 定义命令行参数
 const std::string keys =
@@ -37,10 +39,23 @@ int main(int argc, char * argv[])
   tools::Exiter exiter;
 
   // 构造视频和文本文件路径
+  // 输入录像一般来自已有文件，因此按“资源路径”方式解析；
+  // 输出则显式落到当前工作目录或用户给定的绝对路径，避免误写入安装空间。
+  input_path = tools::resolve_runtime_prefix_string(input_path, {".avi", ".txt"});
+  const auto output_base_path =
+    std::filesystem::path(output_path).is_absolute() ?
+    std::filesystem::path(output_path) :
+    std::filesystem::absolute(output_path);
+  output_path = output_base_path.string();
+
   auto video_path = fmt::format("{}.avi", input_path);
   auto text_path = fmt::format("{}.txt", input_path);
   cv::VideoCapture video(video_path);
   std::ifstream text(text_path);
+  if (!video.isOpened() || !text.is_open()) {
+    tools::logger()->error("无法打开输入录像或姿态文本: {} / {}", video_path, text_path);
+    return 1;
+  }
 
   // 设置视频起始帧
   video.set(cv::CAP_PROP_POS_FRAMES, start_index);
@@ -55,10 +70,16 @@ int main(int argc, char * argv[])
   int fourcc = static_cast<int>(video.get(cv::CAP_PROP_FOURCC));
 
   // 创建输出文件
+  std::filesystem::create_directories(output_base_path.parent_path());
+
   auto outvideo_path = fmt::format("{}.avi", output_path);
   auto outtext_path = fmt::format("{}.txt", output_path);
   cv::VideoWriter outvideo(outvideo_path, fourcc, fps, cv::Size(frameWidth, frameHeight));
   std::ofstream outtext(outtext_path);
+  if (!outvideo.isOpened() || !outtext.is_open()) {
+    tools::logger()->error("无法创建输出录像或姿态文本: {} / {}", outvideo_path, outtext_path);
+    return 1;
+  }
 
   std::string line;
   cv::Mat img;

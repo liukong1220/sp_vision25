@@ -6,6 +6,7 @@
 #include "tools/exiter.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 
 using namespace std::chrono_literals;
 
@@ -28,7 +29,7 @@ int main(int argc, char * argv[])
 
   io::USBCamera usbcam1("video0", config_path);
   io::USBCamera usbcam2("video2", config_path);
-  io::Camera camera("configs/camera.yaml");
+  io::Camera camera(tools::resolve_runtime_path_string("configs/camera.yaml"));
 
   cv::Mat img1, img2, img3;
   std::chrono::steady_clock::time_point timestamp;

@@ -6,6 +6,7 @@ add_library(tools OBJECT
     ransac_sine_fitter.cpp
     img_tools.cpp
     math_tools.cpp
+    path.cpp
     plotter.cpp
     web_debugger.cpp
     trajectory.cpp
@@ -14,3 +15,6 @@ add_library(tools OBJECT
     pid.cpp
     crc.cpp
 )
+
+# 记录源码根目录，供运行时资源路径解析使用。
+target_compile_definitions(tools PRIVATE SP_VISION_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

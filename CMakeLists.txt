@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16.3)
 
-project(sp_vision)
+project(sp_vision25)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Release)
@@ -14,6 +14,18 @@ find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake/")
 find_package(OpenVINO REQUIRED)
+
+# `sp_msgs` 的 rosidl typesupport 在链接接口里会直接引用 `fastcdr`、`rmw::rmw`
+# 这类 imported target。由于下面的 `io / auto_aim / auto_buff` 是并列子目录，
+# 这些 target 必须在顶层作用域先被导入，兄弟目录之间才能共同可见。
+find_package(ament_cmake QUIET)
+find_package(rclcpp QUIET)
+find_package(std_msgs QUIET)
+find_package(rosidl_typesupport_cpp QUIET)
+find_package(fastrtps_cmake_module QUIET)
+find_package(fastcdr QUIET CONFIG)
+find_package(rmw QUIET)
+find_package(sp_msgs QUIET)
 
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
@@ -47,6 +59,18 @@ target_link_libraries(auto_buff_debug_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_
 target_link_libraries(uav ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(uav_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
 
+set(SP_VISION_RUNTIME_TARGETS
+  standard
+  mt_standard
+  standard_mpc
+  auto_aim_debug_mpc
+  mt_auto_aim_debug
+  auto_buff_debug
+  auto_buff_debug_mpc
+  uav
+  uav_debug
+)
+
 ##################calibration################
 add_executable(capture calibration/capture.cpp)
 add_executable(calibrate_camera calibration/calibrate_camera.cpp)
@@ -59,6 +83,14 @@ target_link_libraries(calibrate_camera ${OpenCV_LIBS} fmt::fmt yaml-cpp tools)
 target_link_libraries(calibrate_handeye ${OpenCV_LIBS} fmt::fmt yaml-cpp tools)
 target_link_libraries(calibrate_robotworld_handeye ${OpenCV_LIBS} fmt::fmt yaml-cpp tools)
 target_link_libraries(split_video ${OpenCV_LIBS} fmt::fmt tools)
+
+list(APPEND SP_VISION_RUNTIME_TARGETS
+  capture
+  calibrate_camera
+  calibrate_handeye
+  calibrate_robotworld_handeye
+  split_video
+)
 
 ##################tests##################
 add_executable(auto_aim_test tests/auto_aim_test.cpp)
@@ -104,14 +136,32 @@ target_link_libraries(planner_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim too
 add_executable(planner_test_offline tests/planner_test_offline.cpp)
 target_link_libraries(planner_test_offline ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
 
-# 检查 ROS 环境
-find_package(ament_cmake QUIET)
-find_package(rclcpp QUIET)
-find_package(std_msgs QUIET)
-find_package(rosidl_typesupport_cpp QUIET)
-find_package(sp_msgs QUIET)
+# 这些测试/调试程序本身就是现场定位问题常用的入口，
+# 迁入工作区后也一并安装到 lib/${PROJECT_NAME}，方便直接 `ros2 run sp_vision25 ...`。
+list(APPEND SP_VISION_RUNTIME_TARGETS
+  auto_aim_test
+  auto_aim_test_web
+  auto_buff_test
+  camera_detect_test
+  camera_test
+  camera_thread_test
+  cboard_test
+  fire_test
+  detector_video_test
+  gimbal_response_test
+  multi_usbcamera_test
+  usbcamera_detect_test
+  usbcamera_test
+  handeye_test
+  dm_test
+  minimum_vision_system
+  gimbal_test
+  planner_test
+  planner_test_offline
+)
+
 # 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
-if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND sp_msgs_FOUND)
+if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND fastrtps_cmake_module_FOUND AND fastcdr_FOUND AND rmw_FOUND AND sp_msgs_FOUND)
     # 编译 sentry 和 publish_test
     add_executable(sentry src/sentry.cpp)
     add_executable(sentry_bp src/sentry_bp.cpp)
@@ -128,6 +178,39 @@ if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_
     target_link_libraries(publish_test ${OpenCV_LIBS} fmt::fmt tools io auto_aim)
     target_link_libraries(subscribe_test ${OpenCV_LIBS} fmt::fmt tools io)
     target_link_libraries(topic_loop_test ${OpenCV_LIBS} fmt::fmt tools io)
+
+    list(APPEND SP_VISION_RUNTIME_TARGETS
+      sentry
+      sentry_bp
+      sentry_debug
+      sentry_multithread
+      publish_test
+      subscribe_test
+      topic_loop_test
+    )
 else()
     message(STATUS "ROS2 environment not found, skipping ROS2-related code.")
+endif()
+
+if(ament_cmake_FOUND)
+    # 安装运行时资源：
+    # 1. 可执行文件统一进 lib/${PROJECT_NAME}
+    # 2. configs/assets 安装到 share/${PROJECT_NAME}
+    # 这样 ros2 run / colcon install 后仍能找到配置和模型文件。
+    install(
+      TARGETS ${SP_VISION_RUNTIME_TARGETS}
+      DESTINATION lib/${PROJECT_NAME}
+    )
+
+    install(
+      DIRECTORY configs assets docs
+      DESTINATION share/${PROJECT_NAME}
+    )
+
+    install(
+      FILES readme.md run_auto_aim_debug_mpc_watchdog.sh
+      DESTINATION share/${PROJECT_NAME}
+    )
+
+    ament_package()
 endif()

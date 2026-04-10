@@ -20,6 +20,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
 
@@ -45,7 +46,7 @@ int main(int argc, char * argv[])
   io::ROS2 ros2;
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
-  io::Camera back_camera("configs/camera.yaml");
+  io::Camera back_camera(tools::resolve_runtime_path_string("configs/camera.yaml"));
 
   auto_aim::YOLO yolo(config_path, false);
   auto_aim::Solver solver(config_path);
@@ -96,9 +97,10 @@ int main(int argc, char * argv[])
     cboard.send(command);
 
     /// ROS2通信
-    Eigen::Vector4d target_info = decider.get_target_info(armors, targets);
-
-    ros2.publish(target_info);
+    // 统一由 Decider 组装视觉融合结果，
+    // 避免多个入口各自拷贝一份 suggested_goal_index 判定逻辑。
+    const auto target_info = decider.get_target_info(armors, targets);
+    ros2.publish(decider.build_vision_target_state(command, target_info));
   }
   return 0;
 }

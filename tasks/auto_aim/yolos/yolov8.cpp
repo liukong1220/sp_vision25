@@ -2,7 +2,6 @@
 
 #include <fmt/chrono.h>
 #include <omp.h>
-#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -12,15 +11,18 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/openvino_utils.hpp"
+#include "tools/path.hpp"
+#include "tools/yaml.hpp"
 
 namespace auto_aim
 {
 YOLOV8::YOLOV8(const std::string & config_path, bool debug)
 : classifier_(config_path), detector_(config_path), debug_(debug)
 {
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
 
-  model_path_ = yaml["yolov8_model_path"].as<std::string>();
+  model_path_ = tools::resolve_path_from_config_string(
+    config_path, yaml["yolov8_model_path"].as<std::string>());
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
   min_confidence_ = yaml["min_confidence"].as<double>();

@@ -85,6 +85,21 @@ auto_fire: true # 是否由自瞄控制射击
 #####-----decider参数-----#####
 mode: 1
 
+#####-----vision_fusion参数-----#####
+# 第一代视觉导航融合策略：
+# 1. 目标很近时，优先压到 close_range_goal_index；
+# 2. 目标在正前方时，推荐 front_goal_index；
+# 3. 目标在左/右侧时，分别推荐 left/right_goal_index。
+# 注意：这些索引要和 sentry_behavior*.yaml 中的 decision.goal_points 保持一致。
+vision_fusion:
+  enable_goal_suggestion: true
+  left_goal_index: 1
+  front_goal_index: 2
+  right_goal_index: 2
+  close_range_goal_index: 2
+  front_yaw_abs_threshold_deg: 18.0
+  close_range_threshold_m: 4.0
+
 #####-----工业相机标定参数-----#####
 R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 

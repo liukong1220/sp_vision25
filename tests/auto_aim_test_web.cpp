@@ -20,6 +20,7 @@
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
 #include "tools/plotter.hpp"
 #include "tools/trajectory.hpp"
 #include "tools/web_debugger.hpp"
@@ -50,7 +51,7 @@ const std::string keys =
   "{web-scale      | 0.7               | 网页图像缩放系数(显式传参时覆盖yaml) }"
   "{web-jpeg-quality | 70              | 网页JPEG质量(30-95, 显式传参时覆盖yaml) }"
   "{web-client-ttl-ms | 2000           | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }"
-  "{@input-path    | assets/demo/test.mp4  | avi和txt文件的路径}";
+  "{@input-path    | assets/demo/demo.avi  | avi和txt文件的路径}";
 
 double rad2deg(double rad)
 {
@@ -138,27 +139,29 @@ std::string resolve_video_path(const std::string & input_path)
 {
   const std::filesystem::path input(input_path);
   if (input.has_extension() && is_video_extension(input.extension().string())) {
-    return input.string();
+    return tools::resolve_runtime_path_string(input_path);
   }
 
   for (const char * ext : {".avi", ".mp4", ".mov", ".mkv"}) {
-    const auto candidate = input_path + ext;
-    if (std::filesystem::exists(candidate)) return candidate;
+    const auto candidate = tools::resolve_runtime_path(input_path + ext);
+    if (std::filesystem::exists(candidate)) return candidate.string();
   }
-  return input_path + ".avi";
+  return tools::resolve_runtime_path_string(input_path + ".avi");
 }
 
 std::string resolve_text_path(
   const std::string & input_path, const std::string & cli_timestamp_path)
 {
-  if (!cli_timestamp_path.empty()) return cli_timestamp_path;
+  if (!cli_timestamp_path.empty()) {
+    return tools::resolve_runtime_path_string(cli_timestamp_path);
+  }
 
   std::filesystem::path input(input_path);
   if (input.has_extension() && is_video_extension(input.extension().string())) {
     input.replace_extension(".txt");
-    return input.string();
+    return tools::resolve_runtime_path_string(input.string());
   }
-  return input_path + ".txt";
+  return tools::resolve_runtime_path_string(input_path + ".txt");
 }
 
 int64_t unix_time_ms()
@@ -397,7 +400,7 @@ int main(int argc, char * argv[])
   }
 
   const auto input_path = cli.get<std::string>(0);
-  const auto config_path = cli.get<std::string>("config-path");
+  const auto config_path = tools::resolve_config_path_string(cli.get<std::string>("config-path"));
   const auto cli_timestamp_path = cli.get<std::string>("timestamp-path");
   const auto start_index = cli.get<int>("start-index");
   const auto end_index = cli.get<int>("end-index");

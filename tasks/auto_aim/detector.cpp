@@ -1,19 +1,19 @@
 #include "detector.hpp"
 
 #include <fmt/chrono.h>
-#include <yaml-cpp/yaml.h>
 
 #include <filesystem>
 
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
+#include "tools/yaml.hpp"
 
 namespace auto_aim
 {
 Detector::Detector(const std::string & config_path, bool debug)
 : classifier_(config_path), debug_(debug)
 {
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
 
   threshold_ = yaml["threshold"].as<double>();
   max_angle_error_ = yaml["max_angle_error"].as<double>() / 57.3;  // degree to rad

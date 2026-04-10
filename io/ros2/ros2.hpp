@@ -3,6 +3,7 @@
 
 #include "publish2nav.hpp"
 #include "subscribe2nav.hpp"
+#include "vision_target.hpp"
 
 namespace io
 {
@@ -13,7 +14,7 @@ public:
 
   ~ROS2();
 
-  void publish(const Eigen::Vector4d & target_pos);
+  void publish(const VisionTargetState & target_state);
 
   std::vector<int8_t> subscribe_enemy_status();
 

@@ -21,7 +21,10 @@ ROS2::~ROS2()
   subscribe_spin_thread_->join();
 }
 
-void ROS2::publish(const Eigen::Vector4d & target_pos) { publish2nav_->send_data(target_pos); }
+void ROS2::publish(const VisionTargetState & target_state)
+{
+  publish2nav_->send_data(target_state);
+}
 
 std::vector<int8_t> ROS2::subscribe_enemy_status()
 {

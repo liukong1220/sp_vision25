@@ -1,11 +1,10 @@
 #include "tracker.hpp"
 
-#include <yaml-cpp/yaml.h>
-
 #include <tuple>
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/yaml.hpp"
 
 namespace auto_aim
 {
@@ -18,7 +17,7 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   last_timestamp_(std::chrono::steady_clock::now()),
   omni_target_priority_{ArmorPriority::fifth}
 {
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
   enemy_color_ = (yaml["enemy_color"].as<std::string>() == "red") ? Color::red : Color::blue;
   min_detect_count_ = yaml["min_detect_count"].as<int>();
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();

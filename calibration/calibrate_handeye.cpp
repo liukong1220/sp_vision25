@@ -8,6 +8,8 @@
 
 #include "tools/img_tools.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/yaml.hpp"
 
 const std::string keys =
   "{help h usage ? |                          | 输出命令行参数说明}"
@@ -40,7 +42,7 @@ void load(
   std::vector<cv::Mat> & tvecs)
 {
   // 读取yaml参数
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
   auto center_distance_mm = yaml["center_distance_mm"].as<double>();
@@ -141,6 +143,11 @@ int main(int argc, char * argv[])
   }
   auto input_folder = cli.get<std::string>(0);
   auto config_path = cli.get<std::string>("config-path");
+
+  // 标定图片文件夹和 YAML 都统一走运行时路径解析，
+  // 避免迁入 colcon 工作区后还要求用户必须 `cd src/sp_vision25` 再执行。
+  input_folder = tools::resolve_runtime_path_string(input_folder);
+  config_path = tools::resolve_config_path_string(config_path);
 
   // 从输入文件夹中加载标定所需的数据
   std::vector<double> R_gimbal2imubody_data;

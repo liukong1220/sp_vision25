@@ -1,11 +1,10 @@
 #include "solver.hpp"
 
-#include <yaml-cpp/yaml.h>
-
 #include <vector>
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/yaml.hpp"
 
 namespace auto_aim
 {
@@ -26,7 +25,7 @@ const std::vector<cv::Point3f> SMALL_ARMOR_POINTS{
 
 Solver::Solver(const std::string & config_path) : R_gimbal2world_(Eigen::Matrix3d::Identity())
 {
-  auto yaml = YAML::LoadFile(config_path);
+  auto yaml = tools::load(config_path);
 
   auto R_gimbal2imubody_data = yaml["R_gimbal2imubody"].as<std::vector<double>>();
   auto R_camera2gimbal_data = yaml["R_camera2gimbal"].as<std::vector<double>>();
