@@ -1,32 +1,47 @@
 #include <fmt/core.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <limits>
 #include <memory>
 #include <mutex>
+#include <thread>
+
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
-#include <thread>
-#include "tasks/auto_aim/target.hpp"
+
 #include "io/camera.hpp"
 #include "io/gimbal/gimbal.hpp"
 #include "tasks/auto_aim/planner/planner.hpp"
 #include "tasks/auto_aim/solver.hpp"
+#include "tasks/auto_aim/target.hpp"
 #include "tasks/auto_aim/tracker.hpp"
 #include "tasks/auto_aim/yolo.hpp"
+#include "tools/debug.hpp"
+#include "tools/debug_visualization.hpp"
 #include "tools/exiter.hpp"
-#include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
-#include "tools/trajectory.hpp"
 #include "tools/thread_safe_queue.hpp"
 #include "tools/web_debugger.hpp"
 #include "tools/yaml.hpp"
 
 using namespace std::chrono_literals;
+using tools::debug::BallisticDiagnostic;
+using tools::debug::GimbalStateUnitMode;
+using tools::debug::NormalizedGimbalState;
+using tools::debug::armor_name_to_string;
+using tools::debug::armor_type_to_string;
+using tools::debug::ballistic_to_json;
+using tools::debug::build_ballistic_diagnostic;
+using tools::debug::draw_ballistic_panel;
+using tools::debug::has_cli_option;
+using tools::debug::normalize_gimbal_state;
+using tools::debug::parse_gimbal_state_unit_mode;
+using tools::debug::rad2deg;
+using tools::debug::unix_time_ms;
 
 const std::string keys =
   "{help h usage ? |                        | 输出命令行参数说明}"
@@ -43,399 +58,6 @@ const std::string keys =
   "{record-debug-video | false              | 录制主调试画面(显式传参时覆盖yaml) }"
   "{record-debug-fps | 30.0                 | 调试录制帧率(显式传参时覆盖yaml) }"
   "{record-debug-dir | records              | 调试录制输出目录(显式传参时覆盖yaml) }";
-
-double rad2deg(double rad) {
-  return rad * 180.0 / M_PI;
-}
-
-double deg2rad(double deg) {
-  return deg * M_PI / 180.0;
-}
-
-namespace
-{
-constexpr double kGravity = 9.7833;
-constexpr double kLightbarLength = 56e-3;
-constexpr double kBigArmorWidth = 230e-3;
-constexpr double kSmallArmorWidth = 135e-3;
-constexpr double kGimbalRadiansSanityThreshold = 4.0 * M_PI;
-
-struct BallisticDiagnostic
-{
-  bool valid = false;
-  bool unsolvable = false;
-  bool hit = false;
-  bool fire = false;
-  auto_aim::ArmorType armor_type = auto_aim::ArmorType::small;
-  double bullet_speed = 0.0;
-  double yaw_offset = 0.0;
-  double pitch_offset = 0.0;
-  Eigen::Vector3d target_xyz = Eigen::Vector3d::Zero();
-  double target_dist_xy = 0.0;
-  double target_dist_3d = 0.0;
-  double target_geo_yaw = 0.0;
-  double target_geo_pitch = 0.0;
-  double required_cmd_yaw = 0.0;
-  double required_cmd_pitch = 0.0;
-  double command_yaw = 0.0;
-  double command_pitch = 0.0;
-  double yaw_residual = 0.0;
-  double pitch_residual = 0.0;
-  double lateral_error = 0.0;
-  double vertical_error = 0.0;
-  double total_error = 0.0;
-};
-
-struct NormalizedAngle
-{
-  double raw = 0.0;
-  double rad = 0.0;
-  double deg = 0.0;
-};
-
-enum class GimbalStateUnitMode
-{
-  auto_detect,
-  rad,
-  deg,
-};
-
-struct NormalizedGimbalState
-{
-  bool source_is_degree = false;
-  NormalizedAngle yaw;
-  NormalizedAngle yaw_vel;
-  NormalizedAngle pitch;
-  NormalizedAngle pitch_vel;
-};
-
-NormalizedAngle normalize_angle_value(double raw, bool source_is_degree)
-{
-  NormalizedAngle value;
-  value.raw = raw;
-  if (source_is_degree) {
-    value.deg = raw;
-    value.rad = deg2rad(raw);
-  } else {
-    value.rad = raw;
-    value.deg = rad2deg(raw);
-  }
-  return value;
-}
-
-GimbalStateUnitMode parse_gimbal_state_unit_mode(const std::string & unit)
-{
-  if (unit == "deg" || unit == "degree" || unit == "degrees") {
-    return GimbalStateUnitMode::deg;
-  }
-  if (unit == "rad" || unit == "radian" || unit == "radians") {
-    return GimbalStateUnitMode::rad;
-  }
-  return GimbalStateUnitMode::auto_detect;
-}
-
-NormalizedGimbalState normalize_gimbal_state(
-  const io::GimbalState & gs, GimbalStateUnitMode unit_mode)
-{
-  bool source_is_degree = false;
-  switch (unit_mode) {
-    case GimbalStateUnitMode::deg:
-      source_is_degree = true;
-      break;
-    case GimbalStateUnitMode::rad:
-      source_is_degree = false;
-      break;
-    case GimbalStateUnitMode::auto_detect:
-    default:
-      source_is_degree =
-        std::abs(gs.yaw) > kGimbalRadiansSanityThreshold ||
-        std::abs(gs.pitch) > kGimbalRadiansSanityThreshold ||
-        std::abs(gs.yaw_vel) > kGimbalRadiansSanityThreshold ||
-        std::abs(gs.pitch_vel) > kGimbalRadiansSanityThreshold;
-      break;
-  }
-
-  return {
-    source_is_degree,
-    normalize_angle_value(gs.yaw, source_is_degree),
-    normalize_angle_value(gs.yaw_vel, source_is_degree),
-    normalize_angle_value(gs.pitch, source_is_degree),
-    normalize_angle_value(gs.pitch_vel, source_is_degree),
-  };
-}
-
-double bullet_height(double horizontal_dist, double bullet_speed, double launch_pitch)
-{
-  const double cos_pitch = std::cos(launch_pitch);
-  if (std::abs(cos_pitch) < 1e-5 || bullet_speed <= 1e-5) return std::numeric_limits<double>::quiet_NaN();
-
-  return horizontal_dist * std::tan(launch_pitch) -
-         kGravity * horizontal_dist * horizontal_dist /
-           (2.0 * bullet_speed * bullet_speed * cos_pitch * cos_pitch);
-}
-
-void draw_outlined_text(
-  cv::Mat & img, const std::string & text, const cv::Point & org, double scale,
-  const cv::Scalar & color, int thickness = 1)
-{
-  cv::putText(img, text, org, cv::FONT_HERSHEY_SIMPLEX, scale, cv::Scalar(0, 0, 0), thickness + 2);
-  cv::putText(img, text, org, cv::FONT_HERSHEY_SIMPLEX, scale, color, thickness);
-}
-
-BallisticDiagnostic build_ballistic_diagnostic(
-  const auto_aim::Plan & plan, const Eigen::Vector4d & aim_xyza, auto_aim::ArmorType armor_type,
-  double bullet_speed, double yaw_offset, double pitch_offset)
-{
-  BallisticDiagnostic diag;
-  if (!plan.control) return diag;
-
-  if (bullet_speed < 10.0 || bullet_speed > 25.0) bullet_speed = 22.0;
-
-  diag.valid = true;
-  diag.fire = plan.fire;
-  diag.armor_type = armor_type;
-  diag.bullet_speed = bullet_speed;
-  diag.yaw_offset = yaw_offset;
-  diag.pitch_offset = pitch_offset;
-  diag.target_xyz = aim_xyza.head<3>();
-  diag.target_dist_xy = std::hypot(diag.target_xyz.x(), diag.target_xyz.y());
-  diag.target_dist_3d = diag.target_xyz.norm();
-  diag.target_geo_yaw = std::atan2(diag.target_xyz.y(), diag.target_xyz.x());
-
-  const auto pure_traj = tools::Trajectory(bullet_speed, diag.target_dist_xy, diag.target_xyz.z());
-  diag.unsolvable = pure_traj.unsolvable;
-  if (diag.unsolvable) return diag;
-
-  diag.target_geo_pitch = -pure_traj.pitch;
-  diag.required_cmd_yaw = tools::limit_rad(diag.target_geo_yaw + yaw_offset);
-  diag.required_cmd_pitch = -(pure_traj.pitch + pitch_offset);
-  diag.command_yaw = plan.yaw;
-  diag.command_pitch = plan.pitch;
-  diag.yaw_residual = tools::limit_rad(plan.yaw - diag.required_cmd_yaw);
-  diag.pitch_residual = plan.pitch - diag.required_cmd_pitch;
-
-  const Eigen::Vector2d target_xy(diag.target_xyz.x(), diag.target_xyz.y());
-  const Eigen::Vector2d shot_dir(std::cos(plan.yaw), std::sin(plan.yaw));
-  const double along = target_xy.dot(shot_dir);
-  const double lateral = target_xy.x() * shot_dir.y() - target_xy.y() * shot_dir.x();
-  diag.lateral_error = (along >= 0.0) ? lateral : target_xy.norm();
-
-  const double bullet_z = bullet_height(diag.target_dist_xy, bullet_speed, -plan.pitch);
-  diag.vertical_error = std::isfinite(bullet_z) ? (bullet_z - diag.target_xyz.z()) : 1e9;
-  diag.total_error = std::hypot(diag.lateral_error, diag.vertical_error);
-
-  const double half_width =
-    (armor_type == auto_aim::ArmorType::big ? kBigArmorWidth : kSmallArmorWidth) / 2.0;
-  const double half_height = kLightbarLength / 2.0;
-  diag.hit =
-    along >= 0.0 && std::abs(diag.lateral_error) <= half_width &&
-    std::abs(diag.vertical_error) <= half_height;
-  return diag;
-}
-
-void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag)
-{
-  panel = cv::Scalar(24, 28, 34);
-  const cv::Rect side_rect(35, 40, 360, 230);
-  const cv::Rect top_rect(445, 40, 360, 230);
-  const cv::Rect text_rect(25, 295, 790, 155);
-
-  cv::rectangle(panel, side_rect, cv::Scalar(70, 75, 85), 1);
-  cv::rectangle(panel, top_rect, cv::Scalar(70, 75, 85), 1);
-  cv::rectangle(panel, text_rect, cv::Scalar(70, 75, 85), 1);
-  draw_outlined_text(panel, "Ballistic Debug", {30, 24}, 0.75, cv::Scalar(255, 255, 255), 2);
-
-  if (!diag.valid) {
-    draw_outlined_text(panel, "No valid target / plan", {250, 210}, 0.9, cv::Scalar(120, 220, 255), 2);
-    return;
-  }
-
-  if (diag.unsolvable) {
-    draw_outlined_text(panel, "Trajectory Unsolvable", {215, 185}, 0.9, cv::Scalar(0, 80, 255), 2);
-    draw_outlined_text(
-      panel, fmt::format("speed: {:.2f} m/s  target d/z: {:.2f} / {:.2f} m",
-                         diag.bullet_speed, diag.target_dist_xy, diag.target_xyz.z()),
-      {140, 225}, 0.6, cv::Scalar(220, 220, 220), 1);
-    draw_outlined_text(
-      panel, fmt::format("offset yaw/pitch: {:.2f} / {:.2f} deg",
-                         rad2deg(diag.yaw_offset), rad2deg(diag.pitch_offset)),
-      {190, 260}, 0.55, cv::Scalar(220, 220, 220), 1);
-    return;
-  }
-
-  auto map_to_rect =
-    [](double x, double y, const cv::Rect & rect, double min_x, double max_x, double min_y, double max_y) {
-      const double nx = (max_x - min_x > 1e-6) ? (x - min_x) / (max_x - min_x) : 0.0;
-      const double ny = (max_y - min_y > 1e-6) ? (y - min_y) / (max_y - min_y) : 0.0;
-      const int px = rect.x + static_cast<int>(std::clamp(nx, 0.0, 1.0) * rect.width);
-      const int py = rect.y + rect.height - static_cast<int>(std::clamp(ny, 0.0, 1.0) * rect.height);
-      return cv::Point(px, py);
-    };
-
-  draw_outlined_text(panel, "Side View (d-z)", {side_rect.x + 10, side_rect.y - 10}, 0.5, cv::Scalar(220, 220, 220));
-  draw_outlined_text(panel, "Top View (x-y)", {top_rect.x + 10, top_rect.y - 10}, 0.5, cv::Scalar(220, 220, 220));
-
-  const double max_dist = std::max(1.0, diag.target_dist_xy * 1.2);
-  const double current_z_at_target = bullet_height(diag.target_dist_xy, diag.bullet_speed, -diag.command_pitch);
-  const double min_z =
-    std::min({-0.15, diag.target_xyz.z() - 0.1, std::isfinite(current_z_at_target) ? current_z_at_target - 0.1 : -0.15});
-  const double max_z =
-    std::max({0.25, diag.target_xyz.z() + 0.15, std::isfinite(current_z_at_target) ? current_z_at_target + 0.1 : 0.25});
-
-  const int sample_num = 100;
-  std::vector<cv::Point> ideal_curve;
-  std::vector<cv::Point> cmd_curve;
-  ideal_curve.reserve(sample_num);
-  cmd_curve.reserve(sample_num);
-  for (int i = 0; i < sample_num; ++i) {
-    const double d = max_dist * static_cast<double>(i) / static_cast<double>(sample_num - 1);
-    const double ideal_z = bullet_height(d, diag.bullet_speed, -diag.target_geo_pitch);
-    const double cmd_z = bullet_height(d, diag.bullet_speed, -diag.command_pitch);
-    if (std::isfinite(ideal_z))
-      ideal_curve.push_back(map_to_rect(d, ideal_z, side_rect, 0.0, max_dist, min_z, max_z));
-    if (std::isfinite(cmd_z))
-      cmd_curve.push_back(map_to_rect(d, cmd_z, side_rect, 0.0, max_dist, min_z, max_z));
-  }
-  for (size_t i = 1; i < ideal_curve.size(); ++i) {
-    cv::line(panel, ideal_curve[i - 1], ideal_curve[i], cv::Scalar(60, 200, 120), 2, cv::LINE_AA);
-  }
-  for (size_t i = 1; i < cmd_curve.size(); ++i) {
-    cv::line(panel, cmd_curve[i - 1], cmd_curve[i], cv::Scalar(0, 220, 255), 2, cv::LINE_AA);
-  }
-
-  const auto target_side_pt =
-    map_to_rect(diag.target_dist_xy, diag.target_xyz.z(), side_rect, 0.0, max_dist, min_z, max_z);
-  cv::circle(panel, target_side_pt, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
-  if (std::isfinite(current_z_at_target)) {
-    const auto cmd_hit_pt =
-      map_to_rect(diag.target_dist_xy, current_z_at_target, side_rect, 0.0, max_dist, min_z, max_z);
-    cv::circle(panel, cmd_hit_pt, 5, cv::Scalar(0, 220, 255), -1, cv::LINE_AA);
-  }
-
-  const double max_xy = std::max(
-    {1.0, std::abs(diag.target_xyz.x()) * 1.25, std::abs(diag.target_xyz.y()) * 1.25});
-  const auto origin_top_pt = map_to_rect(0.0, 0.0, top_rect, -max_xy, max_xy, -max_xy, max_xy);
-  const auto target_top_pt = map_to_rect(
-    diag.target_xyz.x(), diag.target_xyz.y(), top_rect, -max_xy, max_xy, -max_xy, max_xy);
-  cv::arrowedLine(panel, origin_top_pt, target_top_pt, cv::Scalar(60, 200, 120), 2, cv::LINE_AA, 0, 0.06);
-
-  const double ray_len = std::max(1.0, diag.target_dist_xy * 1.1);
-  const cv::Point cmd_ray_pt = map_to_rect(
-    ray_len * std::cos(diag.command_yaw), ray_len * std::sin(diag.command_yaw), top_rect, -max_xy,
-    max_xy, -max_xy, max_xy);
-  cv::arrowedLine(panel, origin_top_pt, cmd_ray_pt, cv::Scalar(0, 220, 255), 2, cv::LINE_AA, 0, 0.06);
-  cv::circle(panel, target_top_pt, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
-
-  const cv::Scalar verdict_color = diag.hit ? cv::Scalar(60, 220, 120) : cv::Scalar(0, 80, 255);
-  draw_outlined_text(
-    panel, diag.hit ? "Verdict: HIT" : "Verdict: MISS", {text_rect.x + 15, text_rect.y + 28}, 0.75,
-    verdict_color, 2);
-  draw_outlined_text(
-    panel, fmt::format("plan.fire: {}  speed: {:.2f} m/s", diag.fire ? "true" : "false", diag.bullet_speed),
-    {text_rect.x + 15, text_rect.y + 58}, 0.52, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("offset yaw/pitch: {:.2f} / {:.2f} deg", rad2deg(diag.yaw_offset), rad2deg(diag.pitch_offset)),
-    {text_rect.x + 15, text_rect.y + 84}, 0.52, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("target xyz: ({:.2f}, {:.2f}, {:.2f})  d_xy: {:.2f}  d_3d: {:.2f}",
-                       diag.target_xyz.x(), diag.target_xyz.y(), diag.target_xyz.z(),
-                       diag.target_dist_xy, diag.target_dist_3d),
-    {text_rect.x + 15, text_rect.y + 110}, 0.50, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("geo yaw/pitch: {:.2f} / {:.2f} deg", rad2deg(diag.target_geo_yaw), rad2deg(diag.target_geo_pitch)),
-    {text_rect.x + 15, text_rect.y + 136}, 0.50, cv::Scalar(60, 200, 120));
-  draw_outlined_text(
-    panel, fmt::format("cmd-ref yaw/pitch: {:.2f} / {:.2f} deg", rad2deg(diag.required_cmd_yaw), rad2deg(diag.required_cmd_pitch)),
-    {text_rect.x + 15, text_rect.y + 162}, 0.50, cv::Scalar(100, 180, 255));
-  draw_outlined_text(
-    panel, fmt::format("plan yaw/pitch: {:.2f} / {:.2f} deg", rad2deg(diag.command_yaw), rad2deg(diag.command_pitch)),
-    {text_rect.x + 15, text_rect.y + 188}, 0.50, cv::Scalar(0, 220, 255));
-  draw_outlined_text(
-    panel, fmt::format("yaw/pitch residual: {:.3f} / {:.3f} deg", rad2deg(diag.yaw_residual), rad2deg(diag.pitch_residual)),
-    {text_rect.x + 390, text_rect.y + 58}, 0.50, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("lateral miss: {:.1f} mm", diag.lateral_error * 1000.0),
-    {text_rect.x + 390, text_rect.y + 84}, 0.50, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("vertical miss: {:.1f} mm", diag.vertical_error * 1000.0),
-    {text_rect.x + 390, text_rect.y + 110}, 0.50, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("total miss: {:.1f} mm", diag.total_error * 1000.0),
-    {text_rect.x + 390, text_rect.y + 136}, 0.50, cv::Scalar(230, 230, 230));
-  draw_outlined_text(
-    panel, fmt::format("armor size: {} x {:.0f}mm", diag.armor_type == auto_aim::ArmorType::big ? "230" : "135",
-                       kLightbarLength * 1000.0),
-    {text_rect.x + 390, text_rect.y + 162}, 0.50, cv::Scalar(230, 230, 230));
-}
-
-std::string armor_type_to_string(auto_aim::ArmorType armor_type)
-{
-  switch (armor_type) {
-    case auto_aim::ArmorType::big:
-      return "big";
-    case auto_aim::ArmorType::small:
-      return "small";
-    default:
-      return "unknown";
-  }
-}
-
-std::string armor_name_to_string(auto_aim::ArmorName armor_name)
-{
-  const auto index = static_cast<size_t>(armor_name);
-  if (index < auto_aim::ARMOR_NAMES.size()) return auto_aim::ARMOR_NAMES[index];
-  return "unknown";
-}
-
-int64_t unix_time_ms()
-{
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-           std::chrono::system_clock::now().time_since_epoch())
-    .count();
-}
-
-bool has_cli_option(int argc, char * argv[], const std::string & long_option)
-{
-  const std::string exact = "--" + long_option;
-  const std::string prefix = exact + "=";
-  for (int i = 1; i < argc; ++i) {
-    const std::string arg(argv[i]);
-    if (arg == exact) return true;
-    if (arg.rfind(prefix, 0) == 0) return true;
-  }
-  return false;
-}
-
-nlohmann::json ballistic_to_json(const BallisticDiagnostic & diag)
-{
-  nlohmann::json data;
-  data["valid"] = diag.valid;
-  data["unsolvable"] = diag.unsolvable;
-  data["hit"] = diag.hit;
-  data["fire"] = diag.fire;
-  data["armor_type"] = armor_type_to_string(diag.armor_type);
-  data["bullet_speed_mps"] = diag.bullet_speed;
-  data["yaw_offset_deg"] = rad2deg(diag.yaw_offset);
-  data["pitch_offset_deg"] = rad2deg(diag.pitch_offset);
-  data["target_x_m"] = diag.target_xyz.x();
-  data["target_y_m"] = diag.target_xyz.y();
-  data["target_z_m"] = diag.target_xyz.z();
-  data["target_dist_xy_m"] = diag.target_dist_xy;
-  data["target_dist_3d_m"] = diag.target_dist_3d;
-  data["target_geo_yaw_deg"] = rad2deg(diag.target_geo_yaw);
-  data["target_geo_pitch_deg"] = rad2deg(diag.target_geo_pitch);
-  data["required_cmd_yaw_deg"] = rad2deg(diag.required_cmd_yaw);
-  data["required_cmd_pitch_deg"] = rad2deg(diag.required_cmd_pitch);
-  data["command_yaw_deg"] = rad2deg(diag.command_yaw);
-  data["command_pitch_deg"] = rad2deg(diag.command_pitch);
-  data["yaw_residual_deg"] = rad2deg(diag.yaw_residual);
-  data["pitch_residual_deg"] = rad2deg(diag.pitch_residual);
-  data["lateral_error_mm"] = diag.lateral_error * 1000.0;
-  data["vertical_error_mm"] = diag.vertical_error * 1000.0;
-  data["total_error_mm"] = diag.total_error * 1000.0;
-  return data;
-}
-}  // namespace
 
 int main(int argc, char * argv[])
 {
@@ -499,6 +121,7 @@ int main(int argc, char * argv[])
   if (!disable_web) {
     web_debugger = std::make_unique<tools::WebDebugger>(web_host, web_port);
     if (web_debugger->good()) {
+      web_debugger->set_plot_history_limit(600);
       tools::logger()->info(
         "Web debugger listening on {}:{} (open {})", web_host, web_port, web_debugger->url());
       tools::logger()->info(
@@ -637,12 +260,21 @@ int main(int argc, char * argv[])
       data["planner_selected_armor"] = planner.debug_armor_id;
       data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
       data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
+      data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
+      data["planner_turn_sign"] = tools::debug::spin_direction_sign(target.has_value() ? target->ekf_x()[7] : 0.0);
       data["planner_selected_z_offset"] = planner.debug_selected_z_offset;
       data["planner_fixed_model"] = planner.debug_fixed_center_rotation_model ? 1 : 0;
 
       snapshot["selected_armor"] = planner.debug_armor_id;
       snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
       snapshot["spin_gate"] = planner.debug_used_spin_gate;
+      snapshot["center_yaw_deg"] = rad2deg(planner.debug_center_yaw);
+      snapshot["turn_direction"] = tools::debug::spin_direction_to_string(
+        target.has_value() ? target->ekf_x()[7] : 0.0);
+      snapshot["delta_angle_deg_list"] = nlohmann::json::array();
+      for (const double delta_angle : planner.debug_delta_angle_list) {
+        snapshot["delta_angle_deg_list"].push_back(rad2deg(delta_angle));
+      }
       snapshot["selected_z_offset_m"] = planner.debug_selected_z_offset;
       snapshot["fixed_center_rotation_model"] = planner.debug_fixed_center_rotation_model;
 
@@ -652,6 +284,7 @@ int main(int argc, char * argv[])
       }
 
       plotter.plot(data);
+      if (web_debugger) web_debugger->update_plot_sample(data);
 
       std::this_thread::sleep_for(10ms);
     }
@@ -744,6 +377,15 @@ int main(int argc, char * argv[])
       web_state["planner"]["selected_armor"] = debug_planner.debug_armor_id;
       web_state["planner"]["spin_gate"] = debug_planner.debug_used_spin_gate;
       web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
+      web_state["planner"]["center_yaw_deg"] = rad2deg(debug_planner.debug_center_yaw);
+      web_state["planner"]["turn_direction"] =
+        tools::debug::spin_direction_to_string(current_w);
+      web_state["planner"]["turn_sign"] =
+        tools::debug::spin_direction_sign(current_w);
+      web_state["planner"]["delta_angle_deg_list"] = nlohmann::json::array();
+      for (const double delta_angle : debug_planner.debug_delta_angle_list) {
+        web_state["planner"]["delta_angle_deg_list"].push_back(rad2deg(delta_angle));
+      }
       web_state["planner"]["w_rad_s"] = current_w;
       web_state["planner"]["h_m"] = current_h;
       web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
@@ -751,204 +393,40 @@ int main(int argc, char * argv[])
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
       web_state["command"] = latest_command_state;
       web_debugger->update_state(web_state);
+      web_debugger->update_log(web_state);
       last_web_state_time = now;
     }
 
     if (need_visual_output) {
-      cv::Mat annotated_img = img.clone();
-
-      if (current_target.has_value()) {
-        const auto & target = *current_target;
-
-        std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
-        int armor_idx = 0;
-        for (const Eigen::Vector4d & xyza : armor_xyza_list) {
-          auto image_points =
-            solver.reproject_armor(xyza.head(3), xyza[3], target.armor_type, target.name);
-          tools::draw_points(annotated_img, image_points, {0, 255, 0});
-          if (image_points.empty()) {
-            ++armor_idx;
-            continue;
-          }
-
-          float min_x = image_points.front().x;
-          float max_y = image_points.front().y;
-          for (const auto & pt : image_points) {
-            min_x = std::min(min_x, pt.x);
-            max_y = std::max(max_y, pt.y);
-          }
-
-          int text_x = static_cast<int>(min_x);
-          int text_y = static_cast<int>(max_y) + 22;
-          text_x = std::max(0, std::min(text_x, annotated_img.cols - 220));
-          text_y = std::max(30, std::min(text_y, annotated_img.rows - 130));
-
-          const std::vector<std::string> armor_lines = {
-            fmt::format("armor:{}", armor_idx),
-            fmt::format("yaw: {:.1f}", rad2deg(xyza[3])),
-            fmt::format("x: {:.2f}", xyza[1]),
-            fmt::format("y: {:.2f}", xyza[0]),
-            fmt::format("z: {:.2f}", xyza[2]),
-          };
-          const double font_scale_local = 0.50;
-          const int line_gap = 22;
-          for (size_t line_i = 0; line_i < armor_lines.size(); ++line_i) {
-            cv::Point org(text_x, text_y + static_cast<int>(line_i) * line_gap);
-            cv::putText(
-              annotated_img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX,
-              font_scale_local, cv::Scalar(0, 0, 0), 3);
-            cv::putText(
-              annotated_img, armor_lines[line_i], org, cv::FONT_HERSHEY_SIMPLEX,
-              font_scale_local, cv::Scalar(255, 0, 255), 2);
-          }
-          ++armor_idx;
-        }
-
-        auto target_future = target;
-        constexpr int kRawTrajSteps = 18;
-        constexpr double kRawTrajDt = 0.03;
-        constexpr double kArrowMinPixelStep = 8.0;
-        std::vector<cv::Point> raw_traj_centers;
-        std::vector<int> raw_traj_ids;
-        raw_traj_centers.reserve(kRawTrajSteps);
-        raw_traj_ids.reserve(kRawTrajSteps);
-
-        for (int step = 0; step < kRawTrajSteps; ++step) {
-          const auto future_selection = debug_planner.preview_aim_selection(target_future);
-          if (!future_selection.valid) break;
-
-          auto pred_points = solver.reproject_armor(
-            future_selection.xyza.head(3), future_selection.xyza[3], target.armor_type,
-            target.name);
-          if (!pred_points.empty()) {
-            cv::Point2f center(0.0f, 0.0f);
-            for (const auto & pt : pred_points) {
-              center.x += pt.x;
-              center.y += pt.y;
-            }
-            center.x /= static_cast<float>(pred_points.size());
-            center.y /= static_cast<float>(pred_points.size());
-
-            raw_traj_centers.emplace_back(
-              static_cast<int>(center.x), static_cast<int>(center.y));
-            raw_traj_ids.push_back(future_selection.armor_id);
-          }
-
-          target_future.predict(kRawTrajDt);
-        }
-
-        std::vector<cv::Point> traj_centers;
-        std::vector<int> traj_ids;
-        if (!raw_traj_centers.empty()) {
-          traj_centers.push_back(raw_traj_centers.front());
-          traj_ids.push_back(raw_traj_ids.front());
-
-          for (size_t i = 1; i < raw_traj_centers.size(); ++i) {
-            const bool switched = raw_traj_ids[i] != traj_ids.back();
-            const double pixel_step = cv::norm(raw_traj_centers[i] - traj_centers.back());
-            const bool is_last = i + 1 == raw_traj_centers.size();
-            if (switched || pixel_step >= kArrowMinPixelStep || is_last) {
-              traj_centers.push_back(raw_traj_centers[i]);
-              traj_ids.push_back(raw_traj_ids[i]);
-            }
-          }
-        }
-
-        for (size_t i = 0; i < traj_centers.size(); ++i) {
-          cv::circle(annotated_img, traj_centers[i], 3, cv::Scalar(0, 0, 0), -1, cv::LINE_AA);
-          cv::circle(
-            annotated_img, traj_centers[i], 2, cv::Scalar(255, 255, 0), -1, cv::LINE_AA);
-        }
-
-        for (size_t i = 1; i < traj_centers.size(); ++i) {
-          const bool switched = traj_ids[i] != traj_ids[i - 1];
-          const cv::Scalar traj_color =
-            switched ? cv::Scalar(0, 165, 255) : cv::Scalar(255, 255, 0);
-
-          cv::arrowedLine(
-            annotated_img, traj_centers[i - 1], traj_centers[i], cv::Scalar(0, 0, 0), 5,
-            cv::LINE_AA, 0, 0.32);
-          cv::arrowedLine(
-            annotated_img, traj_centers[i - 1], traj_centers[i], traj_color, 2, cv::LINE_AA, 0,
-            0.32);
-
-          if (switched) {
-            cv::putText(
-              annotated_img, "switch", traj_centers[i] + cv::Point(6, -6),
-              cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 165, 255), 1);
-          }
-        }
-
-        if (!traj_centers.empty()) {
-          cv::putText(
-            annotated_img, "pred traj", traj_centers.front() + cv::Point(8, -10),
-            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 0), 2);
-        }
-
-        if (current_plan.control) {
-          const Eigen::Vector4d aim_xyza = debug_planner.debug_xyza;
-          auto image_points = solver.reproject_armor(
-            aim_xyza.head(3), aim_xyza[3], target.armor_type, target.name);
-          tools::draw_points(annotated_img, image_points, {0, 0, 255});
-        }
+      tools::debug_visualization::LiveOverlayOptions visual_options;
+      visual_options.display_scale = display_scale;
+      visual_options.latency_ms = latency_ms;
+      visual_options.target_name =
+        current_target.has_value() ? armor_name_to_string(current_target->name) : "none";
+      visual_options.armor_type =
+        current_target.has_value() ? armor_type_to_string(current_target->armor_type) : "none";
+      visual_options.planner_armor_id = debug_planner.debug_armor_id;
+      visual_options.planner_spin_gate = debug_planner.debug_used_spin_gate;
+      visual_options.planner_delay_ms = debug_planner.debug_delay_time * 1000.0;
+      visual_options.planner_center_yaw_deg = rad2deg(debug_planner.debug_center_yaw);
+      visual_options.planner_delta_angles_deg.clear();
+      for (const double delta_angle : debug_planner.debug_delta_angle_list) {
+        visual_options.planner_delta_angles_deg.push_back(rad2deg(delta_angle));
       }
+      visual_options.planner_turn_direction =
+        tools::debug::spin_direction_to_string(current_w);
+      visual_options.planner_turn_sign =
+        tools::debug::spin_direction_sign(current_w);
+      visual_options.current_w = current_w;
+      visual_options.current_h = current_h;
+      visual_options.current_selected_z_offset = current_selected_z_offset;
+      visual_options.current_fixed_model = current_fixed_model;
+      visual_options.is_outpost =
+        current_target.has_value() &&
+        current_target->name == auto_aim::ArmorName::outpost;
 
-      cv::Mat display_img;
-      cv::resize(annotated_img, display_img, {}, display_scale, display_scale);
-
-      const int font_face = cv::FONT_HERSHEY_SIMPLEX;
-      const double font_scale = 0.4;
-      const cv::Scalar color(0, 255, 255);
-      const int thickness = 1;
-
-      if (current_plan.fire) {
-        const std::string fire_text = "fire!";
-        int fire_baseline = 0;
-        const cv::Size fire_size =
-          cv::getTextSize(fire_text, cv::FONT_HERSHEY_SIMPLEX, 1.0, 2, &fire_baseline);
-        const cv::Point fire_org(
-          (display_img.cols - fire_size.width) / 2, fire_size.height + 10);
-        cv::putText(
-          display_img, fire_text, fire_org, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-          cv::Scalar(0, 0, 255), 2);
-      }
-
-      const std::string latency_info = fmt::format("latency: {:.2f} ms", latency_ms);
-      int latency_baseline = 0;
-      const cv::Size latency_size =
-        cv::getTextSize(latency_info, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &latency_baseline);
-      const cv::Point latency_org(
-        display_img.cols - latency_size.width - 10, latency_size.height + 10);
-      cv::putText(
-        display_img, latency_info, latency_org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-        cv::Scalar(0, 255, 255), 1);
-
-      const int info_x = 12;
-      const int info_y = 20;
-      const int info_line_gap = 18;
-      const bool is_outpost =
-        current_target.has_value() && current_target->name == auto_aim::ArmorName::outpost;
-      const std::string geometry_line = is_outpost ?
-        fmt::format("dz: {:.3f} m", current_selected_z_offset) :
-        fmt::format("h: {:.3f} m", current_h);
-      const std::string model_line = is_outpost ?
-        fmt::format("model: {}", current_fixed_model ? "fixed-z" : "free") :
-        "model: generic";
-      const std::vector<std::string> planner_lines = {
-        fmt::format("armor_id: {}", debug_planner.debug_armor_id),
-        fmt::format("spin_gate: {}", debug_planner.debug_used_spin_gate ? "on" : "off"),
-        fmt::format("delay: {:.1f} ms", debug_planner.debug_delay_time * 1000.0),
-        fmt::format("w: {:.2f} rad/s", current_w),
-        geometry_line,
-        model_line,
-      };
-      for (size_t i = 0; i < planner_lines.size(); ++i) {
-        const cv::Point org(info_x, info_y + static_cast<int>(i) * info_line_gap);
-        cv::putText(
-          display_img, planner_lines[i], org, font_face, font_scale, cv::Scalar(0, 0, 0),
-          thickness + 2);
-        cv::putText(display_img, planner_lines[i], org, font_face, font_scale, color, thickness);
-      }
+      const auto display_img = tools::debug_visualization::render_live_debug_frame(
+        img, solver, current_target, current_plan, debug_planner, visual_options);
 
       draw_ballistic_panel(ballistic_panel, ballistic_diag);
 

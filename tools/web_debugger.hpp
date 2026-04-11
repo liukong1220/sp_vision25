@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -27,6 +28,10 @@ public:
   std::string url() const;
 
   void update_state(const nlohmann::json & state);
+  void update_log(const nlohmann::json & log);
+  void update_plot_sample(const nlohmann::json & sample);
+  void set_plot_history_limit(size_t max_points);
+
   void update_main_frame(const cv::Mat & frame, int jpeg_quality = 70);
   void update_ballistic_frame(const cv::Mat & frame, int jpeg_quality = 70);
 
@@ -39,7 +44,8 @@ private:
   void stream_jpeg(int client_fd, bool ballistic);
   void touch_client() const;
 
-  static std::string index_html();
+  static std::string load_static_asset(const std::string & relative_path);
+  static std::string content_type_for_asset(const std::string & relative_path);
 
   std::string host_;
   uint16_t port_ = 0;
@@ -52,6 +58,11 @@ private:
   mutable std::atomic<int64_t> last_client_touch_ms_{0};
   mutable std::mutex data_mutex_;
   std::string state_json_ = "{}";
+  std::string log_json_ = "{}";
+  std::string plot_json_ = R"({"time":[]})";
+  nlohmann::json plot_history_ =
+    nlohmann::json::object({{"time", nlohmann::json::array()}});
+  size_t max_plot_points_ = 360;
   std::vector<uchar> main_jpeg_;
   std::vector<uchar> ballistic_jpeg_;
   uint64_t main_frame_seq_ = 0;

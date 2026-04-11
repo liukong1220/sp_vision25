@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SP Vision Debugger</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+
+    <header class="app-header">
+      <div class="brand-block">
+        <div class="brand-mark">SP</div>
+        <div>
+          <h1>SP Vision 网页调试器</h1>
+          <p id="server-url">访问地址: --</p>
+        </div>
+      </div>
+      <nav class="view-switch">
+        <button class="view-btn active" data-view="overview" type="button">总览</button>
+        <button class="view-btn" data-view="analysis" type="button">分析</button>
+        <button class="view-btn" data-view="inspector" type="button">详情</button>
+      </nav>
+    </header>
+
+    <main class="app-shell">
+      <section class="view active" id="view-overview">
+        <div class="overview-grid">
+          <article class="panel hero-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Live Feed</span>
+                <h2>主调试图</h2>
+              </div>
+              <div class="toolbar">
+                <button class="ghost-btn" id="overview-fullscreen-btn" type="button">全屏</button>
+              </div>
+            </div>
+            <div class="frame-shell hero-frame">
+              <img id="overview-main-frame" alt="overview main stream" />
+              <div class="frame-placeholder" id="overview-main-placeholder">等待图像流</div>
+            </div>
+            <div class="panel-meta" id="overview-stream-meta">stream: /stream/main.mjpg</div>
+          </article>
+
+          <aside class="panel status-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Quick Read</span>
+                <h2>即时状态</h2>
+              </div>
+            </div>
+            <div class="status-grid">
+              <div class="status-chip">
+                <span>链路</span>
+                <strong id="status-link">Waiting</strong>
+              </div>
+              <div class="status-chip">
+                <span>开火</span>
+                <strong id="status-fire">SAFE</strong>
+              </div>
+              <div class="status-chip">
+                <span>目标</span>
+                <strong id="status-target">none</strong>
+              </div>
+              <div class="status-chip">
+                <span>延迟</span>
+                <strong id="status-latency">-- ms</strong>
+              </div>
+              <div class="status-chip">
+                <span>转向</span>
+                <strong id="status-turn">STEADY</strong>
+              </div>
+              <div class="status-chip">
+                <span>切板</span>
+                <strong id="status-armor">A-</strong>
+              </div>
+            </div>
+            <div class="stack-list" id="overview-summary"></div>
+          </aside>
+
+          <article class="panel summary-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Planner</span>
+                <h2>转向与切板</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="planner-card"></div>
+          </article>
+
+          <article class="panel summary-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Ballistic</span>
+                <h2>弹道摘要</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="ballistic-card"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-analysis">
+        <div class="analysis-grid">
+          <article class="panel analysis-video-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Analysis</span>
+                <h2>主调试图</h2>
+              </div>
+              <div class="toolbar">
+                <button class="ghost-btn" id="analysis-fullscreen-btn" type="button">全屏</button>
+              </div>
+            </div>
+            <div class="frame-shell analysis-frame">
+              <img id="analysis-main-frame" alt="analysis main stream" />
+              <div class="frame-placeholder" id="analysis-main-placeholder">等待图像流</div>
+            </div>
+          </article>
+
+          <article class="panel analysis-side-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Ballistic</span>
+                <h2>弹道面板</h2>
+              </div>
+            </div>
+            <div class="frame-shell side-frame">
+              <img id="analysis-ballistic-frame" alt="analysis ballistic stream" />
+              <div class="frame-placeholder" id="analysis-ballistic-placeholder">等待弹道流</div>
+            </div>
+            <div class="stack-list compact-list" id="analysis-command-card"></div>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Telemetry</span>
+                <h2>总图</h2>
+              </div>
+              <span class="panel-meta">/data</span>
+            </div>
+            <details class="metric-picker">
+              <summary>选择曲线与范围</summary>
+              <div class="chart-controls">
+                <div class="chart-select-controls" id="chart-select-controls"></div>
+                <fieldset>
+                  <legend>主图范围</legend>
+                  <label>
+                    最大点数
+                    <input type="number" id="mainMaxPts" value="120" min="10" max="1000" step="10" />
+                  </label>
+                  <button type="button" id="apply-main-range">应用</button>
+                </fieldset>
+              </div>
+            </details>
+            <div class="chart-main-wrap">
+              <canvas id="mainChart" width="980" height="360"></canvas>
+            </div>
+          </article>
+
+          <article class="panel individual-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Selected Curves</span>
+                <h2>单图联调</h2>
+              </div>
+            </div>
+            <div id="individualCharts"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-inspector">
+        <div class="inspector-grid">
+          <article class="panel inspector-card">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Snapshot</span>
+                <h2>总览字段</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="inspector-summary"></div>
+          </article>
+
+          <article class="panel inspector-card">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Command</span>
+                <h2>云台与控制</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="command-card"></div>
+          </article>
+
+          <article class="panel inspector-card">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Preview</span>
+                <h2>目标预览</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="preview-card"></div>
+          </article>
+
+          <article class="panel inspector-card">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Planner</span>
+                <h2>切板细节</h2>
+              </div>
+            </div>
+            <div class="stack-list" id="inspector-planner-card"></div>
+          </article>
+
+          <article class="panel log-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Structured Log</span>
+                <h2>JSON 快照</h2>
+              </div>
+              <span class="panel-meta" id="log-meta">latest snapshot</span>
+            </div>
+            <div class="json-container" id="json-log-container">
+              <div id="json-log"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/js/json_view.js"></script>
+    <script src="/static/js/chart_logic.js"></script>
+    <script src="/static/js/main.js"></script>
+  </body>
+</html>
