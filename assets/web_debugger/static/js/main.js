@@ -112,6 +112,7 @@
   const createStreamController = ({ imageId, placeholderId, path }) => {
     const image = document.getElementById(imageId);
     const placeholder = document.getElementById(placeholderId);
+    const frameShell = image?.closest(".frame-shell");
     let active = false;
     let retryTimer = 0;
 
@@ -127,6 +128,7 @@
 
     const attach = () => {
       if (!active || !image) return;
+      image.classList.remove("is-ready");
       showPlaceholder("连接图像流中");
       image.src = `${path}?ts=${Date.now()}`;
     };
@@ -135,14 +137,25 @@
       window.clearTimeout(retryTimer);
       retryTimer = 0;
       if (!image) return;
+      image.classList.remove("is-ready");
       image.removeAttribute("src");
       image.src = "";
       showPlaceholder("切换到该视图后开始拉流");
     };
 
     if (image) {
-      image.addEventListener("load", hidePlaceholder);
+      image.addEventListener("load", () => {
+        hidePlaceholder();
+        image.classList.add("is-ready");
+        if (!frameShell) return;
+        const width = image.naturalWidth;
+        const height = image.naturalHeight;
+        if (width > 0 && height > 0) {
+          frameShell.style.setProperty("--frame-ratio", `${width} / ${height}`);
+        }
+      });
       image.addEventListener("error", () => {
+        image.classList.remove("is-ready");
         showPlaceholder("图像流暂时不可用，正在重连");
         if (!active || retryTimer) return;
         retryTimer = window.setTimeout(() => {
@@ -399,10 +412,10 @@
   };
 
   const toggleFullscreen = async (panelSelector) => {
-    const panel = document.querySelector(panelSelector);
-    if (!panel) return;
+    const frameShell = document.querySelector(panelSelector);
+    if (!frameShell) return;
     if (!document.fullscreenElement) {
-      await panel.requestFullscreen();
+      await frameShell.requestFullscreen();
       document.body.classList.add("fullscreen-mode");
       syncChartView();
       return;
@@ -429,11 +442,11 @@
   const bindFullscreen = () => {
     document
       .getElementById("overview-fullscreen-btn")
-      ?.addEventListener("click", () => toggleFullscreen(".hero-panel").catch((err) => console.warn(err)));
+      ?.addEventListener("click", () => toggleFullscreen(".hero-frame").catch((err) => console.warn(err)));
 
     document
       .getElementById("analysis-fullscreen-btn")
-      ?.addEventListener("click", () => toggleFullscreen(".analysis-video-panel").catch((err) => console.warn(err)));
+      ?.addEventListener("click", () => toggleFullscreen(".analysis-frame").catch((err) => console.warn(err)));
 
     document.addEventListener("fullscreenchange", () => {
       document.body.classList.toggle("fullscreen-mode", !!document.fullscreenElement);

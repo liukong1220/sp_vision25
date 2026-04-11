@@ -39,7 +39,7 @@ namespace
 {
 const std::string keys =
   "{help h usage ? |                   | 输出命令行参数说明 }"
-  "{config-path c  | configs/standard3.yaml | yaml配置文件的路径}"
+  "{config-path c  | configs/demo.yaml | yaml配置文件的路径}"
   "{timestamp-path |                   | 显式指定txt时间戳文件路径}"
   "{start-index s  | 0                 | 视频起始帧下标    }"
   "{end-index e    | 0                 | 视频结束帧下标    }"
@@ -53,7 +53,7 @@ const std::string keys =
   "{web-scale      | 0.7               | 网页图像缩放系数(显式传参时覆盖yaml) }"
   "{web-jpeg-quality | 70              | 网页JPEG质量(30-95, 显式传参时覆盖yaml) }"
   "{web-client-ttl-ms | 2000           | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }"
-  "{@input-path    | assets/demo/test2.mp4  | avi和txt文件的路径}";
+  "{@input-path    | assets/demo/demo.avi  | avi和txt文件的路径}";
 
 bool is_video_extension(const std::string & ext)
 {
