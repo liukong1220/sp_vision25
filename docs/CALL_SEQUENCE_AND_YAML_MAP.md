@@ -216,7 +216,7 @@ sequenceDiagram
 | 参数组 | standard / mt_standard（Aimer） | standard_mpc / auto_aim_debug_mpc（Planner） |
 |---|---|---|
 | YOLO/Detector/Solver/Tracker | 生效 | 生效 |
-| Aimer参数（`comming/leaving`） | 生效 | 不生效 |
+| Aimer参数（`comming/leaving`） | 生效 | 生效 |
 | Shooter参数（`first/second_tolerance`等） | 生效 | 不生效 |
 | Planner参数（`Q/R/max_acc/fire_thresh`） | 不生效 | 生效 |
 | CBoard参数（can id等） | 生效（CBoard程序） | 不生效（Gimbal程序） |

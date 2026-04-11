@@ -49,6 +49,8 @@ public:
   bool debug_used_spin_gate = false;
   double debug_delay_time = 0.0;
   double debug_center_yaw = 0.0;
+  double debug_selected_z_offset = 0.0;
+  bool debug_fixed_center_rotation_model = false;
   std::vector<double> debug_delta_angle_list;
   Planner(const std::string & config_path);
 

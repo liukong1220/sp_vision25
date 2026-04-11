@@ -5,6 +5,7 @@
 #include <chrono>
 #include <list>
 #include <string>
+#include <vector>
 
 #include "armor.hpp"
 #include "solver.hpp"
@@ -38,6 +39,10 @@ private:
   int temp_lost_count_;
   int outpost_max_temp_lost_count_;
   int normal_temp_lost_count_;
+  double outpost_radius_;
+  double outpost_spin_speed_lock_;
+  bool outpost_fixed_center_rotation_model_;
+  std::vector<double> outpost_armor_z_offsets_;
   std::string state_, pre_state_;
   Target target_;
   std::chrono::steady_clock::time_point last_timestamp_;

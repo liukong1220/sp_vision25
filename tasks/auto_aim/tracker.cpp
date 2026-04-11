@@ -23,6 +23,18 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
   normal_temp_lost_count_ = max_temp_lost_count_;
+  outpost_radius_ = tools::read_or<double>(yaml, "outpost_radius", 0.2765);
+  outpost_spin_speed_lock_ = tools::read_or<double>(yaml, "outpost_spin_speed_lock", 2.51);
+  outpost_fixed_center_rotation_model_ =
+    tools::read_or<bool>(yaml, "outpost_fixed_center_rotation_model", true);
+  outpost_armor_z_offsets_ =
+    tools::read_or<std::vector<double>>(yaml, "outpost_armor_z_offsets", {0.0, -0.102, 0.102});
+  if (outpost_armor_z_offsets_.size() != 3) {
+    tools::logger()->warn(
+      "[Tracker] outpost_armor_z_offsets size {} invalid, fallback to default 3-board model",
+      outpost_armor_z_offsets_.size());
+    outpost_armor_z_offsets_ = {0.0, -0.102, 0.102};
+  }
 }
 
 std::string Tracker::state() const { return state_; }
@@ -40,14 +52,6 @@ std::list<Target> Tracker::track(
   }
   // 过滤掉非我方装甲板
   armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
-
-
-  // 过滤前哨站顶部装甲板
-  // armors.remove_if([this](const auto_aim::Armor & a) {
-  //   return a.name == ArmorName::outpost &&
-  //          solver_.oupost_reprojection_error(a, 27.5 * CV_PI / 180.0) <
-  //            solver_.oupost_reprojection_error(a, -15 * CV_PI / 180.0);
-  // });
 
   // 优先选择靠近图像中心的装甲板
   armors.sort([](const Armor & a, const Armor & b) {
@@ -247,7 +251,9 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
 
   else if (armor.name == ArmorName::outpost) {
     Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.2765, 3, P0_dig);
+    target_ = Target(
+      armor, t, outpost_radius_, 3, P0_dig, outpost_armor_z_offsets_,
+      outpost_fixed_center_rotation_model_, outpost_spin_speed_lock_);
   }
 
   else if (armor.name == ArmorName::base) {

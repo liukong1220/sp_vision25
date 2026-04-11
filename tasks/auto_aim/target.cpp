@@ -11,7 +11,8 @@ namespace auto_aim
 {
 Target::Target(
   const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
-  Eigen::VectorXd P0_dig)
+  Eigen::VectorXd P0_dig, const std::vector<double> & armor_z_offsets,
+  bool fixed_center_rotation_model, double spin_speed_lock)
 : name(armor.name),
   armor_type(armor.type),
   jumped(false),
@@ -21,10 +22,17 @@ Target::Target(
   t_(t),
   is_switch_(false),
   is_converged_(false),
+  fixed_center_rotation_model_(fixed_center_rotation_model),
+  spin_speed_lock_(spin_speed_lock),
   switch_count_(0)
 {
   auto r = radius;
   priority = armor.priority;
+  armor_z_offsets_.assign(armor_num_, 0.0);
+  for (int i = 0; i < std::min<int>(armor_num_, armor_z_offsets.size()); ++i) {
+    armor_z_offsets_[i] = armor_z_offsets[i];
+  }
+
   const Eigen::VectorXd & xyz = armor.xyz_in_world;
   const Eigen::VectorXd & ypr = armor.ypr_in_world;
 
@@ -51,11 +59,13 @@ Target::Target(
   ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
 }
 
-Target::Target(double x, double vyaw, double radius, double h) : armor_num_(4)
+Target::Target(double x, double vyaw, double radius, double h)
+: armor_num_(4), fixed_center_rotation_model_(false), spin_speed_lock_(2.51)
 {
   Eigen::VectorXd x0{{x, 0, 0, 0, 0, 0, 0, vyaw, radius, 0, h}};
   Eigen::VectorXd P0_dig{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
+  armor_z_offsets_.assign(armor_num_, 0.0);
 
   // 防止夹角求和出现异常值
   auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
@@ -76,63 +86,89 @@ void Target::predict(std::chrono::steady_clock::time_point t)
 
 void Target::predict(double dt)
 {
-  // 状态转移矩阵
-  // clang-format off
-  Eigen::MatrixXd F{
-    {1, dt,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-    {0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0},
-    {0,  0,  1, dt,  0,  0,  0,  0,  0,  0,  0},
-    {0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0},
-    {0,  0,  0,  0,  1, dt,  0,  0,  0,  0,  0},
-    {0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0},
-    {0,  0,  0,  0,  0,  0,  1, dt,  0,  0,  0},
-    {0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0},
-    {0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0},
-    {0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0},
-    {0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1}
-  };
-  // clang-format on
-
-  // Piecewise White Noise Model
-  // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
-  double v1, v2;
-  if (name == ArmorName::outpost) {
-    v1 = 10;   // 前哨站加速度方差
-    v2 = 0.1;  // 前哨站角加速度方差
-  } else {
-    v1 = 100;  // 加速度方差
-    v2 = 400;  // 角加速度方差
-  }
-  auto a = dt * dt * dt * dt / 4;
-  auto b = dt * dt * dt / 2;
-  auto c = dt * dt;
-  // 预测过程噪声偏差的方差
-  // clang-format off
-  Eigen::MatrixXd Q{
-    {a * v1, b * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0},
-    {b * v1, c * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0},
-    {     0,      0, a * v1, b * v1,      0,      0,      0,      0, 0, 0, 0},
-    {     0,      0, b * v1, c * v1,      0,      0,      0,      0, 0, 0, 0},
-    {     0,      0,      0,      0, a * v1, b * v1,      0,      0, 0, 0, 0},
-    {     0,      0,      0,      0, b * v1, c * v1,      0,      0, 0, 0, 0},
-    {     0,      0,      0,      0,      0,      0, a * v2, b * v2, 0, 0, 0},
-    {     0,      0,      0,      0,      0,      0, b * v2, c * v2, 0, 0, 0},
-    {     0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0},
-    {     0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0},
-    {     0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0}
-  };
-  // clang-format on
-
-  // 防止夹角求和出现异常值
-  auto f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
+  Eigen::MatrixXd F = Eigen::MatrixXd::Identity(11, 11);
+  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(11, 11);
+  std::function<Eigen::VectorXd(const Eigen::VectorXd &)> f =
+    [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
     Eigen::VectorXd x_prior = F * x;
     x_prior[6] = tools::limit_rad(x_prior[6]);
     return x_prior;
   };
 
-  // 前哨站转速特判
-  if (this->convergened() && this->name == ArmorName::outpost && std::abs(this->ekf_.x[7]) > 2)
-    this->ekf_.x[7] = this->ekf_.x[7] > 0 ? 2.51 : -2.51;
+  if (fixed_center_rotation_model_) {
+    const double dt_abs = std::max(std::abs(dt), 1e-3);
+
+    F(6, 7) = dt;
+    F(1, 1) = 0.0;
+    F(3, 3) = 0.0;
+    F(5, 5) = 0.0;
+
+    Q(0, 0) = 1e-5 * dt_abs;
+    Q(1, 1) = 1e-4 * dt_abs;
+    Q(2, 2) = 1e-5 * dt_abs;
+    Q(3, 3) = 1e-4 * dt_abs;
+    Q(4, 4) = 1e-5 * dt_abs;
+    Q(5, 5) = 1e-4 * dt_abs;
+    Q(6, 6) = 2e-3 * dt_abs;
+    Q(7, 7) = 5e-3 * dt_abs;
+
+    f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
+      Eigen::VectorXd x_prior = x;
+      x_prior[1] = 0.0;
+      x_prior[3] = 0.0;
+      x_prior[5] = 0.0;
+      x_prior[6] = tools::limit_rad(x[6] + x[7] * dt);
+      return x_prior;
+    };
+  } else {
+    // 状态转移矩阵
+    // clang-format off
+    F <<
+      1, dt,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  1, dt,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  1, dt,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  1, dt,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1;
+    // clang-format on
+
+    // Piecewise White Noise Model
+    // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
+    double v1, v2;
+    if (name == ArmorName::outpost) {
+      v1 = 10;   // 前哨站加速度方差
+      v2 = 0.1;  // 前哨站角加速度方差
+    } else {
+      v1 = 100;  // 加速度方差
+      v2 = 400;  // 角加速度方差
+    }
+    auto a = dt * dt * dt * dt / 4;
+    auto b = dt * dt * dt / 2;
+    auto c = dt * dt;
+    // clang-format off
+    Q <<
+      a * v1, b * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0,
+      b * v1, c * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0,
+           0,      0, a * v1, b * v1,      0,      0,      0,      0, 0, 0, 0,
+           0,      0, b * v1, c * v1,      0,      0,      0,      0, 0, 0, 0,
+           0,      0,      0,      0, a * v1, b * v1,      0,      0, 0, 0, 0,
+           0,      0,      0,      0, b * v1, c * v1,      0,      0, 0, 0, 0,
+           0,      0,      0,      0,      0,      0, a * v2, b * v2, 0, 0, 0,
+           0,      0,      0,      0,      0,      0, b * v2, c * v2, 0, 0, 0,
+           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0,
+           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0,
+           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0;
+    // clang-format on
+  }
+
+  if (this->convergened() && this->name == ArmorName::outpost && std::abs(this->ekf_.x[7]) > 2) {
+    this->ekf_.x[7] = this->ekf_.x[7] > 0 ? spin_speed_lock_ : -spin_speed_lock_;
+  }
 
   ekf_.predict(F, Q, f);
 }
@@ -184,21 +220,7 @@ void Target::update(const Armor & armor)
   last_id = id;
   update_count_++;
 
-  auto compensated_armor = compensate_outpost_height(armor, id);
-  update_ypda(compensated_armor, id);
-}
-
-Armor Target::compensate_outpost_height(const Armor & armor, int id) const
-{
-  if (name != ArmorName::outpost || armor_num_ != 3) return armor;
-
-  Armor compensated = armor;
-  constexpr std::array<double, 3> kOutpostZOffsetById{{0.0, -0.102, 0.102}};
-  const int normalized_id = (id % 3 + 3) % 3;
-
-  compensated.xyz_in_world.z() += kOutpostZOffsetById[normalized_id];
-  compensated.ypd_in_world = tools::xyz2ypd(compensated.xyz_in_world);
-  return compensated;
+  update_ypda(armor, id);
 }
 
 void Target::update_ypda(const Armor & armor, int id)
@@ -276,6 +298,15 @@ std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
   return _armor_xyza_list;
 }
 
+double Target::armor_z_offset(int id) const
+{
+  if (armor_z_offsets_.empty()) return 0.0;
+  const int normalized_id = (id % armor_num_ + armor_num_) % armor_num_;
+  return armor_z_offsets_[normalized_id];
+}
+
+bool Target::fixed_center_rotation_model() const { return fixed_center_rotation_model_; }
+
 bool Target::diverged() const
 {
   // 检查装甲板参数是否在合理范围内
@@ -320,7 +351,7 @@ Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
   auto r = (use_l_h) ? x[8] + x[9] : x[8];
   auto armor_x = x[0] - r * std::cos(angle);
   auto armor_y = x[2] - r * std::sin(angle);
-  auto armor_z = (use_l_h) ? x[4] + x[10] : x[4];
+  auto armor_z = (use_l_h) ? x[4] + x[10] : x[4] + armor_z_offset(id);
 
   return {armor_x, armor_y, armor_z};
 }

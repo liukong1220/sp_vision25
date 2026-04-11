@@ -310,6 +310,8 @@ Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_sp
   debug_armor_id = selection.armor_id;
   debug_used_spin_gate = selection.used_spin_gate;
   debug_center_yaw = selection.center_yaw;
+  debug_selected_z_offset = target.armor_z_offset(selection.armor_id);
+  debug_fixed_center_rotation_model = target.fixed_center_rotation_model();
   debug_delta_angle_list = selection.delta_angle_list;
 
   const Eigen::Vector3d xyz = selection.xyza.head<3>();

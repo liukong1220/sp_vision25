@@ -637,10 +637,14 @@ int main(int argc, char * argv[])
       data["planner_selected_armor"] = planner.debug_armor_id;
       data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
       data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
+      data["planner_selected_z_offset"] = planner.debug_selected_z_offset;
+      data["planner_fixed_model"] = planner.debug_fixed_center_rotation_model ? 1 : 0;
 
       snapshot["selected_armor"] = planner.debug_armor_id;
       snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
       snapshot["spin_gate"] = planner.debug_used_spin_gate;
+      snapshot["selected_z_offset_m"] = planner.debug_selected_z_offset;
+      snapshot["fixed_center_rotation_model"] = planner.debug_fixed_center_rotation_model;
 
       {
         std::lock_guard<std::mutex> lock(command_state_mutex);
@@ -691,6 +695,10 @@ int main(int argc, char * argv[])
       tools::delta_time(std::chrono::steady_clock::now(), t) * 1000.0;
     const double current_w = current_target.has_value() ? current_target->ekf_x()[7] : 0.0;
     const double current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
+    const double current_selected_z_offset =
+      current_target.has_value() ? debug_planner.debug_selected_z_offset : 0.0;
+    const bool current_fixed_model =
+      current_target.has_value() && debug_planner.debug_fixed_center_rotation_model;
 
     nlohmann::json latest_command_state;
     {
@@ -738,6 +746,8 @@ int main(int argc, char * argv[])
       web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
       web_state["planner"]["w_rad_s"] = current_w;
       web_state["planner"]["h_m"] = current_h;
+      web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
+      web_state["planner"]["fixed_center_rotation_model"] = current_fixed_model;
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
       web_state["command"] = latest_command_state;
       web_debugger->update_state(web_state);
@@ -916,12 +926,21 @@ int main(int argc, char * argv[])
       const int info_x = 12;
       const int info_y = 20;
       const int info_line_gap = 18;
+      const bool is_outpost =
+        current_target.has_value() && current_target->name == auto_aim::ArmorName::outpost;
+      const std::string geometry_line = is_outpost ?
+        fmt::format("dz: {:.3f} m", current_selected_z_offset) :
+        fmt::format("h: {:.3f} m", current_h);
+      const std::string model_line = is_outpost ?
+        fmt::format("model: {}", current_fixed_model ? "fixed-z" : "free") :
+        "model: generic";
       const std::vector<std::string> planner_lines = {
         fmt::format("armor_id: {}", debug_planner.debug_armor_id),
         fmt::format("spin_gate: {}", debug_planner.debug_used_spin_gate ? "on" : "off"),
         fmt::format("delay: {:.1f} ms", debug_planner.debug_delay_time * 1000.0),
         fmt::format("w: {:.2f} rad/s", current_w),
-        fmt::format("h: {:.3f} m", current_h),
+        geometry_line,
+        model_line,
       };
       for (size_t i = 0; i < planner_lines.size(); ++i) {
         const cv::Point org(info_x, info_y + static_cast<int>(i) * info_line_gap);
