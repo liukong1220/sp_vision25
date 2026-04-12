@@ -236,6 +236,34 @@
               <div id="json-log"></div>
             </div>
           </article>
+
+          <article class="panel param-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Runtime Tuning</span>
+                <h2>参数热调</h2>
+              </div>
+              <div class="toolbar">
+                <button class="ghost-btn" id="refresh-params-btn" type="button">刷新</button>
+                <button class="ghost-btn" id="reset-all-params-btn" type="button">恢复 YAML</button>
+              </div>
+            </div>
+            <div class="param-status-banner" id="param-status-banner">
+              运行时参数只影响当前进程，不回写 YAML；每次网页改参都会自动落日志和快照。
+            </div>
+            <div class="panel-meta" id="param-session-meta">等待参数会话连接</div>
+            <div class="param-groups" id="param-groups"></div>
+            <div class="param-export-shell">
+              <div class="panel-head param-export-head">
+                <div>
+                  <span class="eyebrow">Copy Back</span>
+                  <h2>待回填 YAML 片段</h2>
+                </div>
+                <span class="panel-meta">只显示网页改过的覆盖项</span>
+              </div>
+              <textarea id="param-export-text" readonly spellcheck="false"></textarea>
+            </div>
+          </article>
         </div>
       </section>
     </main>

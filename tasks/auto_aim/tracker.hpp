@@ -2,6 +2,7 @@
 #define AUTO_AIM__TRACKER_HPP
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <chrono>
 #include <list>
 #include <string>
@@ -31,6 +32,8 @@ public:
     std::chrono::steady_clock::time_point t, bool use_enemy_color = true);
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   Solver & solver_;
   Color enemy_color_;
   int min_detect_count_;
@@ -47,6 +50,8 @@ private:
   Target target_;
   std::chrono::steady_clock::time_point last_timestamp_;
   ArmorPriority omni_target_priority_;
+
+  void refresh_runtime_params_if_needed();
 
   void state_machine(bool found);
 

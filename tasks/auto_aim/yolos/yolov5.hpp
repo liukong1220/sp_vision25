@@ -1,6 +1,7 @@
 #ifndef AUTO_AIM__YOLOV5_HPP
 #define AUTO_AIM__YOLOV5_HPP
 
+#include <cstdint>
 #include <list>
 #include <opencv2/opencv.hpp>
 #include <openvino/openvino.hpp>
@@ -24,6 +25,8 @@ public:
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   std::string device_, model_path_;
   std::string save_path_, debug_path_;
   bool debug_, use_roi_, use_traditional_;
@@ -42,6 +45,8 @@ private:
 
   Detector detector_;
   friend class MultiThreadDetector;
+
+  void refresh_runtime_params_if_needed();
 
   bool check_name(const Armor & armor) const;
   bool check_type(const Armor & armor) const;

@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/trajectory.hpp"
 #include "tools/yaml.hpp"
 
@@ -137,8 +139,9 @@ AimSelection choose_aim_selection(
 }  // namespace
 
 Planner::Planner(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path)), yaw_solver_(nullptr), pitch_solver_(nullptr)
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
   yaw_offset_ = tools::read<double>(yaml, "yaw_offset") / 57.3;
   pitch_offset_ = tools::read<double>(yaml, "pitch_offset") / 57.3;
   coming_angle_ = tools::read<double>(yaml, "comming_angle") / 57.3;
@@ -147,13 +150,16 @@ Planner::Planner(const std::string & config_path)
   decision_speed_ = tools::read<double>(yaml, "decision_speed");
   high_speed_delay_time_ = tools::read<double>(yaml, "high_speed_delay_time");
   low_speed_delay_time_ = tools::read<double>(yaml, "low_speed_delay_time");
-  
-  setup_yaw_solver(config_path);
-  setup_pitch_solver(config_path);
+
+  setup_yaw_solver();
+  setup_pitch_solver();
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 }
 
 Plan Planner::plan(Target target, double bullet_speed)
 {
+  refresh_runtime_params_if_needed();
+
   // 0. Check bullet speed
   if (bullet_speed < 10 || bullet_speed > 25) {
     bullet_speed = 22;
@@ -226,6 +232,7 @@ Plan Planner::plan(Target target, double bullet_speed)
 
 Plan Planner::plan(std::optional<Target> target, double bullet_speed)
 {
+  refresh_runtime_params_if_needed();
   debug_delay_time = 0.0;
   if (!target.has_value()) return {false};
 
@@ -250,19 +257,61 @@ AimSelection Planner::preview_aim_selection(const Target & target) const
   return choose_aim_selection(target, coming_angle, leaving_angle, lock_id);
 }
 
-void Planner::setup_yaw_solver(const std::string & config_path)
+void Planner::refresh_runtime_params_if_needed()
 {
-  auto yaml = tools::load(config_path);
-  auto max_yaw_acc = tools::read<double>(yaml, "max_yaw_acc");
-  auto Q_yaw = tools::read<std::vector<double>>(yaml, "Q_yaw");
-  auto R_yaw = tools::read<std::vector<double>>(yaml, "R_yaw");
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  yaw_offset_ = tools::runtime_params::get_double(config_path_, "yaw_offset") / 57.3;
+  pitch_offset_ = tools::runtime_params::get_double(config_path_, "pitch_offset") / 57.3;
+  coming_angle_ = tools::runtime_params::get_double(config_path_, "comming_angle") / 57.3;
+  leaving_angle_ = tools::runtime_params::get_double(config_path_, "leaving_angle") / 57.3;
+  fire_thresh_ = tools::runtime_params::get_double(config_path_, "fire_thresh");
+  decision_speed_ = tools::runtime_params::get_double(config_path_, "decision_speed");
+  high_speed_delay_time_ = tools::runtime_params::get_double(config_path_, "high_speed_delay_time");
+  low_speed_delay_time_ = tools::runtime_params::get_double(config_path_, "low_speed_delay_time");
+
+  setup_yaw_solver();
+  setup_pitch_solver();
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[Planner] runtime params updated to v{}", current_version);
+}
+
+void Planner::setup_yaw_solver()
+{
+  double max_yaw_acc = 0.0;
+  std::vector<double> Q_yaw;
+  std::vector<double> R_yaw;
+
+  if (tools::runtime_params::is_registered(config_path_)) {
+    max_yaw_acc = tools::runtime_params::get_double(config_path_, "max_yaw_acc");
+    Q_yaw = tools::runtime_params::get_number_array(config_path_, "Q_yaw");
+    R_yaw = tools::runtime_params::get_number_array(config_path_, "R_yaw");
+  } else {
+    auto yaml = tools::load(config_path_);
+    max_yaw_acc = tools::read<double>(yaml, "max_yaw_acc");
+    Q_yaw = tools::read<std::vector<double>>(yaml, "Q_yaw");
+    R_yaw = tools::read<std::vector<double>>(yaml, "R_yaw");
+  }
 
   Eigen::MatrixXd A{{1, DT}, {0, 1}};
   Eigen::MatrixXd B{{0}, {DT}};
   Eigen::VectorXd f{{0, 0}};
   Eigen::Matrix<double, 2, 1> Q(Q_yaw.data());
   Eigen::Matrix<double, 1, 1> R(R_yaw.data());
-  tiny_setup(&yaw_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), 1.0, 2, 1, HORIZON, 0);
+  constexpr double rho = 1.0;
+  if (!yaw_solver_) {
+    tiny_setup(&yaw_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), rho, 2, 1, HORIZON, 0);
+  } else {
+    yaw_solver_->work->Q = Q + Eigen::Matrix<double, 2, 1>::Constant(rho);
+    yaw_solver_->work->R = R + Eigen::Matrix<double, 1, 1>::Constant(rho);
+    yaw_solver_->work->Adyn = A;
+    yaw_solver_->work->Bdyn = B;
+    yaw_solver_->work->fdyn = f;
+    tiny_precompute_and_set_cache(
+      yaw_solver_->cache, A, B, f, yaw_solver_->work->Q.asDiagonal(),
+      yaw_solver_->work->R.asDiagonal(), 2, 1, rho, 0);
+  }
 
   Eigen::MatrixXd x_min = Eigen::MatrixXd::Constant(2, HORIZON, -1e17);
   Eigen::MatrixXd x_max = Eigen::MatrixXd::Constant(2, HORIZON, 1e17);
@@ -273,19 +322,41 @@ void Planner::setup_yaw_solver(const std::string & config_path)
   yaw_solver_->settings->max_iter = 10;
 }
 
-void Planner::setup_pitch_solver(const std::string & config_path)
+void Planner::setup_pitch_solver()
 {
-  auto yaml = tools::load(config_path);
-  auto max_pitch_acc = tools::read<double>(yaml, "max_pitch_acc");
-  auto Q_pitch = tools::read<std::vector<double>>(yaml, "Q_pitch");
-  auto R_pitch = tools::read<std::vector<double>>(yaml, "R_pitch");
+  double max_pitch_acc = 0.0;
+  std::vector<double> Q_pitch;
+  std::vector<double> R_pitch;
+
+  if (tools::runtime_params::is_registered(config_path_)) {
+    max_pitch_acc = tools::runtime_params::get_double(config_path_, "max_pitch_acc");
+    Q_pitch = tools::runtime_params::get_number_array(config_path_, "Q_pitch");
+    R_pitch = tools::runtime_params::get_number_array(config_path_, "R_pitch");
+  } else {
+    auto yaml = tools::load(config_path_);
+    max_pitch_acc = tools::read<double>(yaml, "max_pitch_acc");
+    Q_pitch = tools::read<std::vector<double>>(yaml, "Q_pitch");
+    R_pitch = tools::read<std::vector<double>>(yaml, "R_pitch");
+  }
 
   Eigen::MatrixXd A{{1, DT}, {0, 1}};
   Eigen::MatrixXd B{{0}, {DT}};
   Eigen::VectorXd f{{0, 0}};
   Eigen::Matrix<double, 2, 1> Q(Q_pitch.data());
   Eigen::Matrix<double, 1, 1> R(R_pitch.data());
-  tiny_setup(&pitch_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), 1.0, 2, 1, HORIZON, 0);
+  constexpr double rho = 1.0;
+  if (!pitch_solver_) {
+    tiny_setup(&pitch_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), rho, 2, 1, HORIZON, 0);
+  } else {
+    pitch_solver_->work->Q = Q + Eigen::Matrix<double, 2, 1>::Constant(rho);
+    pitch_solver_->work->R = R + Eigen::Matrix<double, 1, 1>::Constant(rho);
+    pitch_solver_->work->Adyn = A;
+    pitch_solver_->work->Bdyn = B;
+    pitch_solver_->work->fdyn = f;
+    tiny_precompute_and_set_cache(
+      pitch_solver_->cache, A, B, f, pitch_solver_->work->Q.asDiagonal(),
+      pitch_solver_->work->R.asDiagonal(), 2, 1, rho, 0);
+  }
 
   Eigen::MatrixXd x_min = Eigen::MatrixXd::Constant(2, HORIZON, -1e17);
   Eigen::MatrixXd x_max = Eigen::MatrixXd::Constant(2, HORIZON, 1e17);

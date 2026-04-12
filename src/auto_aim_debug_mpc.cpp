@@ -121,12 +121,15 @@ int main(int argc, char * argv[])
   if (!disable_web) {
     web_debugger = std::make_unique<tools::WebDebugger>(web_host, web_port);
     if (web_debugger->good()) {
+      web_debugger->set_runtime_config_path(config_path);
       web_debugger->set_plot_history_limit(600);
       tools::logger()->info(
         "Web debugger listening on {}:{} (open {})", web_host, web_port, web_debugger->url());
       tools::logger()->info(
         "Web debugger config: fps={} scale={} jpeg={} ttl={}ms", web_fps, display_scale,
         web_jpeg_quality, web_client_ttl.count());
+      tools::logger()->info(
+        "Web runtime params bound to config: {}", tools::resolve_config_path_string(config_path));
     } else {
       tools::logger()->warn("Web debugger disabled because the server failed to start.");
       web_debugger.reset();

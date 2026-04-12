@@ -2,6 +2,7 @@
 
 #include "tools/logger.hpp"
 #include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 
 #include <arpa/inet.h>
 #include <poll.h>
@@ -320,6 +321,12 @@ nlohmann::json WebDebugger::overlay_config() const
   return overlay_config_;
 }
 
+void WebDebugger::set_runtime_config_path(const std::string & config_path)
+{
+  runtime_config_path_ = tools::resolve_config_path_string(config_path);
+  tools::runtime_params::register_config(runtime_config_path_);
+}
+
 void WebDebugger::update_main_frame(const cv::Mat & frame, int jpeg_quality)
 {
   if (frame.empty()) return;
@@ -577,6 +584,83 @@ void WebDebugger::handle_client(int client_fd)
       send_response(
         client_fd, "400 Bad Request", "application/json; charset=utf-8",
         R"({"error":"invalid overlay config"})");
+    }
+    return;
+  }
+
+  if (path == "/api/params") {
+    if (runtime_config_path_.empty()) {
+      send_response(
+        client_fd, "503 Service Unavailable", "application/json; charset=utf-8",
+        nlohmann::json({
+          {"enabled", false},
+          {"error", "runtime parameter session not configured"},
+        }).dump());
+      return;
+    }
+
+    if (method == "GET") {
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        tools::runtime_params::describe(runtime_config_path_).dump());
+      return;
+    }
+
+    try {
+      const auto incoming = body.empty() ? nlohmann::json::object() : nlohmann::json::parse(body);
+      const auto payload = tools::runtime_params::apply(runtime_config_path_, incoming);
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        payload.dump());
+    } catch (const std::exception & e) {
+      send_response(
+        client_fd, "400 Bad Request", "application/json; charset=utf-8",
+        nlohmann::json({{"error", e.what()}}).dump());
+    }
+    return;
+  }
+
+  if (path == "/api/params/reset") {
+    if (runtime_config_path_.empty()) {
+      send_response(
+        client_fd, "503 Service Unavailable", "application/json; charset=utf-8",
+        nlohmann::json({
+          {"enabled", false},
+          {"error", "runtime parameter session not configured"},
+        }).dump());
+      return;
+    }
+
+    if (method != "POST") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "POST only");
+      return;
+    }
+
+    try {
+      const auto incoming = body.empty() ? nlohmann::json::object() : nlohmann::json::parse(body);
+      std::vector<std::string> keys;
+      if (incoming.contains("keys")) {
+        if (!incoming.at("keys").is_array()) {
+          throw std::runtime_error("keys must be an array");
+        }
+        for (const auto & key : incoming.at("keys")) {
+          if (!key.is_string()) {
+            throw std::runtime_error("keys must contain strings");
+          }
+          keys.push_back(key.get<std::string>());
+        }
+      }
+
+      const auto payload = tools::runtime_params::reset(runtime_config_path_, keys);
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        payload.dump());
+    } catch (const std::exception & e) {
+      send_response(
+        client_fd, "400 Bad Request", "application/json; charset=utf-8",
+        nlohmann::json({{"error", e.what()}}).dump());
     }
     return;
   }

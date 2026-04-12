@@ -2,8 +2,10 @@
 #define AUTO_AIM__PLANNER_HPP
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <list>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "tasks/auto_aim/target.hpp"
@@ -59,6 +61,8 @@ public:
   AimSelection preview_aim_selection(const Target & target) const;
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   double yaw_offset_;
   double pitch_offset_;
   double fire_thresh_;
@@ -69,8 +73,9 @@ private:
   TinySolver * yaw_solver_;
   TinySolver * pitch_solver_;
 
-  void setup_yaw_solver(const std::string & config_path);
-  void setup_pitch_solver(const std::string & config_path);
+  void refresh_runtime_params_if_needed();
+  void setup_yaw_solver();
+  void setup_pitch_solver();
 
   Eigen::Matrix<double, 2, 1> aim(const Target & target, double bullet_speed);
   Trajectory get_trajectory(Target & target, double yaw0, double bullet_speed);

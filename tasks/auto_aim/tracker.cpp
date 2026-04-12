@@ -4,12 +4,15 @@
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace auto_aim
 {
 Tracker::Tracker(const std::string & config_path, Solver & solver)
-: solver_{solver},
+: config_path_(tools::resolve_config_path_string(config_path)),
+  solver_{solver},
   detect_count_(0),
   temp_lost_count_(0),
   state_{"lost"},
@@ -17,7 +20,7 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   last_timestamp_(std::chrono::steady_clock::now()),
   omni_target_priority_{ArmorPriority::fifth}
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
   enemy_color_ = (yaml["enemy_color"].as<std::string>() == "red") ? Color::red : Color::blue;
   min_detect_count_ = yaml["min_detect_count"].as<int>();
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
@@ -35,6 +38,7 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
       outpost_armor_z_offsets_.size());
     outpost_armor_z_offsets_ = {0.0, -0.102, 0.102};
   }
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 }
 
 std::string Tracker::state() const { return state_; }
@@ -42,6 +46,8 @@ std::string Tracker::state() const { return state_; }
 std::list<Target> Tracker::track(
   std::list<Armor> & armors, std::chrono::steady_clock::time_point t, bool use_enemy_color)
 {
+  refresh_runtime_params_if_needed();
+
   auto dt = tools::delta_time(t, last_timestamp_);
   last_timestamp_ = t;
 
@@ -103,6 +109,8 @@ std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
   const std::vector<omniperception::DetectionResult> & detection_queue, std::list<Armor> & armors,
   std::chrono::steady_clock::time_point t, bool use_enemy_color)
 {
+  refresh_runtime_params_if_needed();
+
   omniperception::DetectionResult switch_target{std::list<Armor>(), t, 0, 0};
   omniperception::DetectionResult temp_target{std::list<Armor>(), t, 0, 0};
   if (!detection_queue.empty()) {
@@ -179,6 +187,58 @@ std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
 
   std::list<Target> targets = {target_};
   return {switch_target, targets};
+}
+
+void Tracker::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  const auto old_enemy_color = enemy_color_;
+  const auto old_outpost_radius = outpost_radius_;
+  const auto old_outpost_spin_speed_lock = outpost_spin_speed_lock_;
+  const auto old_outpost_fixed_center_rotation_model = outpost_fixed_center_rotation_model_;
+  const auto old_outpost_armor_z_offsets = outpost_armor_z_offsets_;
+
+  enemy_color_ =
+    (tools::runtime_params::get_string(config_path_, "enemy_color") == "red") ?
+    Color::red : Color::blue;
+  min_detect_count_ = tools::runtime_params::get_int(config_path_, "min_detect_count");
+  max_temp_lost_count_ = tools::runtime_params::get_int(config_path_, "max_temp_lost_count");
+  outpost_max_temp_lost_count_ =
+    tools::runtime_params::get_int(config_path_, "outpost_max_temp_lost_count");
+  normal_temp_lost_count_ = max_temp_lost_count_;
+  outpost_radius_ = tools::runtime_params::get_double(config_path_, "outpost_radius");
+  outpost_spin_speed_lock_ =
+    tools::runtime_params::get_double(config_path_, "outpost_spin_speed_lock");
+  outpost_fixed_center_rotation_model_ =
+    tools::runtime_params::get_bool(config_path_, "outpost_fixed_center_rotation_model");
+  outpost_armor_z_offsets_ =
+    tools::runtime_params::get_number_array(config_path_, "outpost_armor_z_offsets");
+
+  if (outpost_armor_z_offsets_.size() != 3) {
+    tools::logger()->warn(
+      "[Tracker] outpost_armor_z_offsets size {} invalid, fallback to default 3-board model",
+      outpost_armor_z_offsets_.size());
+    outpost_armor_z_offsets_ = {0.0, -0.102, 0.102};
+  }
+
+  const bool reset_for_consistency =
+    old_enemy_color != enemy_color_ ||
+    old_outpost_radius != outpost_radius_ ||
+    old_outpost_spin_speed_lock != outpost_spin_speed_lock_ ||
+    old_outpost_fixed_center_rotation_model != outpost_fixed_center_rotation_model_ ||
+    old_outpost_armor_z_offsets != outpost_armor_z_offsets_;
+  if (reset_for_consistency && state_ != "lost") {
+    state_ = "lost";
+    pre_state_ = "lost";
+    detect_count_ = 0;
+    temp_lost_count_ = 0;
+    tools::logger()->info("[Tracker] runtime params changed, tracker reset for consistency");
+  }
+
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[Tracker] runtime params updated to v{}", current_version);
 }
 
 void Tracker::state_machine(bool found)

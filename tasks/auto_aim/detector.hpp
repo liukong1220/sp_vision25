@@ -1,6 +1,7 @@
 #ifndef AUTO_AIM__DETECTOR_HPP
 #define AUTO_AIM__DETECTOR_HPP
 
+#include <cstdint>
 #include <list>
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -24,6 +25,8 @@ public:
   friend class YOLOV8;
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   Classifier classifier_;
 
   double threshold_;
@@ -37,6 +40,8 @@ private:
 
   bool debug_;
   std::string save_path_;
+
+  void refresh_runtime_params_if_needed();
 
   // 利用PCA回归角点，参考自https://github.com/CSU-FYT-Vision/FYT2024_vision
   void lightbar_points_corrector(Lightbar & lightbar, const cv::Mat & gray_img) const;

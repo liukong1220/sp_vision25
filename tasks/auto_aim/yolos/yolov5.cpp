@@ -8,17 +8,19 @@
 #include "tools/logger.hpp"
 #include "tools/openvino_utils.hpp"
 #include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace auto_aim
 {
 YOLOV5::YOLOV5(const std::string & config_path, bool debug)
-: debug_(debug), detector_(config_path, false)
+: config_path_(tools::resolve_config_path_string(config_path)),
+  debug_(debug), detector_(config_path, false)
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
 
   model_path_ = tools::resolve_path_from_config_string(
-    config_path, yaml["yolov5_model_path"].as<std::string>());
+    config_path_, yaml["yolov5_model_path"].as<std::string>());
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
   min_confidence_ = yaml["min_confidence"].as<double>();
@@ -56,10 +58,13 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
   compiled_model_ = tools::ov_utils::compile_model_with_fallback(
     core_, model, device_, "YOLOV5",
     ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 }
 
 std::list<Armor> YOLOV5::detect(const cv::Mat & raw_img, int frame_count)
 {
+  refresh_runtime_params_if_needed();
+
   if (raw_img.empty()) {
     tools::logger()->warn("Empty img!, camera drop!");
     return std::list<Armor>();
@@ -101,6 +106,24 @@ std::list<Armor> YOLOV5::detect(const cv::Mat & raw_img, int frame_count)
   cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
 
   return parse(scale, output, raw_img, frame_count);
+}
+
+void YOLOV5::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  min_confidence_ = tools::runtime_params::get_double(config_path_, "min_confidence");
+  use_roi_ = tools::runtime_params::get_bool(config_path_, "use_roi");
+  use_traditional_ = tools::runtime_params::get_bool(config_path_, "use_traditional");
+  roi_.x = tools::runtime_params::get_int(config_path_, "roi.x");
+  roi_.y = tools::runtime_params::get_int(config_path_, "roi.y");
+  roi_.width = tools::runtime_params::get_int(config_path_, "roi.width");
+  roi_.height = tools::runtime_params::get_int(config_path_, "roi.height");
+  offset_ = cv::Point2f(static_cast<float>(roi_.x), static_cast<float>(roi_.y));
+
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[YOLOV5] runtime params updated to v{}", current_version);
 }
 
 std::list<Armor> YOLOV5::parse(

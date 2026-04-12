@@ -33,6 +33,7 @@ public:
   void set_plot_history_limit(size_t max_points);
   void update_overlay_config(const nlohmann::json & config);
   nlohmann::json overlay_config() const;
+  void set_runtime_config_path(const std::string & config_path);
 
   void update_main_frame(const cv::Mat & frame, int jpeg_quality = 70);
   void update_ballistic_frame(const cv::Mat & frame, int jpeg_quality = 70);
@@ -65,6 +66,7 @@ private:
   nlohmann::json overlay_config_ = nlohmann::json::object();
   nlohmann::json plot_history_ =
     nlohmann::json::object({{"time", nlohmann::json::array()}});
+  std::string runtime_config_path_;
   size_t max_plot_points_ = 360;
   std::vector<uchar> main_jpeg_;
   std::vector<uchar> ballistic_jpeg_;

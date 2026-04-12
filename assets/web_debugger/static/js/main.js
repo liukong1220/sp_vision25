@@ -77,6 +77,7 @@
   let currentView = "overview";
   let lastStateUpdatedAt = 0;
   let overlaySyncPending = false;
+  let runtimeParamSnapshot = null;
 
   const streamControllers = new Map();
 
@@ -114,6 +115,13 @@
         `${formatArmorId(index)}:${isFiniteNumber(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(1)} deg` : "--"}`,
       )
       .join("  ");
+  };
+
+  const formatParamValue = (value) => {
+    if (Array.isArray(value)) return value.join(", ");
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (value === null || value === undefined) return "--";
+    return String(value);
   };
 
   const setText = (id, value) => {
@@ -163,6 +171,248 @@
     if (!node) return;
     node.textContent = text;
     node.classList.toggle("overlay-sync-bad", isError);
+  };
+
+  const setRuntimeParamStatus = (text, isError = false) => {
+    const node = document.getElementById("param-status-banner");
+    if (!node) return;
+    node.textContent = text;
+    node.classList.toggle("param-status-bad", isError);
+  };
+
+  const setRuntimeParamMeta = (text) => {
+    const node = document.getElementById("param-session-meta");
+    if (!node) return;
+    node.textContent = text;
+  };
+
+  const parseRuntimeParamInput = (item, control) => {
+    if (!item || !control) throw new Error("参数控件不存在");
+
+    if (item.type === "boolean") return !!control.checked;
+    if (item.type === "enum") return control.value;
+
+    if (item.type === "integer") {
+      const value = Number(control.value);
+      if (!Number.isFinite(value)) throw new Error(`${item.label} 需要整数`);
+      return Math.round(value);
+    }
+
+    if (item.type === "number") {
+      const value = Number(control.value);
+      if (!Number.isFinite(value)) throw new Error(`${item.label} 需要数字`);
+      return value;
+    }
+
+    if (item.type === "number_array") {
+      const values = String(control.value)
+        .split(/[\s,]+/)
+        .map((token) => token.trim())
+        .filter(Boolean)
+        .map((token) => Number(token));
+      if (!values.length || values.some((value) => !Number.isFinite(value))) {
+        throw new Error(`${item.label} 需要逗号分隔的数字列表`);
+      }
+      return values;
+    }
+
+    throw new Error(`未知参数类型: ${item.type}`);
+  };
+
+  const renderRuntimeParams = (payload) => {
+    runtimeParamSnapshot = payload;
+    const groupsHost = document.getElementById("param-groups");
+    const exportNode = document.getElementById("param-export-text");
+    if (!groupsHost || !exportNode) return;
+
+    groupsHost.innerHTML = "";
+    exportNode.value = payload?.export_yaml || "# 当前还没有网页改过的参数";
+
+    if (!payload?.enabled) {
+      setRuntimeParamStatus(payload?.error || "当前入口没有启用运行时参数热调", true);
+      setRuntimeParamMeta(payload?.config_path || "runtime parameter session unavailable");
+      const empty = document.createElement("div");
+      empty.className = "empty-hint";
+      empty.textContent = "当前进程没有绑定运行时参数会话";
+      groupsHost.appendChild(empty);
+      return;
+    }
+
+    setRuntimeParamStatus(
+      `当前覆盖 ${payload.override_count || 0} 项参数，改动已实时写入会话日志与最新快照。`,
+    );
+    setRuntimeParamMeta(
+      `配置: ${payload.config_path} · 会话日志: ${payload.session_log_path} · 快照: ${payload.snapshot_path}`,
+    );
+
+    (payload.groups || []).forEach((group) => {
+      const section = document.createElement("section");
+      section.className = "param-group";
+
+      const head = document.createElement("div");
+      head.className = "param-group-head";
+
+      const title = document.createElement("h3");
+      title.textContent = group.label;
+      const meta = document.createElement("span");
+      meta.className = "panel-meta";
+      meta.textContent = `${(group.items || []).length} 项`;
+
+      head.appendChild(title);
+      head.appendChild(meta);
+      section.appendChild(head);
+
+      const list = document.createElement("div");
+      list.className = "param-grid";
+
+      (group.items || []).forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "param-row";
+        row.classList.toggle("is-overridden", !!item.overridden);
+
+        const rowHead = document.createElement("div");
+        rowHead.className = "param-row-head";
+
+        const titleWrap = document.createElement("div");
+        titleWrap.className = "param-row-title";
+        const strong = document.createElement("strong");
+        strong.textContent = item.label;
+        const desc = document.createElement("span");
+        desc.textContent = item.description || item.key;
+        titleWrap.appendChild(strong);
+        titleWrap.appendChild(desc);
+
+        const info = document.createElement("div");
+        info.className = "param-row-meta";
+        info.textContent = `Key: ${item.key} · 基线: ${formatParamValue(item.base_value)}${item.unit ? ` ${item.unit}` : ""}${item.overridden ? " · 当前为运行时覆盖" : ""}`;
+
+        rowHead.appendChild(titleWrap);
+        rowHead.appendChild(info);
+
+        const actions = document.createElement("div");
+        actions.className = "param-actions";
+
+        let control = null;
+        if (item.type === "boolean") {
+          control = document.createElement("input");
+          control.type = "checkbox";
+          control.className = "param-checkbox";
+          control.checked = !!item.value;
+        } else if (item.type === "enum") {
+          control = document.createElement("select");
+          (item.choices || []).forEach((choice) => {
+            const option = document.createElement("option");
+            option.value = choice;
+            option.textContent = choice;
+            option.selected = choice === item.value;
+            control.appendChild(option);
+          });
+        } else if (item.type === "number_array") {
+          control = document.createElement("textarea");
+          control.rows = 2;
+          control.value = formatParamValue(item.value);
+          control.placeholder = "例如: 3e6, 0.3";
+        } else {
+          control = document.createElement("input");
+          control.type = "number";
+          control.step = item.type === "integer" ? "1" : "any";
+          control.value = item.value;
+        }
+
+        const applyBtn = document.createElement("button");
+        applyBtn.type = "button";
+        applyBtn.textContent = "应用";
+        applyBtn.addEventListener("click", async () => {
+          try {
+            setRuntimeParamStatus(`正在应用 ${item.label}`);
+            const value = parseRuntimeParamInput(item, control);
+            const response = await fetch("/api/params", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ updates: { [item.key]: value } }),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload?.error || response.statusText);
+            renderRuntimeParams(payload);
+            setRuntimeParamStatus(`${item.label} 已应用到当前运行链路`);
+          } catch (error) {
+            setRuntimeParamStatus(`${item.label} 应用失败: ${error.message}`, true);
+            console.warn("apply runtime param failed", item.key, error);
+          }
+        });
+
+        const resetBtn = document.createElement("button");
+        resetBtn.type = "button";
+        resetBtn.className = "ghost-btn";
+        resetBtn.textContent = "恢复";
+        resetBtn.addEventListener("click", async () => {
+          try {
+            setRuntimeParamStatus(`正在恢复 ${item.label}`);
+            const response = await fetch("/api/params/reset", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keys: [item.key] }),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload?.error || response.statusText);
+            renderRuntimeParams(payload);
+            setRuntimeParamStatus(`${item.label} 已恢复为 YAML 基线值`);
+          } catch (error) {
+            setRuntimeParamStatus(`${item.label} 恢复失败: ${error.message}`, true);
+            console.warn("reset runtime param failed", item.key, error);
+          }
+        });
+
+        actions.appendChild(control);
+        actions.appendChild(applyBtn);
+        actions.appendChild(resetBtn);
+
+        row.appendChild(rowHead);
+        row.appendChild(actions);
+        list.appendChild(row);
+      });
+
+      section.appendChild(list);
+      groupsHost.appendChild(section);
+    });
+  };
+
+  const fetchRuntimeParams = async (quiet = false) => {
+    if (!quiet) setRuntimeParamStatus("正在同步运行时参数");
+    try {
+      const response = await fetch(`/api/params?ts=${Date.now()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || response.statusText);
+      renderRuntimeParams(payload);
+      if (!quiet) setRuntimeParamStatus("运行时参数已同步");
+    } catch (error) {
+      setRuntimeParamStatus(`运行时参数同步失败: ${error.message}`, true);
+      console.warn("fetch /api/params failed", error);
+    }
+  };
+
+  const bindRuntimeParamToolbar = () => {
+    document.getElementById("refresh-params-btn")?.addEventListener("click", () => {
+      fetchRuntimeParams().catch((error) => console.warn(error));
+    });
+
+    document.getElementById("reset-all-params-btn")?.addEventListener("click", async () => {
+      try {
+        setRuntimeParamStatus("正在恢复全部运行时覆盖");
+        const response = await fetch("/api/params/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keys: [] }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error || response.statusText);
+        renderRuntimeParams(payload);
+        setRuntimeParamStatus("所有参数已恢复为 YAML 基线值");
+      } catch (error) {
+        setRuntimeParamStatus(`恢复全部参数失败: ${error.message}`, true);
+        console.warn("reset all runtime params failed", error);
+      }
+    });
   };
 
   const initOverlayControls = () => {
@@ -355,6 +605,7 @@
 
     if (nextView === "inspector") {
       fetchAndDisplayJsonWithTree("json-log", "/log");
+      fetchRuntimeParams(true).catch((error) => console.warn(error));
     }
   };
 
@@ -622,7 +873,9 @@
     initStreams();
     initOverlayControls();
     bindOverlayControls();
+    bindRuntimeParamToolbar();
     setOverlayMeta("等待状态同步后载入图层设置");
+    setRuntimeParamStatus("等待运行时参数会话同步");
     bindViewSwitch();
     bindFullscreen();
 
@@ -631,6 +884,7 @@
     }
 
     activateView(resolveViewFromHash());
+    fetchRuntimeParams(true).catch((error) => console.warn(error));
     initPolling();
   });
 })();

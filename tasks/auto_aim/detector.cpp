@@ -6,14 +6,17 @@
 
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace auto_aim
 {
 Detector::Detector(const std::string & config_path, bool debug)
-: classifier_(config_path), debug_(debug)
+: config_path_(tools::resolve_config_path_string(config_path)),
+  classifier_(config_path), debug_(debug)
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
 
   threshold_ = yaml["threshold"].as<double>();
   max_angle_error_ = yaml["max_angle_error"].as<double>() / 57.3;  // degree to rad
@@ -28,10 +31,13 @@ Detector::Detector(const std::string & config_path, bool debug)
 
   save_path_ = "patterns";
   std::filesystem::create_directory(save_path_);
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 }
 
 std::list<Armor> Detector::detect(const cv::Mat & bgr_img, int frame_count)
 {
+  refresh_runtime_params_if_needed();
+
   // 彩色图转灰度图
   cv::Mat gray_img;
   cv::cvtColor(bgr_img, gray_img, cv::COLOR_BGR2GRAY);
@@ -121,6 +127,8 @@ std::list<Armor> Detector::detect(const cv::Mat & bgr_img, int frame_count)
 
 bool Detector::detect(Armor & armor, const cv::Mat & bgr_img)
 {
+  refresh_runtime_params_if_needed();
+
   // 取得四个角点
   auto tl = armor.points[0];
   auto tr = armor.points[1];
@@ -228,6 +236,27 @@ bool Detector::detect(Armor & armor, const cv::Mat & bgr_img)
   }
 
   return false;
+}
+
+void Detector::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  threshold_ = tools::runtime_params::get_double(config_path_, "threshold");
+  max_angle_error_ = tools::runtime_params::get_double(config_path_, "max_angle_error") / 57.3;
+  min_lightbar_ratio_ = tools::runtime_params::get_double(config_path_, "min_lightbar_ratio");
+  max_lightbar_ratio_ = tools::runtime_params::get_double(config_path_, "max_lightbar_ratio");
+  min_lightbar_length_ = tools::runtime_params::get_double(config_path_, "min_lightbar_length");
+  min_armor_ratio_ = tools::runtime_params::get_double(config_path_, "min_armor_ratio");
+  max_armor_ratio_ = tools::runtime_params::get_double(config_path_, "max_armor_ratio");
+  max_side_ratio_ = tools::runtime_params::get_double(config_path_, "max_side_ratio");
+  min_confidence_ = tools::runtime_params::get_double(config_path_, "min_confidence");
+  max_rectangular_error_ =
+    tools::runtime_params::get_double(config_path_, "max_rectangular_error") / 57.3;
+
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[Detector] runtime params updated to v{}", current_version);
 }
 
 bool Detector::check_geometry(const Lightbar & lightbar) const
