@@ -268,6 +268,93 @@ const ParamSpec & spec_for(const std::string & key)
   return *it;
 }
 
+double ui_step_for(const ParamSpec & spec)
+{
+  if (spec.type == ParamType::kInt) return 1.0;
+
+  if (spec.key == "min_confidence") return 0.01;
+  if (spec.key == "threshold") return 1.0;
+  if (spec.key == "fire_thresh") return 0.0001;
+  if (
+    spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
+    spec.key == "outpost_radius")
+  {
+    return 0.001;
+  }
+  if (spec.key == "outpost_spin_speed_lock") return 0.01;
+  if (spec.key == "decision_speed") return 0.05;
+  if (spec.key == "yaw_offset" || spec.key == "pitch_offset") return 0.05;
+  if (spec.key == "comming_angle" || spec.key == "leaving_angle") return 0.1;
+  if (spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc") return 1.0;
+  if (spec.unit == "deg") return 0.1;
+  if (spec.unit == "rad") return 0.0001;
+  if (spec.unit == "rad/s") return 0.05;
+  if (spec.unit == "m") return 0.001;
+  if (spec.type == ParamType::kDouble) return 0.01;
+
+  return 1.0;
+}
+
+std::optional<double> ui_min_for(const ParamSpec & spec)
+{
+  if (spec.key == "min_confidence") return 0.0;
+  if (spec.key == "threshold") return 0.0;
+  if (
+    spec.key == "roi.width" || spec.key == "roi.height" || spec.key == "roi.x" ||
+    spec.key == "roi.y")
+  {
+    return spec.key == "roi.width" || spec.key == "roi.height" ? -1.0 : 0.0;
+  }
+  if (
+    spec.key == "min_detect_count" || spec.key == "max_temp_lost_count" ||
+    spec.key == "outpost_max_temp_lost_count")
+  {
+    return 0.0;
+  }
+  if (
+    spec.key == "min_lightbar_ratio" || spec.key == "max_lightbar_ratio" ||
+    spec.key == "min_lightbar_length" || spec.key == "min_armor_ratio" ||
+    spec.key == "max_armor_ratio" || spec.key == "max_side_ratio" ||
+    spec.key == "max_angle_error" || spec.key == "max_rectangular_error" ||
+    spec.key == "outpost_radius" || spec.key == "outpost_spin_speed_lock" ||
+    spec.key == "decision_speed" || spec.key == "high_speed_delay_time" ||
+    spec.key == "low_speed_delay_time" || spec.key == "fire_thresh" ||
+    spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc" ||
+    spec.key == "comming_angle" || spec.key == "leaving_angle")
+  {
+    return 0.0;
+  }
+  return std::nullopt;
+}
+
+std::optional<double> ui_max_for(const ParamSpec & spec)
+{
+  if (spec.key == "min_confidence") return 1.0;
+  if (spec.key == "threshold") return 255.0;
+  if (spec.key == "max_angle_error" || spec.key == "max_rectangular_error") return 90.0;
+  if (spec.key == "comming_angle" || spec.key == "leaving_angle") return 180.0;
+  return std::nullopt;
+}
+
+int ui_precision_for(const ParamSpec & spec)
+{
+  if (spec.type == ParamType::kInt) return 0;
+
+  if (spec.key == "threshold") return 0;
+  if (spec.key == "min_confidence") return 2;
+  if (spec.key == "fire_thresh") return 4;
+  if (
+    spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
+    spec.key == "outpost_radius")
+  {
+    return 3;
+  }
+  if (spec.unit == "deg" || spec.unit == "rad/s" || spec.unit == "deg/s^2") return 2;
+  if (spec.unit == "m" || spec.unit == "rad") return 3;
+  if (spec.type == ParamType::kDoubleArray) return 3;
+  return 2;
+}
+
 std::string trim_copy(std::string value)
 {
   const auto first = value.find_first_not_of(" \t");
@@ -651,6 +738,15 @@ json build_response_locked(const SessionState & session)
       {"base_value", session.base_values.at(spec.key)},
       {"overridden", session.overrides.contains(spec.key)},
     };
+    if (
+      spec.type == ParamType::kDouble || spec.type == ParamType::kInt ||
+      spec.type == ParamType::kDoubleArray)
+    {
+      item["step"] = ui_step_for(spec);
+      item["display_precision"] = ui_precision_for(spec);
+      if (const auto min_value = ui_min_for(spec)) item["min"] = *min_value;
+      if (const auto max_value = ui_max_for(spec)) item["max"] = *max_value;
+    }
     if (!spec.enum_values.empty()) item["choices"] = spec.enum_values;
     response["groups"][index]["items"].push_back(item);
   }

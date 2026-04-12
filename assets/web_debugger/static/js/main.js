@@ -123,11 +123,33 @@
       .join("  ");
   };
 
-  const formatParamValue = (value) => {
-    if (Array.isArray(value)) return value.join(", ");
+  const formatParamValue = (value, digits = null) => {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => formatParamValue(item, digits))
+        .join(", ");
+    }
     if (typeof value === "boolean") return value ? "true" : "false";
     if (value === null || value === undefined) return "--";
+    if (typeof value === "number" && Number.isFinite(value) && Number.isInteger(digits) && digits >= 0) {
+      return value.toFixed(digits);
+    }
     return String(value);
+  };
+
+  const formatRangeText = (item) => {
+    const hasMin = Number.isFinite(item?.min);
+    const hasMax = Number.isFinite(item?.max);
+    if (!hasMin && !hasMax) return null;
+    const digits = Number.isInteger(item?.display_precision) ? item.display_precision : null;
+    const minText = hasMin ? formatParamValue(item.min, digits) : "-inf";
+    const maxText = hasMax ? formatParamValue(item.max, digits) : "+inf";
+    return `${minText} ~ ${maxText}`;
+  };
+
+  const formatControlValue = (item, value) => {
+    const digits = Number.isInteger(item?.display_precision) ? item.display_precision : null;
+    return formatParamValue(value, digits);
   };
 
   const formatPathTail = (value) => {
@@ -238,12 +260,24 @@
     if (item.type === "integer") {
       const value = Number(control.value);
       if (!Number.isFinite(value)) throw new Error(`${item.label} 需要整数`);
+      if (Number.isFinite(item.min) && value < item.min) {
+        throw new Error(`${item.label} 不能小于 ${item.min}`);
+      }
+      if (Number.isFinite(item.max) && value > item.max) {
+        throw new Error(`${item.label} 不能大于 ${item.max}`);
+      }
       return Math.round(value);
     }
 
     if (item.type === "number") {
       const value = Number(control.value);
       if (!Number.isFinite(value)) throw new Error(`${item.label} 需要数字`);
+      if (Number.isFinite(item.min) && value < item.min) {
+        throw new Error(`${item.label} 不能小于 ${item.min}`);
+      }
+      if (Number.isFinite(item.max) && value > item.max) {
+        throw new Error(`${item.label} 不能大于 ${item.max}`);
+      }
       return value;
     }
 
@@ -384,15 +418,17 @@
         badges.appendChild(
           createParamBadge(
             "当前",
-            `${formatParamValue(item.value)}${item.unit ? ` ${item.unit}` : ""}`,
+            `${formatParamValue(item.value, item.display_precision)}${item.unit ? ` ${item.unit}` : ""}`,
           ),
         );
         badges.appendChild(
           createParamBadge(
             "基线",
-            `${formatParamValue(item.base_value)}${item.unit ? ` ${item.unit}` : ""}`,
+            `${formatParamValue(item.base_value, item.display_precision)}${item.unit ? ` ${item.unit}` : ""}`,
           ),
         );
+        const rangeText = formatRangeText(item);
+        if (rangeText) badges.appendChild(createParamBadge("范围", rangeText));
         if (item.overridden) {
           badges.appendChild(createParamBadge("状态", "网页覆盖", "is-hot"));
         }
@@ -435,15 +471,18 @@
           actions.classList.add("is-array");
           control = document.createElement("textarea");
           control.rows = 2;
-          control.value = formatParamValue(item.value);
+          control.value = formatParamValue(item.value, item.display_precision);
           control.placeholder = "例如: 3e6, 0.3";
           controlWrap.appendChild(control);
         } else {
           actions.classList.add("is-scalar");
           control = document.createElement("input");
           control.type = "number";
-          control.step = item.type === "integer" ? "1" : "any";
-          control.value = item.value;
+          control.step =
+            Number.isFinite(item.step) ? String(item.step) : item.type === "integer" ? "1" : "any";
+          if (Number.isFinite(item.min)) control.min = String(item.min);
+          if (Number.isFinite(item.max)) control.max = String(item.max);
+          control.value = formatControlValue(item, item.value);
           controlWrap.appendChild(control);
         }
 

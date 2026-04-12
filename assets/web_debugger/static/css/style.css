@@ -877,11 +877,80 @@ button:hover {
   padding: 0 16px 16px;
 }
 
-.chart-select-controls {
+.chart-toolbar-shell {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.chart-preset-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  align-items: center;
+}
+
+.chart-selection-summary {
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(125, 194, 220, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.chart-selection-summary.is-empty {
+  color: var(--muted);
+}
+
+.chart-preset-btn {
+  padding: 9px 14px;
+  color: var(--text);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(125, 194, 220, 0.14);
+  box-shadow: none;
+}
+
+.chart-preset-btn.active {
+  color: #052030;
+  background: linear-gradient(135deg, rgba(157, 243, 191, 0.96), rgba(125, 227, 255, 0.9));
+}
+
+.chart-select-controls {
+  display: grid;
+  gap: 14px;
   margin-bottom: 14px;
+}
+
+.chart-select-group {
+  padding: 12px;
+  border-radius: 20px;
+  border: 1px solid rgba(125, 194, 220, 0.12);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.chart-select-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.chart-select-title strong {
+  font-size: 14px;
+}
+
+.chart-select-title span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chart-select-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .checkbox-chip {
@@ -897,6 +966,28 @@ button:hover {
 
 .checkbox-chip input {
   margin: 0;
+}
+
+.checkbox-chip strong {
+  display: block;
+  font-size: 13px;
+}
+
+.checkbox-chip span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.chart-toggle-chip {
+  padding-right: 14px;
+}
+
+.metric-chip {
+  min-width: 168px;
+  align-items: flex-start;
 }
 
 fieldset {
@@ -958,6 +1049,23 @@ input[type="number"] {
 .chart-box h4 {
   margin: 0 0 10px;
   font-size: 16px;
+}
+
+.chart-box-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.chart-unit-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 194, 220, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .range-controls {
