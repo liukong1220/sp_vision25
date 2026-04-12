@@ -248,20 +248,57 @@
                 <button class="ghost-btn" id="reset-all-params-btn" type="button">恢复 YAML</button>
               </div>
             </div>
-            <div class="param-status-banner" id="param-status-banner">
-              运行时参数只影响当前进程，不回写 YAML；每次网页改参都会自动落日志和快照。
-            </div>
-            <div class="panel-meta" id="param-session-meta">等待参数会话连接</div>
-            <div class="param-groups" id="param-groups"></div>
-            <div class="param-export-shell">
-              <div class="panel-head param-export-head">
-                <div>
-                  <span class="eyebrow">Copy Back</span>
-                  <h2>待回填 YAML 片段</h2>
-                </div>
-                <span class="panel-meta">只显示网页改过的覆盖项</span>
+            <div class="param-toolbar-shell">
+              <div class="param-status-banner" id="param-status-banner">
+                运行时参数只影响当前进程，不回写 YAML；每次网页改参都会自动落日志和快照。
               </div>
-              <textarea id="param-export-text" readonly spellcheck="false"></textarea>
+              <div class="param-summary-grid">
+                <div class="param-summary-card">
+                  <span>当前配置</span>
+                  <strong id="param-config-brief">--</strong>
+                </div>
+                <div class="param-summary-card">
+                  <span>覆盖参数</span>
+                  <strong id="param-override-count">0</strong>
+                </div>
+                <div class="param-summary-card">
+                  <span>最近写入</span>
+                  <strong id="param-last-update">--</strong>
+                </div>
+                <div class="param-summary-card">
+                  <span>会话版本</span>
+                  <strong id="param-version">v0</strong>
+                </div>
+              </div>
+            </div>
+            <div class="param-workspace">
+              <div class="param-main">
+                <div class="panel-meta param-session-meta" id="param-session-meta">等待参数会话连接</div>
+                <div class="param-group-nav" id="param-group-nav"></div>
+                <div class="param-groups" id="param-groups"></div>
+              </div>
+              <aside class="param-sidebar">
+                <div class="param-side-card">
+                  <div class="panel-head param-export-head">
+                    <div>
+                      <span class="eyebrow">Session</span>
+                      <h2>会话摘要</h2>
+                    </div>
+                    <span class="panel-meta">热调状态总览</span>
+                  </div>
+                  <div class="stack-list compact-list" id="param-session-card"></div>
+                </div>
+                <div class="param-export-shell">
+                  <div class="panel-head param-export-head">
+                    <div>
+                      <span class="eyebrow">Copy Back</span>
+                      <h2>待回填 YAML 片段</h2>
+                    </div>
+                    <span class="panel-meta">只显示网页改过的覆盖项</span>
+                  </div>
+                  <textarea id="param-export-text" readonly spellcheck="false"></textarea>
+                </div>
+              </aside>
             </div>
           </article>
         </div>

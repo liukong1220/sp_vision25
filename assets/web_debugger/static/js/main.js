@@ -80,6 +80,7 @@
   let runtimeParamSnapshot = null;
 
   const streamControllers = new Map();
+  const viewScrollPositions = new Map();
 
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
   const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
@@ -108,6 +109,11 @@
     return new Date(unixMs).toLocaleTimeString("zh-CN", { hour12: false });
   };
 
+  const formatDateTime = (unixMs) => {
+    if (!isFiniteNumber(unixMs)) return "--";
+    return new Date(unixMs).toLocaleString("zh-CN", { hour12: false });
+  };
+
   const formatDeltaList = (values) => {
     if (!Array.isArray(values) || !values.length) return "--";
     return values
@@ -122,6 +128,13 @@
     if (typeof value === "boolean") return value ? "true" : "false";
     if (value === null || value === undefined) return "--";
     return String(value);
+  };
+
+  const formatPathTail = (value) => {
+    if (!value) return "--";
+    const normalized = String(value).replace(/\\/g, "/");
+    const tail = normalized.split("/").filter(Boolean).pop();
+    return tail || normalized;
   };
 
   const setText = (id, value) => {
@@ -186,6 +199,36 @@
     node.textContent = text;
   };
 
+  const getViewNode = (viewId) => document.getElementById(`view-${viewId}`);
+
+  const rememberViewScroll = (viewId) => {
+    const node = getViewNode(viewId);
+    if (!node) return;
+    viewScrollPositions.set(viewId, node.scrollTop);
+  };
+
+  const restoreViewScroll = (viewId) => {
+    const node = getViewNode(viewId);
+    if (!node) return;
+    node.scrollTop = viewScrollPositions.get(viewId) || 0;
+  };
+
+  const createParamBadge = (label, value, extraClass = "") => {
+    const badge = document.createElement("div");
+    badge.className = "param-badge";
+    if (extraClass) badge.classList.add(extraClass);
+
+    const badgeLabel = document.createElement("span");
+    badgeLabel.textContent = label;
+
+    const badgeValue = document.createElement("strong");
+    badgeValue.textContent = value;
+
+    badge.appendChild(badgeLabel);
+    badge.appendChild(badgeValue);
+    return badge;
+  };
+
   const parseRuntimeParamInput = (item, control) => {
     if (!item || !control) throw new Error("参数控件不存在");
 
@@ -222,15 +265,25 @@
   const renderRuntimeParams = (payload) => {
     runtimeParamSnapshot = payload;
     const groupsHost = document.getElementById("param-groups");
+    const navHost = document.getElementById("param-group-nav");
     const exportNode = document.getElementById("param-export-text");
-    if (!groupsHost || !exportNode) return;
+    if (!groupsHost || !exportNode || !navHost) return;
 
     groupsHost.innerHTML = "";
+    navHost.innerHTML = "";
     exportNode.value = payload?.export_yaml || "# 当前还没有网页改过的参数";
+    setText("param-config-brief", formatPathTail(payload?.config_path));
+    setText("param-override-count", `${payload?.override_count || 0} 项`);
+    setText("param-last-update", formatDateTime(payload?.last_update_unix_ms));
+    setText("param-version", `v${payload?.version || 0}`);
 
     if (!payload?.enabled) {
       setRuntimeParamStatus(payload?.error || "当前入口没有启用运行时参数热调", true);
       setRuntimeParamMeta(payload?.config_path || "runtime parameter session unavailable");
+      renderRows("param-session-card", [
+        { label: "会话状态", value: "未绑定" },
+        { label: "当前配置", value: formatPathTail(payload?.config_path) },
+      ]);
       const empty = document.createElement("div");
       empty.className = "empty-hint";
       empty.textContent = "当前进程没有绑定运行时参数会话";
@@ -242,12 +295,45 @@
       `当前覆盖 ${payload.override_count || 0} 项参数，改动已实时写入会话日志与最新快照。`,
     );
     setRuntimeParamMeta(
-      `配置: ${payload.config_path} · 会话日志: ${payload.session_log_path} · 快照: ${payload.snapshot_path}`,
+      `配置文件\n${payload.config_path}\n\n会话日志\n${payload.session_log_path}\n\n最新快照\n${payload.snapshot_path}`,
     );
+    renderRows("param-session-card", [
+      { label: "配置", value: formatPathTail(payload.config_path) },
+      { label: "日志", value: formatPathTail(payload.session_log_path) },
+      { label: "快照", value: formatPathTail(payload.snapshot_path) },
+      {
+        label: "回填片段",
+        value:
+          payload.export_yaml && payload.export_yaml.trim()
+            ? `${payload.export_yaml.split("\n").length} 行`
+            : "暂无覆盖",
+      },
+    ]);
 
-    (payload.groups || []).forEach((group) => {
+    (payload.groups || []).forEach((group, groupIndex) => {
+      const overriddenCount = (group.items || []).filter((item) => !!item.overridden).length;
+      const jumpButton = document.createElement("button");
+      jumpButton.type = "button";
+      jumpButton.className = "param-group-jump";
+      jumpButton.classList.toggle("has-overrides", overriddenCount > 0);
+      jumpButton.addEventListener("click", () => {
+        document.getElementById(`param-group-${groupIndex}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      });
+
+      const jumpMeta = document.createElement("span");
+      jumpMeta.textContent = `${(group.items || []).length} 项${overriddenCount ? ` · 覆盖 ${overriddenCount}` : ""}`;
+      const jumpLabel = document.createElement("strong");
+      jumpLabel.textContent = group.label;
+      jumpButton.appendChild(jumpMeta);
+      jumpButton.appendChild(jumpLabel);
+      navHost.appendChild(jumpButton);
+
       const section = document.createElement("section");
       section.className = "param-group";
+      section.id = `param-group-${groupIndex}`;
 
       const head = document.createElement("div");
       head.className = "param-group-head";
@@ -256,7 +342,10 @@
       title.textContent = group.label;
       const meta = document.createElement("span");
       meta.className = "panel-meta";
-      meta.textContent = `${(group.items || []).length} 项`;
+      meta.textContent =
+        overriddenCount > 0 ?
+          `${(group.items || []).length} 项 · 覆盖 ${overriddenCount}` :
+          `${(group.items || []).length} 项`;
 
       head.appendChild(title);
       head.appendChild(meta);
@@ -282,23 +371,57 @@
         titleWrap.appendChild(strong);
         titleWrap.appendChild(desc);
 
-        const info = document.createElement("div");
-        info.className = "param-row-meta";
-        info.textContent = `Key: ${item.key} · 基线: ${formatParamValue(item.base_value)}${item.unit ? ` ${item.unit}` : ""}${item.overridden ? " · 当前为运行时覆盖" : ""}`;
+        const status = document.createElement("div");
+        status.className = "param-row-meta";
+        status.textContent = item.overridden ? "运行时覆盖" : "YAML 基线";
 
         rowHead.appendChild(titleWrap);
-        rowHead.appendChild(info);
+        rowHead.appendChild(status);
+
+        const badges = document.createElement("div");
+        badges.className = "param-badges";
+        badges.appendChild(createParamBadge("Key", item.key));
+        badges.appendChild(
+          createParamBadge(
+            "当前",
+            `${formatParamValue(item.value)}${item.unit ? ` ${item.unit}` : ""}`,
+          ),
+        );
+        badges.appendChild(
+          createParamBadge(
+            "基线",
+            `${formatParamValue(item.base_value)}${item.unit ? ` ${item.unit}` : ""}`,
+          ),
+        );
+        if (item.overridden) {
+          badges.appendChild(createParamBadge("状态", "网页覆盖", "is-hot"));
+        }
 
         const actions = document.createElement("div");
         actions.className = "param-actions";
+        const controlWrap = document.createElement("div");
+        controlWrap.className = "param-control-wrap";
 
         let control = null;
         if (item.type === "boolean") {
+          actions.classList.add("is-boolean");
           control = document.createElement("input");
           control.type = "checkbox";
           control.className = "param-checkbox";
           control.checked = !!item.value;
+          const toggle = document.createElement("label");
+          toggle.className = "param-toggle";
+          const toggleText = document.createElement("span");
+          const syncToggleText = () => {
+            toggleText.textContent = control.checked ? "当前: 开启" : "当前: 关闭";
+          };
+          control.addEventListener("change", syncToggleText);
+          syncToggleText();
+          toggle.appendChild(control);
+          toggle.appendChild(toggleText);
+          controlWrap.appendChild(toggle);
         } else if (item.type === "enum") {
+          actions.classList.add("is-scalar");
           control = document.createElement("select");
           (item.choices || []).forEach((choice) => {
             const option = document.createElement("option");
@@ -307,16 +430,21 @@
             option.selected = choice === item.value;
             control.appendChild(option);
           });
+          controlWrap.appendChild(control);
         } else if (item.type === "number_array") {
+          actions.classList.add("is-array");
           control = document.createElement("textarea");
           control.rows = 2;
           control.value = formatParamValue(item.value);
           control.placeholder = "例如: 3e6, 0.3";
+          controlWrap.appendChild(control);
         } else {
+          actions.classList.add("is-scalar");
           control = document.createElement("input");
           control.type = "number";
           control.step = item.type === "integer" ? "1" : "any";
           control.value = item.value;
+          controlWrap.appendChild(control);
         }
 
         const applyBtn = document.createElement("button");
@@ -363,11 +491,12 @@
           }
         });
 
-        actions.appendChild(control);
+        actions.appendChild(controlWrap);
         actions.appendChild(applyBtn);
         actions.appendChild(resetBtn);
 
         row.appendChild(rowHead);
+        row.appendChild(badges);
         row.appendChild(actions);
         list.appendChild(row);
       });
@@ -591,6 +720,7 @@
 
   const activateView = (viewId) => {
     const nextView = VIEW_IDS.includes(viewId) ? viewId : "overview";
+    rememberViewScroll(currentView);
     currentView = nextView;
 
     document.querySelectorAll(".view").forEach((section) => {
@@ -602,6 +732,7 @@
 
     syncStreamsForView(nextView);
     syncChartView();
+    window.requestAnimationFrame(() => restoreViewScroll(nextView));
 
     if (nextView === "inspector") {
       fetchAndDisplayJsonWithTree("json-log", "/log");
@@ -848,6 +979,21 @@
     });
   };
 
+  const bindViewScrollMemory = () => {
+    VIEW_IDS.forEach((viewId) => {
+      const node = getViewNode(viewId);
+      if (!node) return;
+      viewScrollPositions.set(viewId, 0);
+      node.addEventListener(
+        "scroll",
+        () => {
+          viewScrollPositions.set(viewId, node.scrollTop);
+        },
+        { passive: true },
+      );
+    });
+  };
+
   const initStreams = () => {
     Object.values(STREAM_LAYOUT)
       .flat()
@@ -869,6 +1015,9 @@
   };
 
   document.addEventListener("DOMContentLoaded", () => {
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
     setText("server-url", `访问地址: ${window.location.origin}`);
     initStreams();
     initOverlayControls();
@@ -877,6 +1026,7 @@
     setOverlayMeta("等待状态同步后载入图层设置");
     setRuntimeParamStatus("等待运行时参数会话同步");
     bindViewSwitch();
+    bindViewScrollMemory();
     bindFullscreen();
 
     if (window.DebugCharts && typeof window.DebugCharts.init === "function") {
