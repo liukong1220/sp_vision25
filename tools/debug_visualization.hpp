@@ -16,6 +16,18 @@
 namespace tools::debug_visualization
 {
 
+enum class LiveOverlayStage
+{
+  kSearch,
+  kTracking,
+  kLocked,
+  kFireReady,
+};
+
+const char * live_overlay_stage_to_string(LiveOverlayStage stage);
+LiveOverlayStage resolve_live_overlay_stage(
+  bool has_target, const auto_aim::Plan & current_plan);
+
 struct LiveOverlayOptions
 {
   double display_scale = 1.0;
@@ -33,7 +45,17 @@ struct LiveOverlayOptions
   double current_h = 0.0;
   double current_selected_z_offset = 0.0;
   bool current_fixed_model = false;
+  bool target_jumped = false;
   bool is_outpost = false;
+  bool stabilize_annotations = true;
+  bool enable_state_layers = true;
+  bool show_armors = true;
+  bool show_armor_labels = true;
+  bool show_target_motion = true;
+  bool show_aim = true;
+  bool show_decision_hud = true;
+  bool show_decision_track = true;
+  bool show_footer = true;
 };
 
 struct OfflineOverlayOptions

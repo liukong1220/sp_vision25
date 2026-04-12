@@ -26,8 +26,57 @@
     inspector: [],
   };
 
+  const OVERLAY_CONTROL_ITEMS = [
+    {
+      key: "state_layers",
+      label: "状态分层",
+      description: "按搜索、跟踪、锁定和可击发阶段裁剪信息层级",
+    },
+    {
+      key: "stabilize",
+      label: "抗抖",
+      description: "稳定装甲板标签和转向说明的位置",
+    },
+    {
+      key: "armors",
+      label: "装甲板",
+      description: "显示重投影装甲板轮廓",
+    },
+    {
+      key: "labels",
+      label: "标签",
+      description: "显示 A0 与 d_yaw 等局部标注",
+    },
+    {
+      key: "target_motion",
+      label: "目标转向",
+      description: "显示目标中心与 V_yaw 指示",
+    },
+    {
+      key: "aim",
+      label: "瞄准提示",
+      description: "显示瞄准圈、控制箭头和击发提示",
+    },
+    {
+      key: "decision_hud",
+      label: "决策 HUD",
+      description: "显示切板、模型与开火理由",
+    },
+    {
+      key: "decision_track",
+      label: "切板轴",
+      description: "显示各装甲板 delta 角度的决策轴",
+    },
+    {
+      key: "footer",
+      label: "底部控制条",
+      description: "显示 yaw 与 pitch 的控制输出摘要",
+    },
+  ];
+
   let currentView = "overview";
   let lastStateUpdatedAt = 0;
+  let overlaySyncPending = false;
 
   const streamControllers = new Map();
 
@@ -106,6 +155,89 @@
       row.appendChild(label);
       row.appendChild(value);
       container.appendChild(row);
+    });
+  };
+
+  const setOverlayMeta = (text, isError = false) => {
+    const node = document.getElementById("overlay-config-meta");
+    if (!node) return;
+    node.textContent = text;
+    node.classList.toggle("overlay-sync-bad", isError);
+  };
+
+  const initOverlayControls = () => {
+    const container = document.getElementById("overlay-control-grid");
+    if (!container) return;
+    container.innerHTML = "";
+
+    OVERLAY_CONTROL_ITEMS.forEach((item) => {
+      const label = document.createElement("label");
+      label.className = "overlay-toggle";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = `overlay-${item.key}`;
+      input.dataset.overlayKey = item.key;
+      input.checked = true;
+
+      const textWrap = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = item.label;
+      const description = document.createElement("span");
+      description.textContent = item.description;
+
+      textWrap.appendChild(title);
+      textWrap.appendChild(description);
+      label.appendChild(input);
+      label.appendChild(textWrap);
+      container.appendChild(label);
+    });
+  };
+
+  const readOverlayConfigFromDom = () => {
+    const config = {};
+    OVERLAY_CONTROL_ITEMS.forEach((item) => {
+      const input = document.getElementById(`overlay-${item.key}`);
+      if (input) config[item.key] = !!input.checked;
+    });
+    return config;
+  };
+
+  const syncOverlayControls = (controls) => {
+    OVERLAY_CONTROL_ITEMS.forEach((item) => {
+      const input = document.getElementById(`overlay-${item.key}`);
+      if (!input) return;
+      input.checked = !!getByPath(controls, item.key, true);
+    });
+  };
+
+  const pushOverlayConfig = async () => {
+    overlaySyncPending = true;
+    setOverlayMeta("正在同步网页图层设置");
+    try {
+      const response = await fetch("/api/overlay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(readOverlayConfigFromDom()),
+      });
+      if (!response.ok) throw new Error(response.statusText);
+      const payload = await response.json();
+      syncOverlayControls(payload);
+      setOverlayMeta("图层设置已同步到当前可视化");
+    } catch (error) {
+      setOverlayMeta("图层设置同步失败，请检查服务端日志", true);
+      console.warn("post /api/overlay failed", error);
+    } finally {
+      overlaySyncPending = false;
+    }
+  };
+
+  const bindOverlayControls = () => {
+    OVERLAY_CONTROL_ITEMS.forEach((item) => {
+      const input = document.getElementById(`overlay-${item.key}`);
+      input?.addEventListener("change", () => {
+        pushOverlayConfig().catch((error) => console.warn(error));
+      });
     });
   };
 
@@ -237,6 +369,7 @@
     const planner = state.planner || {};
     const command = state.command || {};
     const ballistic = state.ballistic || {};
+    const overlay = state.overlay || {};
 
     const hasTarget = !!getByPath(preview, "has_target", false);
     const fire = !!getByPath(preview, "fire", false);
@@ -252,6 +385,11 @@
     setText("status-latency", formatNumber(latencyMs, 1, " ms"));
     setText("status-turn", getByPath(planner, "turn_direction", "STEADY"));
     setText("status-armor", formatArmorId(selectedArmor));
+    setText("overlay-stage", getByPath(overlay, "stage", "--"));
+    if (!overlaySyncPending) {
+      syncOverlayControls(getByPath(overlay, "controls", {}));
+    }
+    setOverlayMeta(`图层同步: ${getByPath(overlay, "stage", "--")} · 实时生效`);
 
     renderRows("overview-summary", [
       { label: "帧号", value: getByPath(frame, "frame_index", "--") },
@@ -277,6 +415,10 @@
       {
         label: "发射速度",
         value: formatNumber(getByPath(command, "bullet_speed_mps", getByPath(ballistic, "bullet_speed_mps")), 2, " m/s"),
+      },
+      {
+        label: "图层阶段",
+        value: getByPath(overlay, "stage", "--"),
       },
     ]);
 
@@ -340,6 +482,7 @@
       { label: "原始时间", value: formatNumber(getByPath(frame, "raw_t_s"), 3, " s") },
       { label: "链路延迟", value: formatNumber(latencyMs, 2, " ms") },
       { label: "目标存在", value: formatBool(hasTarget, "YES", "NO") },
+      { label: "图层阶段", value: getByPath(overlay, "stage", "--") },
     ]);
 
     renderRows("command-card", [
@@ -477,6 +620,9 @@
   document.addEventListener("DOMContentLoaded", () => {
     setText("server-url", `访问地址: ${window.location.origin}`);
     initStreams();
+    initOverlayControls();
+    bindOverlayControls();
+    setOverlayMeta("等待状态同步后载入图层设置");
     bindViewSwitch();
     bindFullscreen();
 

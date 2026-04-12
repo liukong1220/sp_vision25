@@ -338,6 +338,28 @@ int main(int argc, char * argv[])
       std::lock_guard<std::mutex> lock(command_state_mutex);
       latest_command_state = command_state;
     }
+    const nlohmann::json overlay_config =
+      web_debugger ? web_debugger->overlay_config() : nlohmann::json::object();
+    const auto apply_overlay_config =
+      [&](tools::debug_visualization::LiveOverlayOptions & visual_options) {
+        if (!overlay_config.is_object()) return;
+        auto apply_bool = [&](const char * key, bool & field) {
+          if (overlay_config.contains(key) && overlay_config.at(key).is_boolean()) {
+            field = overlay_config.at(key).get<bool>();
+          }
+        };
+        apply_bool("stabilize", visual_options.stabilize_annotations);
+        apply_bool("state_layers", visual_options.enable_state_layers);
+        apply_bool("armors", visual_options.show_armors);
+        apply_bool("labels", visual_options.show_armor_labels);
+        apply_bool("target_motion", visual_options.show_target_motion);
+        apply_bool("aim", visual_options.show_aim);
+        apply_bool("decision_hud", visual_options.show_decision_hud);
+        apply_bool("decision_track", visual_options.show_decision_track);
+        apply_bool("footer", visual_options.show_footer);
+      };
+    const auto overlay_stage = tools::debug_visualization::resolve_live_overlay_stage(
+      current_target.has_value(), current_plan);
 
     const auto now = std::chrono::steady_clock::now();
     const bool need_web_frame =
@@ -390,6 +412,10 @@ int main(int argc, char * argv[])
       web_state["planner"]["h_m"] = current_h;
       web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
       web_state["planner"]["fixed_center_rotation_model"] = current_fixed_model;
+      web_state["overlay"]["stage"] =
+        tools::debug_visualization::live_overlay_stage_to_string(overlay_stage);
+      web_state["overlay"]["controls"] =
+        overlay_config.is_object() ? overlay_config : nlohmann::json::object();
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
       web_state["command"] = latest_command_state;
       web_debugger->update_state(web_state);
@@ -421,9 +447,12 @@ int main(int argc, char * argv[])
       visual_options.current_h = current_h;
       visual_options.current_selected_z_offset = current_selected_z_offset;
       visual_options.current_fixed_model = current_fixed_model;
+      visual_options.target_jumped =
+        current_target.has_value() && current_target->jumped;
       visual_options.is_outpost =
         current_target.has_value() &&
         current_target->name == auto_aim::ArmorName::outpost;
+      apply_overlay_config(visual_options);
 
       const auto display_img = tools::debug_visualization::render_live_debug_frame(
         img, solver, current_target, current_plan, debug_planner, visual_options);

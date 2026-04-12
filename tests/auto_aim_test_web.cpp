@@ -39,7 +39,7 @@ namespace
 {
 const std::string keys =
   "{help h usage ? |                   | 输出命令行参数说明 }"
-  "{config-path c  | configs/demo.yaml | yaml配置文件的路径}"
+  "{config-path c  | configs/standard3.yaml | yaml配置文件的路径}"
   "{timestamp-path |                   | 显式指定txt时间戳文件路径}"
   "{start-index s  | 0                 | 视频起始帧下标    }"
   "{end-index e    | 0                 | 视频结束帧下标    }"
@@ -53,7 +53,7 @@ const std::string keys =
   "{web-scale      | 0.7               | 网页图像缩放系数(显式传参时覆盖yaml) }"
   "{web-jpeg-quality | 70              | 网页JPEG质量(30-95, 显式传参时覆盖yaml) }"
   "{web-client-ttl-ms | 2000           | 最近访问多久内继续渲染网页帧(显式传参时覆盖yaml) }"
-  "{@input-path    | assets/demo/demo.avi  | avi和txt文件的路径}";
+  "{@input-path    | assets/demo/test.mp4  | avi和txt文件的路径}";
 
 bool is_video_extension(const std::string & ext)
 {
@@ -338,6 +338,28 @@ int main(int argc, char * argv[])
 
     const double current_w = current_target.has_value() ? current_target->ekf_x()[7] : 0.0;
     const double current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
+    const nlohmann::json overlay_config =
+      web_debugger ? web_debugger->overlay_config() : nlohmann::json::object();
+    const auto apply_overlay_config =
+      [&](tools::debug_visualization::LiveOverlayOptions & visual_options) {
+        if (!overlay_config.is_object()) return;
+        auto apply_bool = [&](const char * key, bool & field) {
+          if (overlay_config.contains(key) && overlay_config.at(key).is_boolean()) {
+            field = overlay_config.at(key).get<bool>();
+          }
+        };
+        apply_bool("stabilize", visual_options.stabilize_annotations);
+        apply_bool("state_layers", visual_options.enable_state_layers);
+        apply_bool("armors", visual_options.show_armors);
+        apply_bool("labels", visual_options.show_armor_labels);
+        apply_bool("target_motion", visual_options.show_target_motion);
+        apply_bool("aim", visual_options.show_aim);
+        apply_bool("decision_hud", visual_options.show_decision_hud);
+        apply_bool("decision_track", visual_options.show_decision_track);
+        apply_bool("footer", visual_options.show_footer);
+      };
+    const auto overlay_stage = tools::debug_visualization::resolve_live_overlay_stage(
+      current_target.has_value(), current_plan);
     const auto now = std::chrono::steady_clock::now();
     const bool need_web_frame =
       web_debugger && web_debugger->has_active_client(web_client_ttl) &&
@@ -393,6 +415,10 @@ int main(int argc, char * argv[])
       web_state["planner"]["selected_z_offset_m"] = debug_planner.debug_selected_z_offset;
       web_state["planner"]["fixed_center_rotation_model"] =
         debug_planner.debug_fixed_center_rotation_model;
+      web_state["overlay"]["stage"] =
+        tools::debug_visualization::live_overlay_stage_to_string(overlay_stage);
+      web_state["overlay"]["controls"] =
+        overlay_config.is_object() ? overlay_config : nlohmann::json::object();
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
       web_state["command"]["has_target"] = current_target.has_value();
       web_state["command"]["fire"] = current_plan.fire;
@@ -451,9 +477,12 @@ int main(int argc, char * argv[])
       visual_options.current_h = current_h;
       visual_options.current_selected_z_offset = debug_planner.debug_selected_z_offset;
       visual_options.current_fixed_model = debug_planner.debug_fixed_center_rotation_model;
+      visual_options.target_jumped =
+        current_target.has_value() && current_target->jumped;
       visual_options.is_outpost =
         current_target.has_value() &&
         current_target->name == auto_aim::ArmorName::outpost;
+      apply_overlay_config(visual_options);
 
       const auto display_img = tools::debug_visualization::render_live_debug_frame(
         img, solver, current_target, current_plan, debug_planner, visual_options);

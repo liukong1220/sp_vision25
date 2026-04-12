@@ -37,11 +37,6 @@ const DebugCharts = (() => {
     "gimbal_yaw",
     "target_yaw",
     "plan_yaw",
-    "gimbal_pitch",
-    "target_pitch",
-    "plan_pitch",
-    "w",
-    "planner_delay_ms",
   ];
 
   let latestData = { time: [] };

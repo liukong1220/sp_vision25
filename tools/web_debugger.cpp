@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -126,12 +127,70 @@ void trim_json_array(nlohmann::json & array, size_t max_points)
     array.erase(array.begin());
   }
 }
+
+nlohmann::json default_overlay_config()
+{
+  return nlohmann::json::object({
+    {"stabilize", true},
+    {"state_layers", true},
+    {"armors", true},
+    {"labels", true},
+    {"target_motion", true},
+    {"aim", true},
+    {"decision_hud", true},
+    {"decision_track", true},
+    {"footer", true},
+  });
+}
+
+nlohmann::json merge_overlay_config(
+  const nlohmann::json & incoming, const nlohmann::json & fallback)
+{
+  nlohmann::json merged = fallback.is_object() ? fallback : default_overlay_config();
+  const auto defaults = default_overlay_config();
+  for (auto it = defaults.begin(); it != defaults.end(); ++it) {
+    const auto & key = it.key();
+    if (incoming.contains(key) && incoming.at(key).is_boolean()) {
+      merged[key] = incoming.at(key).get<bool>();
+    } else if (!merged.contains(key) || !merged.at(key).is_boolean()) {
+      merged[key] = it.value();
+    }
+  }
+  return merged;
+}
+
+std::string to_lower_copy(std::string value)
+{
+  std::transform(
+    value.begin(), value.end(), value.begin(),
+    [](unsigned char ch) {return static_cast<char>(std::tolower(ch));});
+  return value;
+}
+
+size_t parse_content_length(const std::string & header_block)
+{
+  std::istringstream header_stream(header_block);
+  std::string line;
+  while (std::getline(header_stream, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const auto colon_pos = line.find(':');
+    if (colon_pos == std::string::npos) continue;
+    const std::string key = to_lower_copy(line.substr(0, colon_pos));
+    if (key != "content-length") continue;
+    try {
+      return static_cast<size_t>(std::stoul(line.substr(colon_pos + 1)));
+    } catch (...) {
+      return 0;
+    }
+  }
+  return 0;
+}
 }  // namespace
 
 namespace tools
 {
 WebDebugger::WebDebugger(const std::string & host, uint16_t port)
-: host_(sanitize_bind_host(host)), port_(port)
+: host_(sanitize_bind_host(host)), port_(port), overlay_config_(default_overlay_config())
 {
   server_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
@@ -247,6 +306,18 @@ void WebDebugger::set_plot_history_limit(size_t max_points)
     trim_json_array(it.value(), max_plot_points_);
   }
   plot_json_ = plot_history_.dump();
+}
+
+void WebDebugger::update_overlay_config(const nlohmann::json & config)
+{
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  overlay_config_ = merge_overlay_config(config, overlay_config_);
+}
+
+nlohmann::json WebDebugger::overlay_config() const
+{
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  return overlay_config_;
 }
 
 void WebDebugger::update_main_frame(const cv::Mat & frame, int jpeg_quality)
@@ -368,16 +439,39 @@ void WebDebugger::handle_client(int client_fd)
     request.append(buffer, static_cast<size_t>(received));
   }
 
-  std::istringstream stream(request);
+  const auto header_end = request.find("\r\n\r\n");
+  if (header_end == std::string::npos) {
+    send_response(
+      client_fd, "400 Bad Request", "text/plain; charset=utf-8",
+      "invalid request");
+    return;
+  }
+
+  const std::string header_block = request.substr(0, header_end);
+  const size_t content_length = parse_content_length(header_block);
+  const size_t body_start = header_end + 4;
+  while (
+    request.size() < body_start + content_length &&
+    request.size() < kMaxRequestBytes)
+  {
+    const ssize_t received = ::recv(client_fd, buffer, sizeof(buffer), 0);
+    if (received <= 0) break;
+    request.append(buffer, static_cast<size_t>(received));
+  }
+
+  const std::string body = request.substr(
+    body_start, std::min(content_length, request.size() > body_start ? request.size() - body_start : 0UL));
+
+  std::istringstream stream(header_block);
   std::string method;
   std::string path;
   std::string version;
   stream >> method >> path >> version;
 
-  if (method != "GET") {
+  if (method != "GET" && method != "POST") {
     send_response(
       client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
-      "GET only");
+      "GET/POST only");
     return;
   }
 
@@ -415,6 +509,12 @@ void WebDebugger::handle_client(int client_fd)
   }
 
   if (path == "/api/state") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     std::string payload;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
@@ -426,6 +526,12 @@ void WebDebugger::handle_client(int client_fd)
   }
 
   if (path == "/data") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     std::string payload;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
@@ -437,6 +543,12 @@ void WebDebugger::handle_client(int client_fd)
   }
 
   if (path == "/log") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     std::string payload;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
@@ -447,17 +559,57 @@ void WebDebugger::handle_client(int client_fd)
     return;
   }
 
+  if (path == "/api/overlay") {
+    if (method == "GET") {
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        overlay_config().dump());
+      return;
+    }
+
+    try {
+      const auto incoming = body.empty() ? nlohmann::json::object() : nlohmann::json::parse(body);
+      update_overlay_config(incoming);
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        overlay_config().dump());
+    } catch (const std::exception &) {
+      send_response(
+        client_fd, "400 Bad Request", "application/json; charset=utf-8",
+        R"({"error":"invalid overlay config"})");
+    }
+    return;
+  }
+
   if (path == "/stream/main.mjpg") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     stream_jpeg(client_fd, false);
     return;
   }
 
   if (path == "/stream/ballistic.mjpg") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     stream_jpeg(client_fd, true);
     return;
   }
 
   if (path == "/api/frames/main.jpg" || path == "/api/frames/ballistic.jpg") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     std::vector<uchar> payload;
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
@@ -474,6 +626,12 @@ void WebDebugger::handle_client(int client_fd)
   }
 
   if (path == "/healthz") {
+    if (method != "GET") {
+      send_response(
+        client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+        "GET only");
+      return;
+    }
     send_response(client_fd, "200 OK", "text/plain; charset=utf-8", "ok");
     return;
   }

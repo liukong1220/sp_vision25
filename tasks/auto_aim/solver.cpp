@@ -262,7 +262,7 @@ double Solver::armor_reprojection_error(
 }
 
 // 世界坐标到像素坐标的转换
-std::vector<cv::Point2f> Solver::world2pixel(const std::vector<cv::Point3f> & worldPoints)
+std::vector<cv::Point2f> Solver::world2pixel(const std::vector<cv::Point3f> & worldPoints) const
 {
   Eigen::Matrix3d R_world2camera = R_camera2gimbal_.transpose() * R_gimbal2world_.transpose();
   Eigen::Vector3d t_world2camera = -R_camera2gimbal_.transpose() * t_camera2gimbal_;

@@ -408,6 +408,76 @@ button:hover {
   margin-top: 16px;
 }
 
+.overlay-control-shell {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(125, 194, 220, 0.12);
+}
+
+.overlay-stage-card {
+  padding: 14px 16px;
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  border-radius: 20px;
+  border: 1px solid rgba(125, 194, 220, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.overlay-stage-card span {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.overlay-stage-card strong {
+  color: var(--accent);
+  font-size: 18px;
+  text-align: right;
+}
+
+.overlay-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.overlay-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(125, 194, 220, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.overlay-toggle input {
+  margin-top: 2px;
+}
+
+.overlay-toggle strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.overlay-toggle span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.overlay-sync-bad {
+  color: var(--danger);
+}
+
 .row-item {
   padding: 12px 14px;
   display: flex;
@@ -655,5 +725,9 @@ body.fullscreen-mode {
 
   .view-btn {
     flex: 1;
+  }
+
+  .overlay-control-grid {
+    grid-template-columns: 1fr;
   }
 }

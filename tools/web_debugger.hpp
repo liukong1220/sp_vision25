@@ -31,6 +31,8 @@ public:
   void update_log(const nlohmann::json & log);
   void update_plot_sample(const nlohmann::json & sample);
   void set_plot_history_limit(size_t max_points);
+  void update_overlay_config(const nlohmann::json & config);
+  nlohmann::json overlay_config() const;
 
   void update_main_frame(const cv::Mat & frame, int jpeg_quality = 70);
   void update_ballistic_frame(const cv::Mat & frame, int jpeg_quality = 70);
@@ -60,6 +62,7 @@ private:
   std::string state_json_ = "{}";
   std::string log_json_ = "{}";
   std::string plot_json_ = R"({"time":[]})";
+  nlohmann::json overlay_config_ = nlohmann::json::object();
   nlohmann::json plot_history_ =
     nlohmann::json::object({{"time", nlohmann::json::array()}});
   size_t max_plot_points_ = 360;
