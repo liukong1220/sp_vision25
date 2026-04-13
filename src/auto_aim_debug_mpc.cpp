@@ -206,6 +206,7 @@ int main(int argc, char * argv[])
       data["plan_pitch_acc"] = rad2deg(plan.pitch_acc);
       data["fire"] = plan.fire ? 1 : 0;
       data["fired"] = fired ? 1 : 0;
+      data["bullet_speed"] = gs.bullet_speed;
 
       nlohmann::json snapshot;
       snapshot["has_target"] = target.has_value();
@@ -241,6 +242,11 @@ int main(int argc, char * argv[])
       snapshot["plan_pitch_acc_deg"] = rad2deg(plan.pitch_acc);
       snapshot["plan_pitch_acc_rad"] = plan.pitch_acc;
       snapshot["bullet_speed_mps"] = gs.bullet_speed;
+      snapshot["bullet_speed_effective_mps"] =
+        (gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0) ? 22.0 : gs.bullet_speed;
+      snapshot["bullet_speed_fallback"] =
+        gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0;
+      snapshot["bullet_speed_source"] = "serial";
 
       if (target.has_value()) {
         data["target_z"] = target->ekf_x()[4];
@@ -404,6 +410,8 @@ int main(int argc, char * argv[])
       web_state["frame"]["latency_ms"] = latency_ms;
       web_state["frame"]["image_width"] = img.cols;
       web_state["frame"]["image_height"] = img.rows;
+      web_state["frame"]["bullet_speed_mps"] = gs.bullet_speed;
+      web_state["frame"]["bullet_speed_source"] = "serial";
       web_state["preview"]["has_target"] = current_target.has_value();
       web_state["preview"]["fire"] = current_plan.fire;
       web_state["preview"]["target_name"] =
@@ -469,6 +477,12 @@ int main(int argc, char * argv[])
         overlay_config.is_object() ? overlay_config : nlohmann::json::object();
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
       web_state["command"] = latest_command_state;
+      web_state["command"]["bullet_speed_mps"] = gs.bullet_speed;
+      web_state["command"]["bullet_speed_source"] = "serial";
+      web_state["command"]["bullet_speed_effective_mps"] =
+        (gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0) ? 22.0 : gs.bullet_speed;
+      web_state["command"]["bullet_speed_fallback"] =
+        gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0;
       web_debugger->update_state(web_state);
       web_debugger->update_log(web_state);
       last_web_state_time = now;

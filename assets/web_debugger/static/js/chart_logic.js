@@ -46,7 +46,7 @@ const DebugCharts = (() => {
       group: "planner",
     },
 
-    bullet_speed: { label: "弹速", color: "#53d6ff", unit: "m/s", group: "fire" },
+    bullet_speed: { label: "串口弹速", color: "#53d6ff", unit: "m/s", group: "fire" },
     fire: { label: "建议开火", color: "#ff7388", unit: "bool", group: "fire" },
     fired: { label: "实际发射", color: "#ff8d55", unit: "bool", group: "fire" },
     shoot: { label: "击发判定", color: "#ff7388", unit: "bool", group: "fire" },

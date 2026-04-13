@@ -378,6 +378,8 @@ int main(int argc, char * argv[])
       web_state["frame"]["playback_t_s"] = relative_t;
       web_state["frame"]["raw_t_s"] = t;
       web_state["frame"]["frame_index"] = frame_count;
+      web_state["frame"]["bullet_speed_mps"] = bullet_speed;
+      web_state["frame"]["bullet_speed_source"] = "offline-cli";
       web_state["preview"]["has_target"] = current_target.has_value();
       web_state["preview"]["fire"] = current_plan.fire;
       web_state["preview"]["target_name"] =
@@ -452,6 +454,11 @@ int main(int argc, char * argv[])
       web_state["command"]["plan_pitch_acc_deg"] = rad2deg(current_plan.pitch_acc);
       web_state["command"]["plan_pitch_acc_rad"] = current_plan.pitch_acc;
       web_state["command"]["bullet_speed_mps"] = bullet_speed;
+      web_state["command"]["bullet_speed_effective_mps"] =
+        (bullet_speed < 10.0 || bullet_speed > 25.0) ? 22.0 : bullet_speed;
+      web_state["command"]["bullet_speed_fallback"] =
+        bullet_speed < 10.0 || bullet_speed > 25.0;
+      web_state["command"]["bullet_speed_source"] = "offline-cli";
       web_debugger->update_state(web_state);
       web_debugger->update_log(web_state);
       last_web_state_time = now;

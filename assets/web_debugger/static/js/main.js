@@ -791,6 +791,26 @@
     const command = state.command || {};
     const ballistic = state.ballistic || {};
     const overlay = state.overlay || {};
+    const serialBulletSpeed = getByPath(
+      frame,
+      "bullet_speed_mps",
+      getByPath(command, "bullet_speed_mps", getByPath(ballistic, "bullet_speed_raw_mps", getByPath(ballistic, "bullet_speed_mps"))),
+    );
+    const effectiveBulletSpeed = getByPath(
+      command,
+      "bullet_speed_effective_mps",
+      getByPath(ballistic, "bullet_speed_effective_mps", getByPath(ballistic, "bullet_speed_mps")),
+    );
+    const bulletSpeedFallback = !!getByPath(
+      command,
+      "bullet_speed_fallback",
+      getByPath(ballistic, "bullet_speed_fallback", false),
+    );
+    const bulletSpeedSource = getByPath(
+      frame,
+      "bullet_speed_source",
+      getByPath(command, "bullet_speed_source", "runtime"),
+    );
 
     const hasTarget = !!getByPath(preview, "has_target", false);
     const fire = !!getByPath(preview, "fire", false);
@@ -834,8 +854,8 @@
         value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
       },
       {
-        label: "发射速度",
-        value: formatNumber(getByPath(command, "bullet_speed_mps", getByPath(ballistic, "bullet_speed_mps")), 2, " m/s"),
+        label: "串口弹速",
+        value: formatNumber(serialBulletSpeed, 2, " m/s"),
       },
       {
         label: "图层阶段",
@@ -864,6 +884,13 @@
       { label: "弹道有效", value: formatBool(getByPath(ballistic, "valid", false), "YES", "NO") },
       { label: "轨迹可解", value: formatBool(!getByPath(ballistic, "unsolvable", false), "YES", "NO") },
       { label: "命中判定", value: formatBool(getByPath(ballistic, "hit", false), "HIT", "MISS") },
+      {
+        label: "串口 / 算法弹速",
+        value:
+          `${formatNumber(getByPath(ballistic, "bullet_speed_raw_mps", serialBulletSpeed), 2, " m/s")} / ` +
+          `${formatNumber(getByPath(ballistic, "bullet_speed_effective_mps", effectiveBulletSpeed), 2, " m/s")}` +
+          (bulletSpeedFallback ? " · FALLBACK" : ""),
+      },
       { label: "总误差", value: formatNumber(getByPath(ballistic, "total_error_mm"), 1, " mm") },
       {
         label: "Yaw / Pitch 残差",
@@ -893,7 +920,16 @@
         label: "规划加速度",
         value: `${formatSigned(getByPath(command, "plan_yaw_acc_deg"), 2, " deg/s2")} / ${formatSigned(getByPath(command, "plan_pitch_acc_deg"), 2, " deg/s2")}`,
       },
-      { label: "弹速", value: formatNumber(getByPath(command, "bullet_speed_mps"), 2, " m/s") },
+      {
+        label: "串口弹速",
+        value: `${formatNumber(serialBulletSpeed, 2, " m/s")} · ${bulletSpeedSource}`,
+      },
+      bulletSpeedFallback ?
+        {
+          label: "算法弹速",
+          value: `${formatNumber(effectiveBulletSpeed, 2, " m/s")} · safety fallback`,
+        } :
+        null,
     ]);
 
     renderRows("inspector-summary", [
@@ -922,6 +958,16 @@
         label: "计划角度 deg",
         value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
       },
+      {
+        label: "弹速来源",
+        value: `${bulletSpeedSource} · ${formatNumber(serialBulletSpeed, 2, " m/s")}`,
+      },
+      bulletSpeedFallback ?
+        {
+          label: "算法兜底弹速",
+          value: formatNumber(effectiveBulletSpeed, 2, " m/s"),
+        } :
+        null,
     ]);
 
     renderRows("preview-card", [

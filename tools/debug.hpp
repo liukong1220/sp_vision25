@@ -30,7 +30,9 @@ struct BallisticDiagnostic
   bool unsolvable = false;
   bool hit = false;
   bool fire = false;
+  bool bullet_speed_fallback = false;
   auto_aim::ArmorType armor_type = auto_aim::ArmorType::small;
+  double raw_bullet_speed = 0.0;
   double bullet_speed = 0.0;
   double yaw_offset = 0.0;
   double pitch_offset = 0.0;

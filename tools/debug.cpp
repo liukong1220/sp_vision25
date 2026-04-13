@@ -68,7 +68,9 @@ tools::debug::BallisticDiagnostic build_ballistic_diagnostic_impl(
   tools::debug::BallisticDiagnostic diag;
   if (!control) return diag;
 
-  if (bullet_speed < 10.0 || bullet_speed > 25.0) bullet_speed = 22.0;
+  diag.raw_bullet_speed = bullet_speed;
+  diag.bullet_speed_fallback = bullet_speed < 10.0 || bullet_speed > 25.0;
+  if (diag.bullet_speed_fallback) bullet_speed = 22.0;
 
   diag.valid = true;
   diag.fire = fire;
@@ -244,7 +246,10 @@ nlohmann::json ballistic_to_json(const BallisticDiagnostic & diag)
   data["unsolvable"] = diag.unsolvable;
   data["hit"] = diag.hit;
   data["fire"] = diag.fire;
+  data["bullet_speed_fallback"] = diag.bullet_speed_fallback;
   data["armor_type"] = armor_type_to_string(diag.armor_type);
+  data["bullet_speed_raw_mps"] = diag.raw_bullet_speed;
+  data["bullet_speed_effective_mps"] = diag.bullet_speed;
   data["bullet_speed_mps"] = diag.bullet_speed;
   data["yaw_offset_deg"] = rad2deg(diag.yaw_offset);
   data["pitch_offset_deg"] = rad2deg(diag.pitch_offset);
@@ -294,8 +299,8 @@ void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag)
     draw_outlined_text(
       panel,
       fmt::format(
-        "speed: {:.2f} m/s  target d/z: {:.2f} / {:.2f} m", diag.bullet_speed,
-        diag.target_dist_xy, diag.target_xyz.z()),
+        "speed raw/use: {:.2f} / {:.2f} m/s  d/z: {:.2f} / {:.2f} m",
+        diag.raw_bullet_speed, diag.bullet_speed, diag.target_dist_xy, diag.target_xyz.z()),
       {140, 225}, 0.6, cv::Scalar(220, 220, 220), 1);
     draw_outlined_text(
       panel,
@@ -409,8 +414,9 @@ void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag)
   draw_outlined_text(
     panel,
     fmt::format(
-      "plan.fire: {}  speed: {:.2f} m/s", diag.fire ? "true" : "false",
-      diag.bullet_speed),
+      "plan.fire: {}  speed raw/use: {:.2f} / {:.2f} m/s{}",
+      diag.fire ? "true" : "false", diag.raw_bullet_speed, diag.bullet_speed,
+      diag.bullet_speed_fallback ? "  [fallback]" : ""),
     {text_rect.x + 15, text_rect.y + 58}, 0.52, cv::Scalar(230, 230, 230));
   draw_outlined_text(
     panel,
