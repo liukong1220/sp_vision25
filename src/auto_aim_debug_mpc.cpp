@@ -247,21 +247,46 @@ int main(int argc, char * argv[])
         data["target_vz"] = target->ekf_x()[5];
         data["target_h"] = target->ekf_x()[10];
         data["w"] = target->ekf_x()[7];
+        data["tracker_match_valid"] = target->tracker_debug_match_valid ? 1 : 0;
+        data["tracker_match_id"] = target->tracker_debug_match_id;
+        data["tracker_match_score"] = target->tracker_debug_match_score;
+        data["tracker_reprojection_px"] = target->tracker_debug_reprojection_px;
 
         snapshot["target_z_m"] = target->ekf_x()[4];
         snapshot["target_vz_mps"] = target->ekf_x()[5];
         snapshot["target_h_m"] = target->ekf_x()[10];
         snapshot["target_w_rad_s"] = target->ekf_x()[7];
+        snapshot["tracker_candidate_count"] = target->tracker_debug_candidate_count;
+        snapshot["tracker_match_valid"] = target->tracker_debug_match_valid;
+        snapshot["tracker_match_id"] = target->tracker_debug_match_id;
+        snapshot["tracker_match_score"] = target->tracker_debug_match_score;
+        snapshot["tracker_reprojection_px"] = target->tracker_debug_reprojection_px;
+        snapshot["tracker_xy_error_m"] = target->tracker_debug_xy_error_m;
+        snapshot["tracker_z_error_m"] = target->tracker_debug_z_error_m;
       } else {
         data["w"] = 0.0;
+        data["tracker_match_valid"] = 0;
+        data["tracker_match_id"] = -1;
+        data["tracker_match_score"] = -1.0;
+        data["tracker_reprojection_px"] = -1.0;
         snapshot["target_z_m"] = nullptr;
         snapshot["target_vz_mps"] = nullptr;
         snapshot["target_h_m"] = nullptr;
         snapshot["target_w_rad_s"] = nullptr;
+        snapshot["tracker_candidate_count"] = 0;
+        snapshot["tracker_match_valid"] = false;
+        snapshot["tracker_match_id"] = -1;
+        snapshot["tracker_match_score"] = nullptr;
+        snapshot["tracker_reprojection_px"] = nullptr;
+        snapshot["tracker_xy_error_m"] = nullptr;
+        snapshot["tracker_z_error_m"] = nullptr;
       }
 
       data["planner_selected_armor"] = planner.debug_armor_id;
       data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
+      data["planner_hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
+      data["planner_hit_iters"] = planner.debug_hit_iter_count;
+      data["planner_hit_converged"] = planner.debug_hit_converged ? 1 : 0;
       data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
       data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
       data["planner_turn_sign"] = tools::debug::spin_direction_sign(target.has_value() ? target->ekf_x()[7] : 0.0);
@@ -270,6 +295,9 @@ int main(int argc, char * argv[])
 
       snapshot["selected_armor"] = planner.debug_armor_id;
       snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
+      snapshot["hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
+      snapshot["hit_iter_count"] = planner.debug_hit_iter_count;
+      snapshot["hit_converged"] = planner.debug_hit_converged;
       snapshot["spin_gate"] = planner.debug_used_spin_gate;
       snapshot["center_yaw_deg"] = rad2deg(planner.debug_center_yaw);
       snapshot["turn_direction"] = tools::debug::spin_direction_to_string(
@@ -402,6 +430,9 @@ int main(int argc, char * argv[])
       web_state["planner"]["selected_armor"] = debug_planner.debug_armor_id;
       web_state["planner"]["spin_gate"] = debug_planner.debug_used_spin_gate;
       web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
+      web_state["planner"]["hit_fly_time_ms"] = debug_planner.debug_hit_fly_time * 1000.0;
+      web_state["planner"]["hit_iter_count"] = debug_planner.debug_hit_iter_count;
+      web_state["planner"]["hit_converged"] = debug_planner.debug_hit_converged;
       web_state["planner"]["center_yaw_deg"] = rad2deg(debug_planner.debug_center_yaw);
       web_state["planner"]["turn_direction"] =
         tools::debug::spin_direction_to_string(current_w);
@@ -415,6 +446,23 @@ int main(int argc, char * argv[])
       web_state["planner"]["h_m"] = current_h;
       web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
       web_state["planner"]["fixed_center_rotation_model"] = current_fixed_model;
+      if (current_target.has_value()) {
+        web_state["tracker"]["candidate_count"] = current_target->tracker_debug_candidate_count;
+        web_state["tracker"]["match_valid"] = current_target->tracker_debug_match_valid;
+        web_state["tracker"]["match_id"] = current_target->tracker_debug_match_id;
+        web_state["tracker"]["match_score"] = current_target->tracker_debug_match_score;
+        web_state["tracker"]["reprojection_px"] = current_target->tracker_debug_reprojection_px;
+        web_state["tracker"]["xy_error_m"] = current_target->tracker_debug_xy_error_m;
+        web_state["tracker"]["z_error_m"] = current_target->tracker_debug_z_error_m;
+      } else {
+        web_state["tracker"]["candidate_count"] = 0;
+        web_state["tracker"]["match_valid"] = false;
+        web_state["tracker"]["match_id"] = -1;
+        web_state["tracker"]["match_score"] = nullptr;
+        web_state["tracker"]["reprojection_px"] = nullptr;
+        web_state["tracker"]["xy_error_m"] = nullptr;
+        web_state["tracker"]["z_error_m"] = nullptr;
+      }
       web_state["overlay"]["stage"] =
         tools::debug_visualization::live_overlay_stage_to_string(overlay_stage);
       web_state["overlay"]["controls"] =
@@ -438,6 +486,9 @@ int main(int argc, char * argv[])
       visual_options.planner_spin_gate = debug_planner.debug_used_spin_gate;
       visual_options.planner_delay_ms = debug_planner.debug_delay_time * 1000.0;
       visual_options.planner_center_yaw_deg = rad2deg(debug_planner.debug_center_yaw);
+      visual_options.planner_hit_fly_time_ms = debug_planner.debug_hit_fly_time * 1000.0;
+      visual_options.planner_hit_iter_count = debug_planner.debug_hit_iter_count;
+      visual_options.planner_hit_converged = debug_planner.debug_hit_converged;
       visual_options.planner_delta_angles_deg.clear();
       for (const double delta_angle : debug_planner.debug_delta_angle_list) {
         visual_options.planner_delta_angles_deg.push_back(rad2deg(delta_angle));
@@ -446,6 +497,20 @@ int main(int argc, char * argv[])
         tools::debug::spin_direction_to_string(current_w);
       visual_options.planner_turn_sign =
         tools::debug::spin_direction_sign(current_w);
+      visual_options.tracker_candidate_count =
+        current_target.has_value() ? current_target->tracker_debug_candidate_count : 0;
+      visual_options.tracker_match_valid =
+        current_target.has_value() && current_target->tracker_debug_match_valid;
+      visual_options.tracker_match_id =
+        current_target.has_value() ? current_target->tracker_debug_match_id : -1;
+      visual_options.tracker_match_score =
+        current_target.has_value() ? current_target->tracker_debug_match_score : -1.0;
+      visual_options.tracker_reprojection_px =
+        current_target.has_value() ? current_target->tracker_debug_reprojection_px : -1.0;
+      visual_options.tracker_xy_error_m =
+        current_target.has_value() ? current_target->tracker_debug_xy_error_m : -1.0;
+      visual_options.tracker_z_error_m =
+        current_target.has_value() ? current_target->tracker_debug_z_error_m : -1.0;
       visual_options.current_w = current_w;
       visual_options.current_h = current_h;
       visual_options.current_selected_z_offset = current_selected_z_offset;

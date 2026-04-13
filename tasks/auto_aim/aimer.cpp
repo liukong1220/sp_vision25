@@ -1,6 +1,8 @@
 #include "aimer.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "tools/logger.hpp"
@@ -142,11 +144,34 @@ io::Command Aimer::aim(
 
 AimPoint Aimer::choose_aim_point(const Target & target)
 {
+  constexpr double kNormalVisibleAngle = 60.0 / 57.3;
+  constexpr double kSpinSpeedThreshold = 2.0;
+
   Eigen::VectorXd ekf_x = target.ekf_x();
   std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
-  auto armor_num = armor_xyza_list.size();
+  const auto armor_num = armor_xyza_list.size();
+  if (armor_xyza_list.empty()) return {false, Eigen::Vector4d::Zero()};
+
+  auto select_id = [&](int id) -> AimPoint { return {true, armor_xyza_list[id]}; };
+  auto fallback_to_closest = [&]() -> AimPoint {
+    int best_id = 0;
+    double best_score = std::numeric_limits<double>::max();
+    for (int i = 0; i < static_cast<int>(armor_num); ++i) {
+      const double score = std::abs(tools::limit_rad(armor_xyza_list[i][3] - std::atan2(ekf_x[2], ekf_x[0])));
+      if (score < best_score) {
+        best_score = score;
+        best_id = i;
+      }
+    }
+    lock_id_ = -1;
+    return select_id(best_id);
+  };
+
   // 如果装甲板未发生过跳变，则只有当前装甲板的位置已知
-  if (!target.jumped) return {true, armor_xyza_list[0]};
+  if (!target.jumped) {
+    lock_id_ = 0;
+    return select_id(0);
+  }
 
   // 整车旋转中心的球坐标yaw
   auto center_yaw = std::atan2(ekf_x[2], ekf_x[0]);
@@ -158,34 +183,39 @@ AimPoint Aimer::choose_aim_point(const Target & target)
     delta_angle_list.emplace_back(delta_angle);
   }
 
-  // 不考虑小陀螺
-  if (std::abs(ekf_x[7]) <= 2 && target.name != ArmorName::outpost) {
+  const bool use_spin_gate =
+    std::abs(ekf_x[7]) > kSpinSpeedThreshold || target.name == ArmorName::outpost;
+
+  if (!use_spin_gate) {
     // 选择在可射击范围内的装甲板
     std::vector<int> id_list;
     for (int i = 0; i < armor_num; i++) {
-      if (std::abs(delta_angle_list[i]) > 60 / 57.3) continue;
+      if (std::abs(delta_angle_list[i]) > kNormalVisibleAngle) continue;
       id_list.push_back(i);
     }
-    // 绝无可能
+
     if (id_list.empty()) {
-      tools::logger()->warn("Empty id list!");
-      return {false, armor_xyza_list[0]};
+      return fallback_to_closest();
     }
 
-    // 锁定模式：防止在两个都呈45度的装甲板之间来回切换
-    if (id_list.size() > 1) {
-      int id0 = id_list[0], id1 = id_list[1];
-
-      // 未处于锁定模式时，选择delta_angle绝对值较小的装甲板，进入锁定模式
-      if (lock_id_ != id0 && lock_id_ != id1)
-        lock_id_ = (std::abs(delta_angle_list[id0]) < std::abs(delta_angle_list[id1])) ? id0 : id1;
-
-      return {true, armor_xyza_list[lock_id_]};
+    if (id_list.size() == 1) {
+      lock_id_ = -1;
+      return select_id(id_list.front());
     }
 
-    // 只有一个装甲板在可射击范围内时，退出锁定模式
-    lock_id_ = -1;
-    return {true, armor_xyza_list[id_list[0]]};
+    if (std::find(id_list.begin(), id_list.end(), lock_id_) == id_list.end()) {
+      lock_id_ = id_list.front();
+      double best_score = std::abs(delta_angle_list[lock_id_]);
+      for (const int id : id_list) {
+        const double score = std::abs(delta_angle_list[id]);
+        if (score < best_score) {
+          best_score = score;
+          lock_id_ = id;
+        }
+      }
+    }
+
+    return select_id(lock_id_);
   }
 
   double coming_angle, leaving_angle;
@@ -197,14 +227,29 @@ AimPoint Aimer::choose_aim_point(const Target & target)
     leaving_angle = leaving_angle_;
   }
 
-  // 在小陀螺时，一侧的装甲板不断出现，另一侧的装甲板不断消失，显然前者被打中的概率更高
+  int best_id = -1;
+  double best_score = std::numeric_limits<double>::max();
   for (int i = 0; i < armor_num; i++) {
     if (std::abs(delta_angle_list[i]) > coming_angle) continue;
-    if (ekf_x[7] > 0 && delta_angle_list[i] < leaving_angle) return {true, armor_xyza_list[i]};
-    if (ekf_x[7] < 0 && delta_angle_list[i] > -leaving_angle) return {true, armor_xyza_list[i]};
+
+    bool entering_window = false;
+    if (ekf_x[7] > 0) entering_window = delta_angle_list[i] < leaving_angle;
+    if (ekf_x[7] < 0) entering_window = delta_angle_list[i] > -leaving_angle;
+    if (!entering_window) continue;
+
+    const double score = std::abs(delta_angle_list[i]);
+    if (score < best_score) {
+      best_score = score;
+      best_id = i;
+    }
   }
 
-  return {false, armor_xyza_list[0]};
+  if (best_id == -1) {
+    return fallback_to_closest();
+  }
+
+  lock_id_ = -1;
+  return select_id(best_id);
 }
 
 }  // namespace auto_aim

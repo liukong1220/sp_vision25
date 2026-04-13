@@ -107,8 +107,8 @@
 # fire_gap_time: 0.700   # s
 # predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况调整
 
-enemy_color: "red"
-#enemy_color: "blue"
+#enemy_color: "red"
+enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -165,7 +165,7 @@ judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
 camera_name: "hikrobot"
-exposure_ms: 2.5
+exposure_ms: 3.0
 gain: 16.0
 vid_pid: "2bdf:0001"
 

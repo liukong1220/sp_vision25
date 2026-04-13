@@ -499,11 +499,11 @@ void draw_footer_panel(cv::Mat & display_img, const auto_aim::Plan & current_pla
 }
 
 void draw_decision_track(
-  cv::Mat & display_img, const cv::Rect & rect, const LiveOverlayOptions & options)
+  cv::Mat & display_img, const cv::Rect & rect, const LiveOverlayOptions & options,
+  int track_top)
 {
   if (options.planner_delta_angles_deg.empty()) return;
 
-  const int track_top = rect.y + 142;
   const int axis_y = rect.y + rect.height - 22;
   const int axis_x0 = rect.x + 20;
   const int axis_x1 = rect.x + rect.width - 20;
@@ -591,7 +591,59 @@ void draw_decision_panel(
   cv::Mat & display_img, const auto_aim::Plan & current_plan,
   const LiveOverlayOptions & options, LiveOverlayStage stage, bool show_track)
 {
-  const int panel_height = show_track ? 238 : 170;
+  std::vector<std::pair<std::string, std::string>> info_lines = {
+    {
+      "select",
+      fmt::format(
+        "{} | {}",
+        options.planner_armor_id >= 0 ? fmt::format("A{}", options.planner_armor_id) : "A-",
+        selection_reason(options)),
+    },
+    {"fire", fire_reason(current_plan)},
+    {"model", model_reason(options)},
+    {
+      "turn",
+      fmt::format("{} | w {:+.2f}", options.planner_turn_direction, options.current_w),
+    },
+    {
+      "state",
+      fmt::format(
+        "spin {}  center {:+.1f}  delay {:.1f}ms",
+        options.planner_spin_gate ? "ON" : "OFF",
+        options.planner_center_yaw_deg, options.planner_delay_ms),
+    },
+  };
+
+  if (options.is_outpost) {
+    const std::string tracker_state =
+      options.tracker_candidate_count <= 0 ? "miss" :
+      options.tracker_match_valid ? "ok" : "reject";
+    const std::string tracker_id =
+      options.tracker_match_id >= 0 ? fmt::format("A{}", options.tracker_match_id) : "A-";
+    info_lines.push_back({
+      "track",
+      fmt::format(
+        "cand {}  {} {}  s {:.2f}  rp {:.1f}",
+        options.tracker_candidate_count, tracker_id, tracker_state,
+        options.tracker_match_score, options.tracker_reprojection_px),
+    });
+    info_lines.push_back({
+      "geom",
+      fmt::format(
+        "xy {:.3f}m  z {:.3f}m  hit {:.1f}ms",
+        options.tracker_xy_error_m, options.tracker_z_error_m, options.planner_hit_fly_time_ms),
+    });
+    info_lines.push_back({
+      "iter",
+      fmt::format(
+        "{} iter  {}",
+        options.planner_hit_iter_count,
+        options.planner_hit_converged ? "converged" : "max-iter"),
+    });
+  }
+
+  const int panel_height =
+    (show_track ? 148 : 80) + static_cast<int>(info_lines.size()) * 18;
   const cv::Rect panel_rect(
     std::max(12, display_img.cols - 340), 14, 326,
     std::min(panel_height, display_img.rows - 28));
@@ -614,28 +666,6 @@ void draw_decision_panel(
     fmt::format("{} / {}", options.target_name, options.armor_type),
     {panel_rect.x + 16, panel_rect.y + 78}, 0.48, title_color, 1);
 
-  const std::vector<std::pair<std::string, std::string>> info_lines = {
-    {
-      "select",
-      fmt::format(
-        "{} | {}",
-        options.planner_armor_id >= 0 ? fmt::format("A{}", options.planner_armor_id) : "A-",
-        selection_reason(options)),
-    },
-    {"fire", fire_reason(current_plan)},
-    {"model", model_reason(options)},
-    {
-      "turn",
-      fmt::format("{} | w {:+.2f}", options.planner_turn_direction, options.current_w),
-    },
-    {
-      "state",
-      fmt::format(
-        "spin {}  center {:+.1f}  delay {:.1f}ms",
-        options.planner_spin_gate ? "ON" : "OFF",
-        options.planner_center_yaw_deg, options.planner_delay_ms),
-    },
-  };
   for (size_t i = 0; i < info_lines.size(); ++i) {
     draw_outlined_text(
       display_img, fmt::format("{}:", info_lines[i].first),
@@ -648,7 +678,9 @@ void draw_decision_panel(
   }
 
   if (show_track) {
-    draw_decision_track(display_img, panel_rect, options);
+    const int track_top =
+      panel_rect.y + 110 + static_cast<int>(info_lines.size()) * 18;
+    draw_decision_track(display_img, panel_rect, options, track_top);
   }
 }
 

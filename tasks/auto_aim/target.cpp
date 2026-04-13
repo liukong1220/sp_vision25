@@ -176,7 +176,7 @@ void Target::predict(double dt)
 void Target::update(const Armor & armor)
 {
   // 装甲板匹配
-  int id;
+  int id = 0;
   auto min_angle_error = 1e10;
   const std::vector<Eigen::Vector4d> & xyza_list = armor_xyza_list();
 
@@ -207,6 +207,11 @@ void Target::update(const Armor & armor)
     }
   }
 
+  update(armor, id);
+}
+
+void Target::update(const Armor & armor, int id)
+{
   if (id != 0) jumped = true;
 
   if (id != last_id) {
@@ -286,6 +291,12 @@ Eigen::VectorXd Target::ekf_x() const { return ekf_.x; }
 
 const tools::ExtendedKalmanFilter & Target::ekf() const { return ekf_; }
 
+int Target::normalize_armor_id(int id) const
+{
+  if (armor_num_ <= 0) return 0;
+  return (id % armor_num_ + armor_num_) % armor_num_;
+}
+
 std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
 {
   std::vector<Eigen::Vector4d> _armor_xyza_list;
@@ -300,9 +311,34 @@ std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
 
 double Target::armor_z_offset(int id) const
 {
-  if (armor_z_offsets_.empty()) return 0.0;
-  const int normalized_id = (id % armor_num_ + armor_num_) % armor_num_;
-  return armor_z_offsets_[normalized_id];
+  if (armor_z_offsets_.empty() || armor_num_ <= 0) return 0.0;
+  return armor_z_offsets_[physical_armor_id(id)];
+}
+
+int Target::physical_armor_id(int id) const
+{
+  return normalize_armor_id(normalize_armor_id(id) + armor_id_offset_);
+}
+
+int Target::armor_id_offset() const { return armor_id_offset_; }
+
+void Target::set_armor_id_offset(int offset, int reference_id)
+{
+  if (armor_num_ <= 0) return;
+
+  const int normalized_offset = normalize_armor_id(offset);
+  if (normalized_offset == armor_id_offset_) return;
+
+  const int reference_local_id = normalize_armor_id(reference_id);
+  const double old_reference_z_offset = armor_z_offset(reference_local_id);
+  armor_id_offset_ = normalized_offset;
+  const double new_reference_z_offset = armor_z_offset(reference_local_id);
+
+  // Keep the currently tracked reference board height continuous while remapping
+  // local ids to physical outpost boards.
+  if (ekf_.x.size() > 4) {
+    ekf_.x[4] += old_reference_z_offset - new_reference_z_offset;
+  }
 }
 
 bool Target::fixed_center_rotation_model() const { return fixed_center_rotation_model_; }

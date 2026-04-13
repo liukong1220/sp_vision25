@@ -18,6 +18,8 @@ namespace
 {
 constexpr double kNormalVisibleAngle = 60.0 / 57.3;
 constexpr double kSpinSpeedThreshold = 2.0;
+constexpr int kHitTimeIterMax = 6;
+constexpr double kHitTimeTol = 1e-3;
 
 AimSelection choose_aim_selection(
   const Target & target, double coming_angle, double leaving_angle, int & lock_id)
@@ -59,8 +61,10 @@ AimSelection choose_aim_selection(
   // 当目标还没有发生过真实跳板时，EKF 只对当前板的观测最可信。
   // 这时强行按照小陀螺策略切板，往往会把初始相位带偏，导致第一枪就明显超前。
   if (!target.jumped) {
-    lock_id = 0;
-    fill_selection(0, false);
+    const int armor_count = static_cast<int>(armor_xyza_list.size());
+    const int observed_id = (target.last_id % armor_count + armor_count) % armor_count;
+    lock_id = observed_id;
+    fill_selection(observed_id, false);
     return selection;
   }
 
@@ -136,6 +140,68 @@ AimSelection choose_aim_selection(
   fill_selection(best_id, true);
   return selection;
 }
+
+struct HitTargetSolution
+{
+  bool valid = false;
+  Target target_at_hit;
+  AimSelection selection;
+  double fly_time = 0.0;
+  int iter_count = 0;
+  bool converged = false;
+};
+
+HitTargetSolution solve_hit_target(
+  const Target & base_target, double bullet_speed, double coming_angle, double leaving_angle,
+  int initial_lock_id)
+{
+  HitTargetSolution solution;
+  int working_lock_id = initial_lock_id;
+  double fly_time = 0.0;
+  int previous_armor_id = -1;
+
+  for (int iter = 0; iter < kHitTimeIterMax; ++iter) {
+    Target iter_target = base_target;
+    if (fly_time > 0.0) {
+      iter_target.predict(fly_time);
+    }
+
+    auto selection =
+      choose_aim_selection(iter_target, coming_angle, leaving_angle, working_lock_id);
+    if (!selection.valid) return solution;
+
+    const Eigen::Vector3d xyz = selection.xyza.head<3>();
+    const double dist_xy = xyz.head<2>().norm();
+    auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
+    if (bullet_traj.unsolvable) return solution;
+
+    Target hit_target = base_target;
+    hit_target.predict(bullet_traj.fly_time);
+
+    if (
+      iter > 0 && std::abs(bullet_traj.fly_time - fly_time) < kHitTimeTol &&
+      selection.armor_id == previous_armor_id)
+    {
+      solution.valid = true;
+      solution.target_at_hit = hit_target;
+      solution.selection = selection;
+      solution.fly_time = bullet_traj.fly_time;
+      solution.iter_count = iter + 1;
+      solution.converged = true;
+      return solution;
+    }
+
+    fly_time = bullet_traj.fly_time;
+    previous_armor_id = selection.armor_id;
+    solution.valid = true;
+    solution.target_at_hit = hit_target;
+    solution.selection = selection;
+    solution.fly_time = bullet_traj.fly_time;
+    solution.iter_count = iter + 1;
+  }
+
+  return solution;
+}
 }  // namespace
 
 Planner::Planner(const std::string & config_path)
@@ -159,30 +225,44 @@ Planner::Planner(const std::string & config_path)
 Plan Planner::plan(Target target, double bullet_speed)
 {
   refresh_runtime_params_if_needed();
+  debug_hit_fly_time = 0.0;
+  debug_hit_iter_count = 0;
+  debug_hit_converged = false;
 
   // 0. Check bullet speed
   if (bullet_speed < 10 || bullet_speed > 25) {
     bullet_speed = 22;
   }
 
-  // 1. 先基于“当前真正准备击打的装甲板”估计弹丸飞行时间。
-  // 之前这里使用的是最近装甲板，小陀螺时很容易把预测时间算到另一块板上，
-  // 结果就是切高低板时 pitch 偏高，或者逆时针慢转时整体打点偏一侧。
-  const auto fly_time_selection = preview_aim_selection(target);
-  if (!fly_time_selection.valid) return {false};
-
-  const double min_dist = fly_time_selection.xyza.head<2>().norm();
-  auto bullet_traj =
-    tools::Trajectory(bullet_speed, min_dist, fly_time_selection.xyza.z());
-  if (bullet_traj.unsolvable) return {false};
-  target.predict(bullet_traj.fly_time);
+  // 1. 对命中时刻做固定点迭代：
+  //    目标先按控制延迟预测到“当前决策时刻”，再在 planner 内部迭代
+  //    `选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板`。
+  //    这一步对 outpost 尤其关键，否则会出现 tracker 跟的是眼前板，
+  //    planner 却拿另一块板的粗略飞行时间去做整段 MPC 参考。
+  const double coming_angle =
+    (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
+  const double leaving_angle =
+    (target.name == ArmorName::outpost) ? 30.0 / 57.3 : leaving_angle_;
+  const auto hit_solution =
+    solve_hit_target(target, bullet_speed, coming_angle, leaving_angle, lock_id_);
+  if (!hit_solution.valid) return {false};
+  debug_hit_fly_time = hit_solution.fly_time;
+  debug_hit_iter_count = hit_solution.iter_count;
+  debug_hit_converged = hit_solution.converged;
+  target = hit_solution.target_at_hit;
 
   // 2. Get trajectory
   double yaw0;
   Trajectory traj;
   try {
-    yaw0 = aim(target, bullet_speed)(0);
-    traj = get_trajectory(target, yaw0, bullet_speed);
+    int planning_lock_id = lock_id_;
+    AimSelection selection;
+    const auto yaw_pitch =
+      solve_aim_command(target, bullet_speed, planning_lock_id, &selection);
+    update_debug_selection(target, selection);
+    lock_id_ = planning_lock_id;
+    yaw0 = yaw_pitch(0);
+    traj = get_trajectory(target, yaw0, bullet_speed, planning_lock_id);
   } catch (const std::exception & e) {
     tools::logger()->warn("Unsolvable target {:.2f}", bullet_speed);
     return {false};
@@ -234,7 +314,10 @@ Plan Planner::plan(std::optional<Target> target, double bullet_speed)
 {
   refresh_runtime_params_if_needed();
   debug_delay_time = 0.0;
-  if (!target.has_value()) return {false};
+  if (!target.has_value()) {
+    lock_id_ = -1;
+    return {false};
+  }
 
   double delay_time =
     std::abs(target->ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
@@ -249,7 +332,7 @@ Plan Planner::plan(std::optional<Target> target, double bullet_speed)
 
 AimSelection Planner::preview_aim_selection(const Target & target) const
 {
-  int lock_id = -1;
+  int lock_id = target.last_id;
   const double coming_angle =
     (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
   const double leaving_angle =
@@ -367,25 +450,19 @@ void Planner::setup_pitch_solver()
   pitch_solver_->settings->max_iter = 10;
 }
 
-Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_speed)
+Eigen::Matrix<double, 2, 1> Planner::solve_aim_command(
+  const Target & target, double bullet_speed, int & lock_id, AimSelection * selection) const
 {
   const double coming_angle =
     (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
   const double leaving_angle =
     (target.name == ArmorName::outpost) ? 30.0 / 57.3 : leaving_angle_;
-  const auto selection =
-    choose_aim_selection(target, coming_angle, leaving_angle, lock_id_);
-  if (!selection.valid) throw std::runtime_error("No valid armor selected!");
+  const auto resolved_selection =
+    choose_aim_selection(target, coming_angle, leaving_angle, lock_id);
+  if (!resolved_selection.valid) throw std::runtime_error("No valid armor selected!");
+  if (selection != nullptr) *selection = resolved_selection;
 
-  debug_xyza = selection.xyza;
-  debug_armor_id = selection.armor_id;
-  debug_used_spin_gate = selection.used_spin_gate;
-  debug_center_yaw = selection.center_yaw;
-  debug_selected_z_offset = target.armor_z_offset(selection.armor_id);
-  debug_fixed_center_rotation_model = target.fixed_center_rotation_model();
-  debug_delta_angle_list = selection.delta_angle_list;
-
-  const Eigen::Vector3d xyz = selection.xyza.head<3>();
+  const Eigen::Vector3d xyz = resolved_selection.xyza.head<3>();
   const double dist_xy = xyz.head<2>().norm();
   auto azim = std::atan2(xyz.y(), xyz.x());
   auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
@@ -394,15 +471,36 @@ Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_sp
   return {tools::limit_rad(azim + yaw_offset_), -bullet_traj.pitch - pitch_offset_};
 }
 
-Trajectory Planner::get_trajectory(Target & target, double yaw0, double bullet_speed)
+void Planner::update_debug_selection(const Target & target, const AimSelection & selection)
+{
+  debug_xyza = selection.xyza;
+  debug_armor_id = selection.armor_id;
+  debug_used_spin_gate = selection.used_spin_gate;
+  debug_center_yaw = selection.center_yaw;
+  debug_selected_z_offset = target.armor_z_offset(selection.armor_id);
+  debug_fixed_center_rotation_model = target.fixed_center_rotation_model();
+  debug_delta_angle_list = selection.delta_angle_list;
+}
+
+Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_speed)
+{
+  AimSelection selection;
+  const auto yaw_pitch = solve_aim_command(target, bullet_speed, lock_id_, &selection);
+  update_debug_selection(target, selection);
+  return yaw_pitch;
+}
+
+Trajectory Planner::get_trajectory(
+  Target & target, double yaw0, double bullet_speed, int initial_lock_id)
 {
   Trajectory traj;
+  int trajectory_lock_id = initial_lock_id;
 
   target.predict(-DT * (HALF_HORIZON + 1));
-  auto yaw_pitch_last = aim(target, bullet_speed);
+  auto yaw_pitch_last = solve_aim_command(target, bullet_speed, trajectory_lock_id);
 
   target.predict(DT);
-  auto yaw_pitch = aim(target, bullet_speed);
+  auto yaw_pitch = solve_aim_command(target, bullet_speed, trajectory_lock_id);
 
   // 这里不能用 static 保存上一帧的 yaw_vel。
   // 因为切板瞬间会把“上一帧目标的速度”带进“当前帧参考轨迹”，
@@ -412,7 +510,7 @@ Trajectory Planner::get_trajectory(Target & target, double yaw0, double bullet_s
 
   for (int i = 0; i < HORIZON; i++) {
     target.predict(DT);
-    auto yaw_pitch_next = aim(target, bullet_speed);
+    auto yaw_pitch_next = solve_aim_command(target, bullet_speed, trajectory_lock_id);
 
     auto yaw_vel = tools::limit_rad(yaw_pitch_next(0) - yaw_pitch_last(0)) / (2 * DT);
     const double yaw_acc = (yaw_vel - last_yaw_vel) / DT;

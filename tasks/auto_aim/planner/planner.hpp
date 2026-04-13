@@ -53,6 +53,9 @@ public:
   double debug_center_yaw = 0.0;
   double debug_selected_z_offset = 0.0;
   bool debug_fixed_center_rotation_model = false;
+  double debug_hit_fly_time = 0.0;
+  int debug_hit_iter_count = 0;
+  bool debug_hit_converged = false;
   std::vector<double> debug_delta_angle_list;
   Planner(const std::string & config_path);
 
@@ -77,8 +80,12 @@ private:
   void setup_yaw_solver();
   void setup_pitch_solver();
 
+  Eigen::Matrix<double, 2, 1> solve_aim_command(
+    const Target & target, double bullet_speed, int & lock_id,
+    AimSelection * selection = nullptr) const;
+  void update_debug_selection(const Target & target, const AimSelection & selection);
   Eigen::Matrix<double, 2, 1> aim(const Target & target, double bullet_speed);
-  Trajectory get_trajectory(Target & target, double yaw0, double bullet_speed);
+  Trajectory get_trajectory(Target & target, double yaw0, double bullet_speed, int initial_lock_id);
 };
 
 }  // namespace auto_aim
