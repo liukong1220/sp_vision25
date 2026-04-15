@@ -296,10 +296,13 @@ int main(int argc, char * argv[])
       data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
       data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
       data["planner_turn_sign"] = tools::debug::spin_direction_sign(target.has_value() ? target->ekf_x()[7] : 0.0);
+      data["planner_selected_physical_armor"] = planner.debug_physical_armor_id;
       data["planner_selected_z_offset"] = planner.debug_selected_z_offset;
+      data["planner_selected_aim_z_compensation"] = planner.debug_selected_aim_z_compensation;
       data["planner_fixed_model"] = planner.debug_fixed_center_rotation_model ? 1 : 0;
 
       snapshot["selected_armor"] = planner.debug_armor_id;
+      snapshot["selected_physical_armor"] = planner.debug_physical_armor_id;
       snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
       snapshot["hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
       snapshot["hit_iter_count"] = planner.debug_hit_iter_count;
@@ -313,6 +316,7 @@ int main(int argc, char * argv[])
         snapshot["delta_angle_deg_list"].push_back(rad2deg(delta_angle));
       }
       snapshot["selected_z_offset_m"] = planner.debug_selected_z_offset;
+      snapshot["selected_aim_z_compensation_m"] = planner.debug_selected_aim_z_compensation;
       snapshot["fixed_center_rotation_model"] = planner.debug_fixed_center_rotation_model;
 
       {
@@ -367,6 +371,8 @@ int main(int argc, char * argv[])
     const double current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
     const double current_selected_z_offset =
       current_target.has_value() ? debug_planner.debug_selected_z_offset : 0.0;
+    const double current_selected_aim_z_compensation =
+      current_target.has_value() ? debug_planner.debug_selected_aim_z_compensation : 0.0;
     const bool current_fixed_model =
       current_target.has_value() && debug_planner.debug_fixed_center_rotation_model;
 
@@ -436,6 +442,7 @@ int main(int argc, char * argv[])
         web_state["preview"]["target_z_m"] = nullptr;
       }
       web_state["planner"]["selected_armor"] = debug_planner.debug_armor_id;
+      web_state["planner"]["physical_armor"] = debug_planner.debug_physical_armor_id;
       web_state["planner"]["spin_gate"] = debug_planner.debug_used_spin_gate;
       web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
       web_state["planner"]["hit_fly_time_ms"] = debug_planner.debug_hit_fly_time * 1000.0;
@@ -453,6 +460,8 @@ int main(int argc, char * argv[])
       web_state["planner"]["w_rad_s"] = current_w;
       web_state["planner"]["h_m"] = current_h;
       web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
+      web_state["planner"]["selected_aim_z_compensation_m"] =
+        current_selected_aim_z_compensation;
       web_state["planner"]["fixed_center_rotation_model"] = current_fixed_model;
       if (current_target.has_value()) {
         web_state["tracker"]["candidate_count"] = current_target->tracker_debug_candidate_count;
@@ -497,6 +506,7 @@ int main(int argc, char * argv[])
       visual_options.armor_type =
         current_target.has_value() ? armor_type_to_string(current_target->armor_type) : "none";
       visual_options.planner_armor_id = debug_planner.debug_armor_id;
+      visual_options.planner_physical_armor_id = debug_planner.debug_physical_armor_id;
       visual_options.planner_spin_gate = debug_planner.debug_used_spin_gate;
       visual_options.planner_delay_ms = debug_planner.debug_delay_time * 1000.0;
       visual_options.planner_center_yaw_deg = rad2deg(debug_planner.debug_center_yaw);
@@ -528,6 +538,7 @@ int main(int argc, char * argv[])
       visual_options.current_w = current_w;
       visual_options.current_h = current_h;
       visual_options.current_selected_z_offset = current_selected_z_offset;
+      visual_options.current_selected_aim_z_compensation = current_selected_aim_z_compensation;
       visual_options.current_fixed_model = current_fixed_model;
       visual_options.target_jumped =
         current_target.has_value() && current_target->jumped;

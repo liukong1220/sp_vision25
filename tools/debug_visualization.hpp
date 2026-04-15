@@ -35,6 +35,7 @@ struct LiveOverlayOptions
   std::string target_name = "none";
   std::string armor_type = "none";
   int planner_armor_id = -1;
+  int planner_physical_armor_id = -1;
   bool planner_spin_gate = false;
   double planner_delay_ms = 0.0;
   double planner_center_yaw_deg = 0.0;
@@ -54,6 +55,7 @@ struct LiveOverlayOptions
   double current_w = 0.0;
   double current_h = 0.0;
   double current_selected_z_offset = 0.0;
+  double current_selected_aim_z_compensation = 0.0;
   bool current_fixed_model = false;
   bool target_jumped = false;
   bool is_outpost = false;

@@ -866,6 +866,7 @@
     renderRows("planner-card", [
       { label: "转向判断", value: getByPath(planner, "turn_direction", "STEADY") },
       { label: "选中装甲板", value: formatArmorId(selectedArmor) },
+      { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
       { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
       { label: "Spin Gate", value: formatBool(getByPath(planner, "spin_gate", false), "ON", "OFF") },
       { label: "规划延迟", value: formatNumber(getByPath(planner, "delay_ms"), 1, " ms") },
@@ -877,6 +878,10 @@
       {
         label: "高度/偏置",
         value: `${formatNumber(getByPath(planner, "h_m"), 3, " m")} / ${formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m")}`,
+      },
+      {
+        label: "击打补偿",
+        value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
       },
     ]);
 
@@ -989,12 +994,17 @@
 
     renderRows("inspector-planner-card", [
       { label: "选中装甲板", value: formatArmorId(selectedArmor) },
+      { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
       { label: "转向符号", value: getByPath(planner, "turn_sign", "--") },
       { label: "转向角速度", value: formatSigned(getByPath(planner, "w_rad_s"), 3, " rad/s") },
       { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
       { label: "切板角列表", value: formatDeltaList(getByPath(planner, "delta_angle_deg_list", [])) },
       { label: "装甲高度", value: formatNumber(getByPath(planner, "h_m"), 3, " m") },
       { label: "选中 Z 偏置", value: formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m") },
+      {
+        label: "击打 Z 补偿",
+        value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
+      },
       {
         label: "中心模型",
         value: formatBool(getByPath(planner, "fixed_center_rotation_model", false), "FIXED", "FOLLOW"),

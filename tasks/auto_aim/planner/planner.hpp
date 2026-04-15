@@ -6,6 +6,7 @@
 #include <list>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tasks/auto_aim/target.hpp"
@@ -48,10 +49,12 @@ class Planner
 public:
   Eigen::Vector4d debug_xyza;
   int debug_armor_id = -1;
+  int debug_physical_armor_id = -1;
   bool debug_used_spin_gate = false;
   double debug_delay_time = 0.0;
   double debug_center_yaw = 0.0;
   double debug_selected_z_offset = 0.0;
+  double debug_selected_aim_z_compensation = 0.0;
   bool debug_fixed_center_rotation_model = false;
   double debug_hit_fly_time = 0.0;
   int debug_hit_iter_count = 0;
@@ -71,6 +74,9 @@ private:
   double fire_thresh_;
   double low_speed_delay_time_, high_speed_delay_time_, decision_speed_;
   double coming_angle_, leaving_angle_;
+  double outpost_coming_angle_, outpost_leaving_angle_;
+  double outpost_delay_time_;
+  std::vector<double> outpost_fire_z_compensation_;
   int lock_id_ = -1;
 
   TinySolver * yaw_solver_;
@@ -82,8 +88,12 @@ private:
 
   Eigen::Matrix<double, 2, 1> solve_aim_command(
     const Target & target, double bullet_speed, int & lock_id,
-    AimSelection * selection = nullptr) const;
+    AimSelection * selection = nullptr, Eigen::Vector3d * aim_xyz = nullptr) const;
   void update_debug_selection(const Target & target, const AimSelection & selection);
+  std::pair<double, double> resolve_angle_window(const Target & target) const;
+  double resolve_delay_time(const Target & target) const;
+  double resolve_aim_z_compensation(const Target & target, int armor_id) const;
+  Eigen::Vector3d resolve_aim_xyz(const Target & target, const AimSelection & selection) const;
   Eigen::Matrix<double, 2, 1> aim(const Target & target, double bullet_speed);
   Trajectory get_trajectory(Target & target, double yaw0, double bullet_speed, int initial_lock_id);
 };

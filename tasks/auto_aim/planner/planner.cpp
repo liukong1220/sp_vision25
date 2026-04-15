@@ -1,9 +1,11 @@
 #include "planner.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <vector>
 
+#include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/path.hpp"
 #include "tools/runtime_params.hpp"
@@ -153,7 +155,8 @@ struct HitTargetSolution
 
 HitTargetSolution solve_hit_target(
   const Target & base_target, double bullet_speed, double coming_angle, double leaving_angle,
-  int initial_lock_id)
+  int initial_lock_id,
+  const std::function<Eigen::Vector3d(const Target &, const AimSelection &)> & resolve_aim_xyz)
 {
   HitTargetSolution solution;
   int working_lock_id = initial_lock_id;
@@ -170,7 +173,7 @@ HitTargetSolution solve_hit_target(
       choose_aim_selection(iter_target, coming_angle, leaving_angle, working_lock_id);
     if (!selection.valid) return solution;
 
-    const Eigen::Vector3d xyz = selection.xyza.head<3>();
+    const Eigen::Vector3d xyz = resolve_aim_xyz(iter_target, selection);
     const double dist_xy = xyz.head<2>().norm();
     auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
     if (bullet_traj.unsolvable) return solution;
@@ -212,6 +215,17 @@ Planner::Planner(const std::string & config_path)
   pitch_offset_ = tools::read<double>(yaml, "pitch_offset") / 57.3;
   coming_angle_ = tools::read<double>(yaml, "comming_angle") / 57.3;
   leaving_angle_ = tools::read<double>(yaml, "leaving_angle") / 57.3;
+  outpost_coming_angle_ = tools::read_or<double>(yaml, "outpost_comming_angle", 70.0) / 57.3;
+  outpost_leaving_angle_ = tools::read_or<double>(yaml, "outpost_leaving_angle", 30.0) / 57.3;
+  outpost_delay_time_ = tools::read_or<double>(yaml, "outpost_delay_time", 0.0);
+  outpost_fire_z_compensation_ =
+    tools::read_or<std::vector<double>>(yaml, "outpost_fire_z_compensation", {0.0, 0.0, 0.0});
+  if (outpost_fire_z_compensation_.size() != 3) {
+    tools::logger()->warn(
+      "[Planner] outpost_fire_z_compensation size {} invalid, fallback to zeros",
+      outpost_fire_z_compensation_.size());
+    outpost_fire_z_compensation_ = {0.0, 0.0, 0.0};
+  }
   fire_thresh_ = tools::read<double>(yaml, "fire_thresh");
   decision_speed_ = tools::read<double>(yaml, "decision_speed");
   high_speed_delay_time_ = tools::read<double>(yaml, "high_speed_delay_time");
@@ -239,12 +253,13 @@ Plan Planner::plan(Target target, double bullet_speed)
   //    `选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板`。
   //    这一步对 outpost 尤其关键，否则会出现 tracker 跟的是眼前板，
   //    planner 却拿另一块板的粗略飞行时间去做整段 MPC 参考。
-  const double coming_angle =
-    (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
-  const double leaving_angle =
-    (target.name == ArmorName::outpost) ? 30.0 / 57.3 : leaving_angle_;
+  const auto [coming_angle, leaving_angle] = resolve_angle_window(target);
   const auto hit_solution =
-    solve_hit_target(target, bullet_speed, coming_angle, leaving_angle, lock_id_);
+    solve_hit_target(
+      target, bullet_speed, coming_angle, leaving_angle, lock_id_,
+      [&](const Target & iter_target, const AimSelection & selection) {
+        return resolve_aim_xyz(iter_target, selection);
+      });
   if (!hit_solution.valid) return {false};
   debug_hit_fly_time = hit_solution.fly_time;
   debug_hit_iter_count = hit_solution.iter_count;
@@ -319,8 +334,7 @@ Plan Planner::plan(std::optional<Target> target, double bullet_speed)
     return {false};
   }
 
-  double delay_time =
-    std::abs(target->ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
+  const double delay_time = resolve_delay_time(*target);
   debug_delay_time = delay_time;
 
   auto future = std::chrono::steady_clock::now() + std::chrono::microseconds(int(delay_time * 1e6));
@@ -333,10 +347,7 @@ Plan Planner::plan(std::optional<Target> target, double bullet_speed)
 AimSelection Planner::preview_aim_selection(const Target & target) const
 {
   int lock_id = target.last_id;
-  const double coming_angle =
-    (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
-  const double leaving_angle =
-    (target.name == ArmorName::outpost) ? 30.0 / 57.3 : leaving_angle_;
+  const auto [coming_angle, leaving_angle] = resolve_angle_window(target);
   return choose_aim_selection(target, coming_angle, leaving_angle, lock_id);
 }
 
@@ -349,6 +360,19 @@ void Planner::refresh_runtime_params_if_needed()
   pitch_offset_ = tools::runtime_params::get_double(config_path_, "pitch_offset") / 57.3;
   coming_angle_ = tools::runtime_params::get_double(config_path_, "comming_angle") / 57.3;
   leaving_angle_ = tools::runtime_params::get_double(config_path_, "leaving_angle") / 57.3;
+  outpost_coming_angle_ =
+    tools::runtime_params::get_double(config_path_, "outpost_comming_angle") / 57.3;
+  outpost_leaving_angle_ =
+    tools::runtime_params::get_double(config_path_, "outpost_leaving_angle") / 57.3;
+  outpost_delay_time_ = tools::runtime_params::get_double(config_path_, "outpost_delay_time");
+  outpost_fire_z_compensation_ =
+    tools::runtime_params::get_number_array(config_path_, "outpost_fire_z_compensation");
+  if (outpost_fire_z_compensation_.size() != 3) {
+    tools::logger()->warn(
+      "[Planner] outpost_fire_z_compensation size {} invalid, fallback to zeros",
+      outpost_fire_z_compensation_.size());
+    outpost_fire_z_compensation_ = {0.0, 0.0, 0.0};
+  }
   fire_thresh_ = tools::runtime_params::get_double(config_path_, "fire_thresh");
   decision_speed_ = tools::runtime_params::get_double(config_path_, "decision_speed");
   high_speed_delay_time_ = tools::runtime_params::get_double(config_path_, "high_speed_delay_time");
@@ -451,18 +475,17 @@ void Planner::setup_pitch_solver()
 }
 
 Eigen::Matrix<double, 2, 1> Planner::solve_aim_command(
-  const Target & target, double bullet_speed, int & lock_id, AimSelection * selection) const
+  const Target & target, double bullet_speed, int & lock_id, AimSelection * selection,
+  Eigen::Vector3d * aim_xyz) const
 {
-  const double coming_angle =
-    (target.name == ArmorName::outpost) ? 70.0 / 57.3 : coming_angle_;
-  const double leaving_angle =
-    (target.name == ArmorName::outpost) ? 30.0 / 57.3 : leaving_angle_;
+  const auto [coming_angle, leaving_angle] = resolve_angle_window(target);
   const auto resolved_selection =
     choose_aim_selection(target, coming_angle, leaving_angle, lock_id);
   if (!resolved_selection.valid) throw std::runtime_error("No valid armor selected!");
   if (selection != nullptr) *selection = resolved_selection;
 
-  const Eigen::Vector3d xyz = resolved_selection.xyza.head<3>();
+  const Eigen::Vector3d xyz = resolve_aim_xyz(target, resolved_selection);
+  if (aim_xyz != nullptr) *aim_xyz = xyz;
   const double dist_xy = xyz.head<2>().norm();
   auto azim = std::atan2(xyz.y(), xyz.x());
   auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
@@ -475,11 +498,55 @@ void Planner::update_debug_selection(const Target & target, const AimSelection &
 {
   debug_xyza = selection.xyza;
   debug_armor_id = selection.armor_id;
+  debug_physical_armor_id = target.physical_armor_id(selection.armor_id);
   debug_used_spin_gate = selection.used_spin_gate;
   debug_center_yaw = selection.center_yaw;
   debug_selected_z_offset = target.armor_z_offset(selection.armor_id);
+  debug_selected_aim_z_compensation = resolve_aim_z_compensation(target, selection.armor_id);
+  debug_xyza[2] += debug_selected_aim_z_compensation;
   debug_fixed_center_rotation_model = target.fixed_center_rotation_model();
   debug_delta_angle_list = selection.delta_angle_list;
+}
+
+std::pair<double, double> Planner::resolve_angle_window(const Target & target) const
+{
+  if (target.name == ArmorName::outpost) {
+    const double coming_angle = outpost_coming_angle_ > 0.0 ? outpost_coming_angle_ : coming_angle_;
+    const double leaving_angle =
+      outpost_leaving_angle_ > 0.0 ? outpost_leaving_angle_ : leaving_angle_;
+    return {coming_angle, leaving_angle};
+  }
+  return {coming_angle_, leaving_angle_};
+}
+
+double Planner::resolve_delay_time(const Target & target) const
+{
+  if (target.name == ArmorName::outpost && outpost_delay_time_ > 0.0) {
+    return outpost_delay_time_;
+  }
+
+  return
+    std::abs(target.ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_ : low_speed_delay_time_;
+}
+
+double Planner::resolve_aim_z_compensation(const Target & target, int armor_id) const
+{
+  if (target.name != ArmorName::outpost || armor_id < 0) return 0.0;
+  if (outpost_fire_z_compensation_.size() != 3) return 0.0;
+
+  const int physical_id = target.physical_armor_id(armor_id);
+  if (physical_id < 0 || physical_id >= static_cast<int>(outpost_fire_z_compensation_.size())) {
+    return 0.0;
+  }
+  return outpost_fire_z_compensation_[physical_id];
+}
+
+Eigen::Vector3d Planner::resolve_aim_xyz(
+  const Target & target, const AimSelection & selection) const
+{
+  Eigen::Vector3d xyz = selection.xyza.head<3>();
+  xyz.z() += resolve_aim_z_compensation(target, selection.armor_id);
+  return xyz;
 }
 
 Eigen::Matrix<double, 2, 1> Planner::aim(const Target & target, double bullet_speed)

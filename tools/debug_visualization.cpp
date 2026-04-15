@@ -570,7 +570,9 @@ std::string fire_reason(const auto_aim::Plan & current_plan)
 std::string model_reason(const LiveOverlayOptions & options)
 {
   if (options.is_outpost) {
-    return fmt::format("outpost z {:+.3f} m", options.current_selected_z_offset);
+    return fmt::format(
+      "outpost z {:+.3f} aim {:+.3f} m", options.current_selected_z_offset,
+      options.current_selected_aim_z_compensation);
   }
   if (options.current_fixed_model) return "fixed center model";
   return fmt::format("follow center h {:.3f} m", options.current_h);
@@ -595,8 +597,10 @@ void draw_decision_panel(
     {
       "select",
       fmt::format(
-        "{} | {}",
+        "{}{} | {}",
         options.planner_armor_id >= 0 ? fmt::format("A{}", options.planner_armor_id) : "A-",
+        options.planner_physical_armor_id >= 0 ?
+        fmt::format("/P{}", options.planner_physical_armor_id) : "",
         selection_reason(options)),
     },
     {"fire", fire_reason(current_plan)},

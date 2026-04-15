@@ -148,6 +148,10 @@ outpost_radius: 0.2765
 outpost_armor_z_offsets: [0.0, -0.102, 0.102]
 outpost_fixed_center_rotation_model: true
 outpost_spin_speed_lock: 2.51
+outpost_comming_angle: 60
+outpost_leaving_angle: 18
+outpost_delay_time: 0.078
+outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 
 #####-----aimer参数----
 yaw_offset: -2.59

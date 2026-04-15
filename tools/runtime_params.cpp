@@ -188,6 +188,26 @@ std::vector<ParamSpec> build_specs()
       3, json::array({0.0, -0.102, 0.102}),
     },
     {
+      "outpost_comming_angle", "planner", "规划/MPC", "前哨站进入窗口角",
+      "前哨站选板进入击打窗口角度，0 表示沿用通用窗口。", "deg", ParamType::kDouble,
+      0, 70.0,
+    },
+    {
+      "outpost_leaving_angle", "planner", "规划/MPC", "前哨站离开窗口角",
+      "前哨站选板离开击打窗口角度，0 表示沿用通用窗口。", "deg", ParamType::kDouble,
+      0, 30.0,
+    },
+    {
+      "outpost_delay_time", "planner", "规划/MPC", "前哨站固定延迟",
+      "前哨站专用预测延迟，0 表示沿用通用高低速延迟。", "s", ParamType::kDouble,
+      0, 0.0,
+    },
+    {
+      "outpost_fire_z_compensation", "planner", "规划/MPC", "前哨站击打高度补偿",
+      "前哨站三块装甲板的额外火控高度补偿。", "m", ParamType::kDoubleArray,
+      3, json::array({0.0, 0.0, 0.0}),
+    },
+    {
       "yaw_offset", "planner", "规划/MPC", "Yaw 零偏",
       "枪口/相机在 yaw 方向的补偿偏置。", "deg", ParamType::kDouble,
     },
@@ -277,14 +297,19 @@ double ui_step_for(const ParamSpec & spec)
   if (spec.key == "fire_thresh") return 0.0001;
   if (
     spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
-    spec.key == "outpost_radius")
+    spec.key == "outpost_delay_time" || spec.key == "outpost_radius")
   {
     return 0.001;
   }
   if (spec.key == "outpost_spin_speed_lock") return 0.01;
   if (spec.key == "decision_speed") return 0.05;
   if (spec.key == "yaw_offset" || spec.key == "pitch_offset") return 0.05;
-  if (spec.key == "comming_angle" || spec.key == "leaving_angle") return 0.1;
+  if (
+    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
+  {
+    return 0.1;
+  }
   if (spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc") return 1.0;
   if (spec.unit == "deg") return 0.1;
   if (spec.unit == "rad") return 0.0001;
@@ -318,9 +343,11 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
     spec.key == "max_angle_error" || spec.key == "max_rectangular_error" ||
     spec.key == "outpost_radius" || spec.key == "outpost_spin_speed_lock" ||
     spec.key == "decision_speed" || spec.key == "high_speed_delay_time" ||
+    spec.key == "outpost_delay_time" ||
     spec.key == "low_speed_delay_time" || spec.key == "fire_thresh" ||
     spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc" ||
-    spec.key == "comming_angle" || spec.key == "leaving_angle")
+    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
   {
     return 0.0;
   }
@@ -332,7 +359,12 @@ std::optional<double> ui_max_for(const ParamSpec & spec)
   if (spec.key == "min_confidence") return 1.0;
   if (spec.key == "threshold") return 255.0;
   if (spec.key == "max_angle_error" || spec.key == "max_rectangular_error") return 90.0;
-  if (spec.key == "comming_angle" || spec.key == "leaving_angle") return 180.0;
+  if (
+    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
+  {
+    return 180.0;
+  }
   return std::nullopt;
 }
 
@@ -345,7 +377,7 @@ int ui_precision_for(const ParamSpec & spec)
   if (spec.key == "fire_thresh") return 4;
   if (
     spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
-    spec.key == "outpost_radius")
+    spec.key == "outpost_delay_time" || spec.key == "outpost_radius")
   {
     return 3;
   }
