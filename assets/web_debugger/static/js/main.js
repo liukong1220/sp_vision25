@@ -1,5 +1,10 @@
 (() => {
   const VIEW_IDS = ["overview", "analysis", "inspector"];
+  const MODE_OPTIONS = [
+    { mode: 1, key: "auto_aim", label: "自瞄" },
+    { mode: 2, key: "small_buff", label: "小符" },
+    { mode: 3, key: "big_buff", label: "大符" },
+  ];
   const POLL_STATE_MS = 250;
   const POLL_LOG_MS = 400;
 
@@ -77,7 +82,9 @@
   let currentView = "overview";
   let lastStateUpdatedAt = 0;
   let overlaySyncPending = false;
+  let modeSyncPending = false;
   let runtimeParamSnapshot = null;
+  let currentModeState = MODE_OPTIONS[0];
 
   const streamControllers = new Map();
   const viewScrollPositions = new Map();
@@ -159,9 +166,42 @@
     return tail || normalized;
   };
 
+  const isBuffModeKey = (modeKey) => modeKey === "small_buff" || modeKey === "big_buff";
+
+  const normalizeModePayload = (payload = {}) => {
+    const requestedMode = Number(
+      getByPath(payload, "mode", getByPath(payload, "current", currentModeState?.mode || 1)),
+    );
+    const fallback = MODE_OPTIONS.find((item) => item.mode === requestedMode) || MODE_OPTIONS[0];
+    return {
+      mode: fallback.mode,
+      mode_key: getByPath(
+        payload,
+        "mode_key",
+        getByPath(payload, "current_key", fallback.key),
+      ),
+      mode_label: getByPath(
+        payload,
+        "mode_label",
+        getByPath(payload, "current_label", fallback.label),
+      ),
+      source: getByPath(payload, "source", "web"),
+      serial_mode_key: getByPath(payload, "serial_mode_key", "idle"),
+      serial_mode_label: getByPath(payload, "serial_mode_label", "--"),
+    };
+  };
+
   const setText = (id, value) => {
     const node = document.getElementById(id);
     if (node) node.textContent = value;
+  };
+
+  const applyModeState = (payload) => {
+    currentModeState = normalizeModePayload(payload);
+    document.querySelectorAll(".mode-btn").forEach((button) => {
+      button.classList.toggle("active", Number(button.dataset.mode) === currentModeState.mode);
+    });
+    setText("status-mode", currentModeState.mode_label);
   };
 
   const setFireBadge = (active) => {
@@ -583,6 +623,47 @@
     });
   };
 
+  const fetchMode = async (quiet = false) => {
+    try {
+      const response = await fetch(`/api/mode?ts=${Date.now()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || response.statusText);
+      applyModeState(payload);
+      return payload;
+    } catch (error) {
+      if (!quiet) console.warn("fetch /api/mode failed", error);
+      throw error;
+    }
+  };
+
+  const pushMode = async (mode) => {
+    modeSyncPending = true;
+    try {
+      const response = await fetch("/api/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || response.statusText);
+      applyModeState(payload);
+    } catch (error) {
+      console.warn("post /api/mode failed", error);
+    } finally {
+      modeSyncPending = false;
+    }
+  };
+
+  const bindModeSwitch = () => {
+    document.querySelectorAll(".mode-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nextMode = Number(button.dataset.mode);
+        if (!Number.isFinite(nextMode) || nextMode === currentModeState.mode) return;
+        pushMode(nextMode).catch((error) => console.warn(error));
+      });
+    });
+  };
+
   const initOverlayControls = () => {
     const container = document.getElementById("overlay-control-grid");
     if (!container) return;
@@ -791,6 +872,13 @@
     const command = state.command || {};
     const ballistic = state.ballistic || {};
     const overlay = state.overlay || {};
+    const buff = state.buff || {};
+    const modeFromState = normalizeModePayload(getByPath(state, "mode", currentModeState));
+    if (!modeSyncPending) {
+      applyModeState(modeFromState);
+    }
+    const mode = modeSyncPending ? currentModeState : modeFromState;
+    const buffMode = isBuffModeKey(mode.mode_key);
     const serialBulletSpeed = getByPath(
       frame,
       "bullet_speed_mps",
@@ -816,129 +904,249 @@
     const fire = !!getByPath(preview, "fire", false);
     const latencyMs = getByPath(frame, "latency_ms");
     const selectedArmor = getByPath(planner, "selected_armor");
+    const buffDetected = !!getByPath(buff, "has_detection", false);
+    const buffSolved = !!getByPath(buff, "target_solved", false);
 
     const linkState =
       lastStateUpdatedAt && Date.now() - lastStateUpdatedAt < POLL_STATE_MS * 3 ? "ONLINE" : "STALE";
 
     setText("status-link", linkState);
     setFireBadge(fire);
-    setText("status-target", hasTarget ? getByPath(preview, "target_name", "target") : "none");
+    setText(
+      "status-target",
+      buffMode
+        ? hasTarget
+          ? `${mode.mode_label} hit`
+          : buffDetected
+            ? `${mode.mode_label} detect`
+            : "none"
+        : hasTarget
+          ? getByPath(preview, "target_name", "target")
+          : "none",
+    );
     setText("status-latency", formatNumber(latencyMs, 1, " ms"));
     setText("status-turn", getByPath(planner, "turn_direction", "STEADY"));
-    setText("status-armor", formatArmorId(selectedArmor));
+    setText(
+      "status-armor",
+      buffMode ? (buffSolved ? "SOLVED" : buffDetected ? "DETECT" : "WAIT") : formatArmorId(selectedArmor),
+    );
     setText("overlay-stage", getByPath(overlay, "stage", "--"));
     if (!overlaySyncPending) {
       syncOverlayControls(getByPath(overlay, "controls", {}));
     }
     setOverlayMeta(`图层同步: ${getByPath(overlay, "stage", "--")} · 实时生效`);
 
-    renderRows("overview-summary", [
-      { label: "帧号", value: getByPath(frame, "frame_index", "--") },
-      {
-        label: "图像尺寸",
-        value:
-          isFiniteNumber(getByPath(frame, "image_width")) && isFiniteNumber(getByPath(frame, "image_height"))
-            ? `${frame.image_width} x ${frame.image_height}`
-            : "--",
-      },
-      {
-        label: "回放时间",
-        value: getByPath(frame, "playback_t_s") !== undefined ? formatNumber(frame.playback_t_s, 3, " s") : "--",
-      },
-      {
-        label: "目标姿态",
-        value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
-      },
-      {
-        label: "规划输出",
-        value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
-      },
-      {
-        label: "串口弹速",
-        value: formatNumber(serialBulletSpeed, 2, " m/s"),
-      },
-      {
-        label: "图层阶段",
-        value: getByPath(overlay, "stage", "--"),
-      },
-    ]);
-
-    renderRows("planner-card", [
-      { label: "转向判断", value: getByPath(planner, "turn_direction", "STEADY") },
-      { label: "选中装甲板", value: formatArmorId(selectedArmor) },
-      { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
-      { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
-      { label: "Spin Gate", value: formatBool(getByPath(planner, "spin_gate", false), "ON", "OFF") },
-      { label: "规划延迟", value: formatNumber(getByPath(planner, "delay_ms"), 1, " ms") },
-      { label: "Delta 列表", value: formatDeltaList(getByPath(planner, "delta_angle_deg_list", [])) },
-      {
-        label: "模型模式",
-        value: formatBool(getByPath(planner, "fixed_center_rotation_model", false), "FIXED", "FOLLOW"),
-      },
-      {
-        label: "高度/偏置",
-        value: `${formatNumber(getByPath(planner, "h_m"), 3, " m")} / ${formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m")}`,
-      },
-      {
-        label: "击打补偿",
-        value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
-      },
-    ]);
-
-    renderRows("ballistic-card", [
-      { label: "弹道有效", value: formatBool(getByPath(ballistic, "valid", false), "YES", "NO") },
-      { label: "轨迹可解", value: formatBool(!getByPath(ballistic, "unsolvable", false), "YES", "NO") },
-      { label: "命中判定", value: formatBool(getByPath(ballistic, "hit", false), "HIT", "MISS") },
-      {
-        label: "串口 / 算法弹速",
-        value:
-          `${formatNumber(getByPath(ballistic, "bullet_speed_raw_mps", serialBulletSpeed), 2, " m/s")} / ` +
-          `${formatNumber(getByPath(ballistic, "bullet_speed_effective_mps", effectiveBulletSpeed), 2, " m/s")}` +
-          (bulletSpeedFallback ? " · FALLBACK" : ""),
-      },
-      { label: "总误差", value: formatNumber(getByPath(ballistic, "total_error_mm"), 1, " mm") },
-      {
-        label: "Yaw / Pitch 残差",
-        value: `${formatSigned(getByPath(ballistic, "yaw_residual_deg"), 2, " deg")} / ${formatSigned(getByPath(ballistic, "pitch_residual_deg"), 2, " deg")}`,
-      },
-      {
-        label: "目标距离",
-        value: `${formatNumber(getByPath(ballistic, "target_dist_xy_m"), 2, " m")} / ${formatNumber(getByPath(ballistic, "target_dist_3d_m"), 2, " m")}`,
-      },
-    ]);
-
-    renderRows("analysis-command-card", [
-      { label: "控制状态", value: fire ? "ARMED" : "SAFE" },
-      {
-        label: "云台角度",
-        value: `${formatSigned(getByPath(command, "gimbal_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "gimbal_pitch_deg"), 2, " deg")}`,
-      },
-      {
-        label: "规划角度",
-        value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
-      },
-      {
-        label: "规划速度",
-        value: `${formatSigned(getByPath(command, "plan_yaw_vel_deg"), 2, " deg/s")} / ${formatSigned(getByPath(command, "plan_pitch_vel_deg"), 2, " deg/s")}`,
-      },
-      {
-        label: "规划加速度",
-        value: `${formatSigned(getByPath(command, "plan_yaw_acc_deg"), 2, " deg/s2")} / ${formatSigned(getByPath(command, "plan_pitch_acc_deg"), 2, " deg/s2")}`,
-      },
-      {
-        label: "串口弹速",
-        value: `${formatNumber(serialBulletSpeed, 2, " m/s")} · ${bulletSpeedSource}`,
-      },
-      bulletSpeedFallback ?
+    if (buffMode) {
+      renderRows("overview-summary", [
+        { label: "网页模式", value: `${mode.mode_label} · ${mode.source}` },
+        { label: "串口模式", value: mode.serial_mode_label || "--" },
+        { label: "图像尺寸", value: isFiniteNumber(getByPath(frame, "image_width")) && isFiniteNumber(getByPath(frame, "image_height")) ? `${frame.image_width} x ${frame.image_height}` : "--" },
+        { label: "识别链路", value: buffSolved ? "DETECT + SOLVE" : buffDetected ? "DETECT ONLY" : "WAITING" },
         {
-          label: "算法弹速",
-          value: `${formatNumber(effectiveBulletSpeed, 2, " m/s")} · safety fallback`,
-        } :
-        null,
-    ]);
+          label: "击打点角度",
+          value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划输出",
+          value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "串口弹速",
+          value: formatNumber(serialBulletSpeed, 2, " m/s"),
+        },
+        { label: "图层阶段", value: getByPath(overlay, "stage", "--") },
+      ]);
+
+      renderRows("planner-card", [
+        { label: "机关方向", value: getByPath(planner, "turn_direction", "STEADY") },
+        {
+          label: "中心 yaw / pitch",
+          value: `${formatSigned(getByPath(buff, "rune_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "rune_pitch_deg"), 2, " deg")}`,
+        },
+        { label: "中心距离", value: formatNumber(getByPath(buff, "rune_dist_m"), 3, " m") },
+        {
+          label: "击打点 yaw / pitch",
+          value: `${formatSigned(getByPath(buff, "blade_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "blade_pitch_deg"), 2, " deg")}`,
+        },
+        { label: "击打点距离", value: formatNumber(getByPath(buff, "blade_dist_m"), 3, " m") },
+        {
+          label: "世界姿态",
+          value: `${formatSigned(getByPath(buff, "buff_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "buff_pitch_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "buff_roll_deg"), 2, " deg")}`,
+        },
+        {
+          label: "EKF angle / spd",
+          value: `${formatSigned(getByPath(buff, "angle_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "spd_deg_s"), 2, " deg/s")}`,
+        },
+        {
+          label: "大符参数",
+          value: mode.mode_key === "big_buff"
+            ? `${formatSigned(getByPath(buff, "fit_a_deg_s"), 2, " deg/s")} / ${formatNumber(getByPath(buff, "fit_w_rad_s"), 3, " rad/s")} / ${formatSigned(getByPath(buff, "fit_fi_deg"), 2, " deg")}`
+            : "small buff",
+        },
+      ]);
+
+      renderRows("ballistic-card", [
+        { label: "控制有效", value: formatBool(getByPath(ballistic, "valid", false), "YES", "NO") },
+        { label: "命中判定", value: formatBool(getByPath(ballistic, "hit", false), "FIRE", "SAFE") },
+        {
+          label: "串口 / 算法弹速",
+          value:
+            `${formatNumber(getByPath(ballistic, "bullet_speed_raw_mps", serialBulletSpeed), 2, " m/s")} / ` +
+            `${formatNumber(getByPath(ballistic, "bullet_speed_effective_mps", effectiveBulletSpeed), 2, " m/s")}` +
+            (bulletSpeedFallback ? " · FALLBACK" : ""),
+        },
+        {
+          label: "击打距离 XY / 3D",
+          value: `${formatNumber(getByPath(ballistic, "target_dist_xy_m"), 2, " m")} / ${formatNumber(getByPath(ballistic, "target_dist_3d_m"), 2, " m")}`,
+        },
+        {
+          label: "规划角度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划速度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_vel_deg"), 2, " deg/s")} / ${formatSigned(getByPath(command, "plan_pitch_vel_deg"), 2, " deg/s")}`,
+        },
+        {
+          label: "规划加速度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_acc_deg"), 2, " deg/s2")} / ${formatSigned(getByPath(command, "plan_pitch_acc_deg"), 2, " deg/s2")}`,
+        },
+      ]);
+
+      renderRows("analysis-command-card", [
+        { label: "当前模式", value: `${mode.mode_label} · web` },
+        { label: "控制状态", value: fire ? "ARMED" : "SAFE" },
+        {
+          label: "云台角度",
+          value: `${formatSigned(getByPath(command, "gimbal_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "gimbal_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划角度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划速度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_vel_deg"), 2, " deg/s")} / ${formatSigned(getByPath(command, "plan_pitch_vel_deg"), 2, " deg/s")}`,
+        },
+        {
+          label: "串口弹速",
+          value: `${formatNumber(serialBulletSpeed, 2, " m/s")} · ${bulletSpeedSource}`,
+        },
+        bulletSpeedFallback
+          ? { label: "算法弹速", value: `${formatNumber(effectiveBulletSpeed, 2, " m/s")} · fallback` }
+          : null,
+      ]);
+    } else {
+      renderRows("overview-summary", [
+        { label: "帧号", value: getByPath(frame, "frame_index", "--") },
+        {
+          label: "图像尺寸",
+          value:
+            isFiniteNumber(getByPath(frame, "image_width")) && isFiniteNumber(getByPath(frame, "image_height"))
+              ? `${frame.image_width} x ${frame.image_height}`
+              : "--",
+        },
+        {
+          label: "回放时间",
+          value: getByPath(frame, "playback_t_s") !== undefined ? formatNumber(frame.playback_t_s, 3, " s") : "--",
+        },
+        {
+          label: "目标姿态",
+          value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划输出",
+          value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "串口弹速",
+          value: formatNumber(serialBulletSpeed, 2, " m/s"),
+        },
+        {
+          label: "图层阶段",
+          value: getByPath(overlay, "stage", "--"),
+        },
+      ]);
+
+      renderRows("planner-card", [
+        { label: "转向判断", value: getByPath(planner, "turn_direction", "STEADY") },
+        { label: "选中装甲板", value: formatArmorId(selectedArmor) },
+        { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
+        { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
+        { label: "Spin Gate", value: formatBool(getByPath(planner, "spin_gate", false), "ON", "OFF") },
+        { label: "规划延迟", value: formatNumber(getByPath(planner, "delay_ms"), 1, " ms") },
+        { label: "Delta 列表", value: formatDeltaList(getByPath(planner, "delta_angle_deg_list", [])) },
+        {
+          label: "模型模式",
+          value: formatBool(getByPath(planner, "fixed_center_rotation_model", false), "FIXED", "FOLLOW"),
+        },
+        {
+          label: "高度/偏置",
+          value: `${formatNumber(getByPath(planner, "h_m"), 3, " m")} / ${formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m")}`,
+        },
+        {
+          label: "击打补偿",
+          value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
+        },
+      ]);
+
+      renderRows("ballistic-card", [
+        { label: "弹道有效", value: formatBool(getByPath(ballistic, "valid", false), "YES", "NO") },
+        { label: "轨迹可解", value: formatBool(!getByPath(ballistic, "unsolvable", false), "YES", "NO") },
+        { label: "命中判定", value: formatBool(getByPath(ballistic, "hit", false), "HIT", "MISS") },
+        {
+          label: "串口 / 算法弹速",
+          value:
+            `${formatNumber(getByPath(ballistic, "bullet_speed_raw_mps", serialBulletSpeed), 2, " m/s")} / ` +
+            `${formatNumber(getByPath(ballistic, "bullet_speed_effective_mps", effectiveBulletSpeed), 2, " m/s")}` +
+            (bulletSpeedFallback ? " · FALLBACK" : ""),
+        },
+        { label: "总误差", value: formatNumber(getByPath(ballistic, "total_error_mm"), 1, " mm") },
+        {
+          label: "Yaw / Pitch 残差",
+          value: `${formatSigned(getByPath(ballistic, "yaw_residual_deg"), 2, " deg")} / ${formatSigned(getByPath(ballistic, "pitch_residual_deg"), 2, " deg")}`,
+        },
+        {
+          label: "目标距离",
+          value: `${formatNumber(getByPath(ballistic, "target_dist_xy_m"), 2, " m")} / ${formatNumber(getByPath(ballistic, "target_dist_3d_m"), 2, " m")}`,
+        },
+      ]);
+
+      renderRows("analysis-command-card", [
+        { label: "控制状态", value: fire ? "ARMED" : "SAFE" },
+        {
+          label: "云台角度",
+          value: `${formatSigned(getByPath(command, "gimbal_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "gimbal_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划角度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划速度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_vel_deg"), 2, " deg/s")} / ${formatSigned(getByPath(command, "plan_pitch_vel_deg"), 2, " deg/s")}`,
+        },
+        {
+          label: "规划加速度",
+          value: `${formatSigned(getByPath(command, "plan_yaw_acc_deg"), 2, " deg/s2")} / ${formatSigned(getByPath(command, "plan_pitch_acc_deg"), 2, " deg/s2")}`,
+        },
+        {
+          label: "串口弹速",
+          value: `${formatNumber(serialBulletSpeed, 2, " m/s")} · ${bulletSpeedSource}`,
+        },
+        bulletSpeedFallback ?
+          {
+            label: "算法弹速",
+            value: `${formatNumber(effectiveBulletSpeed, 2, " m/s")} · safety fallback`,
+          } :
+          null,
+      ]);
+    }
 
     renderRows("inspector-summary", [
       { label: "服务器时间", value: formatClock(getByPath(state, "server.unix_ms")) },
+      { label: "网页模式", value: `${mode.mode_label} · ${mode.source}` },
+      { label: "串口模式", value: mode.serial_mode_label || "--" },
       { label: "帧号", value: getByPath(frame, "frame_index", "--") },
       { label: "回放时间", value: formatNumber(getByPath(frame, "playback_t_s"), 3, " s") },
       { label: "原始时间", value: formatNumber(getByPath(frame, "raw_t_s"), 3, " s") },
@@ -964,6 +1172,10 @@
         value: `${formatSigned(getByPath(command, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "plan_pitch_deg"), 2, " deg")}`,
       },
       {
+        label: "目标角度 deg",
+        value: `${formatSigned(getByPath(command, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(command, "target_pitch_deg"), 2, " deg")}`,
+      },
+      {
         label: "弹速来源",
         value: `${bulletSpeedSource} · ${formatNumber(serialBulletSpeed, 2, " m/s")}`,
       },
@@ -975,41 +1187,87 @@
         null,
     ]);
 
-    renderRows("preview-card", [
-      { label: "目标名称", value: getByPath(preview, "target_name", "none") },
-      { label: "装甲类型", value: getByPath(preview, "armor_type", "none") },
-      {
-        label: "目标位置",
-        value: `${formatNumber(getByPath(preview, "target_x_m"), 3, " m")} / ${formatNumber(getByPath(preview, "target_y_m"), 3, " m")} / ${formatNumber(getByPath(preview, "target_z_m"), 3, " m")}`,
-      },
-      {
-        label: "目标角度",
-        value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
-      },
-      {
-        label: "规划角度",
-        value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
-      },
-    ]);
+    if (buffMode) {
+      renderRows("preview-card", [
+        { label: "当前模式", value: mode.mode_label },
+        { label: "目标存在", value: formatBool(hasTarget, "YES", "NO") },
+        {
+          label: "击打点位置",
+          value: `${formatNumber(getByPath(buff, "aim_x_m"), 3, " m")} / ${formatNumber(getByPath(buff, "aim_y_m"), 3, " m")} / ${formatNumber(getByPath(buff, "aim_z_m"), 3, " m")}`,
+        },
+        {
+          label: "预测击打点",
+          value: `${formatNumber(getByPath(buff, "predicted_aim_x_m"), 3, " m")} / ${formatNumber(getByPath(buff, "predicted_aim_y_m"), 3, " m")} / ${formatNumber(getByPath(buff, "predicted_aim_z_m"), 3, " m")}`,
+        },
+        {
+          label: "击打点角度",
+          value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划角度",
+          value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
+        },
+      ]);
 
-    renderRows("inspector-planner-card", [
-      { label: "选中装甲板", value: formatArmorId(selectedArmor) },
-      { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
-      { label: "转向符号", value: getByPath(planner, "turn_sign", "--") },
-      { label: "转向角速度", value: formatSigned(getByPath(planner, "w_rad_s"), 3, " rad/s") },
-      { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
-      { label: "切板角列表", value: formatDeltaList(getByPath(planner, "delta_angle_deg_list", [])) },
-      { label: "装甲高度", value: formatNumber(getByPath(planner, "h_m"), 3, " m") },
-      { label: "选中 Z 偏置", value: formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m") },
-      {
-        label: "击打 Z 补偿",
-        value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
-      },
-      {
-        label: "中心模型",
-        value: formatBool(getByPath(planner, "fixed_center_rotation_model", false), "FIXED", "FOLLOW"),
-      },
-    ]);
+      renderRows("inspector-planner-card", [
+        { label: "机关方向", value: getByPath(planner, "turn_direction", "STEADY") },
+        {
+          label: "中心 yaw / pitch",
+          value: `${formatSigned(getByPath(buff, "rune_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "rune_pitch_deg"), 2, " deg")}`,
+        },
+        { label: "中心距离", value: formatNumber(getByPath(buff, "rune_dist_m"), 3, " m") },
+        {
+          label: "EKF angle / spd",
+          value: `${formatSigned(getByPath(buff, "angle_deg"), 2, " deg")} / ${formatSigned(getByPath(buff, "spd_deg_s"), 2, " deg/s")}`,
+        },
+        {
+          label: "rad/s 速度",
+          value: formatSigned(getByPath(buff, "spd_rad_s"), 3, " rad/s"),
+        },
+        {
+          label: "大符参数",
+          value: mode.mode_key === "big_buff"
+            ? `${formatSigned(getByPath(buff, "fit_a_deg_s"), 2, " deg/s")} / ${formatNumber(getByPath(buff, "fit_w_rad_s"), 3, " rad/s")} / ${formatSigned(getByPath(buff, "fit_fi_deg"), 2, " deg")}`
+            : "small buff",
+        },
+      ]);
+    } else {
+      renderRows("preview-card", [
+        { label: "目标名称", value: getByPath(preview, "target_name", "none") },
+        { label: "装甲类型", value: getByPath(preview, "armor_type", "none") },
+        {
+          label: "目标位置",
+          value: `${formatNumber(getByPath(preview, "target_x_m"), 3, " m")} / ${formatNumber(getByPath(preview, "target_y_m"), 3, " m")} / ${formatNumber(getByPath(preview, "target_z_m"), 3, " m")}`,
+        },
+        {
+          label: "目标角度",
+          value: `${formatSigned(getByPath(preview, "target_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "target_pitch_deg"), 2, " deg")}`,
+        },
+        {
+          label: "规划角度",
+          value: `${formatSigned(getByPath(preview, "plan_yaw_deg"), 2, " deg")} / ${formatSigned(getByPath(preview, "plan_pitch_deg"), 2, " deg")}`,
+        },
+      ]);
+
+      renderRows("inspector-planner-card", [
+        { label: "选中装甲板", value: formatArmorId(selectedArmor) },
+        { label: "物理板号", value: formatArmorId(getByPath(planner, "physical_armor")) },
+        { label: "转向符号", value: getByPath(planner, "turn_sign", "--") },
+        { label: "转向角速度", value: formatSigned(getByPath(planner, "w_rad_s"), 3, " rad/s") },
+        { label: "中心偏航", value: formatSigned(getByPath(planner, "center_yaw_deg"), 2, " deg") },
+        { label: "切板角列表", value: formatDeltaList(getByPath(planner, "delta_angle_deg_list", [])) },
+        { label: "装甲高度", value: formatNumber(getByPath(planner, "h_m"), 3, " m") },
+        { label: "选中 Z 偏置", value: formatSigned(getByPath(planner, "selected_z_offset_m"), 3, " m") },
+        {
+          label: "击打 Z 补偿",
+          value: formatSigned(getByPath(planner, "selected_aim_z_compensation_m"), 3, " m"),
+        },
+        {
+          label: "中心模型",
+          value: formatBool(getByPath(planner, "fixed_center_rotation_model", false), "FIXED", "FOLLOW"),
+        },
+      ]);
+    }
 
     setText("log-meta", `latest snapshot · ${formatClock(getByPath(state, "server.unix_ms"))}`);
   };
@@ -1117,6 +1375,7 @@
     initStreams();
     initOverlayControls();
     bindOverlayControls();
+    bindModeSwitch();
     bindRuntimeParamToolbar();
     setOverlayMeta("等待状态同步后载入图层设置");
     setRuntimeParamStatus("等待运行时参数会话同步");
@@ -1129,6 +1388,7 @@
     }
 
     activateView(resolveViewFromHash());
+    fetchMode(true).catch((error) => console.warn(error));
     fetchRuntimeParams(true).catch((error) => console.warn(error));
     initPolling();
   });

@@ -1,11 +1,8 @@
 #include <fmt/core.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <memory>
-#include <mutex>
-#include <thread>
 
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
@@ -24,7 +21,6 @@
 #include "tools/math_tools.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
-#include "tools/thread_safe_queue.hpp"
 #include "tools/web_debugger.hpp"
 #include "tools/yaml.hpp"
 
@@ -164,178 +160,14 @@ int main(int argc, char * argv[])
   auto_aim::Solver solver(config_path);
   auto_aim::Tracker tracker(config_path, solver);
   auto_aim::Planner planner(config_path);
-  auto_aim::Planner debug_planner(config_path);
-
-  tools::ThreadSafeQueue<std::optional<auto_aim::Target>, true> target_queue(1);
-  target_queue.push(std::nullopt);
-
-  std::atomic<bool> quit = false;
-  std::mutex command_state_mutex;
-  nlohmann::json command_state = nlohmann::json::object();
-
-  auto plan_thread = std::thread([&]() {
-    auto t0 = std::chrono::steady_clock::now();
-    uint16_t last_bullet_count = 0;
-
-    while (!quit) {
-      const auto target = target_queue.front();
-      const auto gs = gimbal.state();
-      const auto normalized_gimbal = normalize_gimbal_state(gs, gimbal_state_unit_mode);
-      const auto plan = planner.plan(target, gs.bullet_speed);
-
-      gimbal.send(
-        plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel,
-        plan.pitch_acc);
-
-      const bool fired = gs.bullet_count > last_bullet_count;
-      last_bullet_count = gs.bullet_count;
-
-      nlohmann::json data;
-      data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
-      data["gimbal_yaw"] = normalized_gimbal.yaw.deg;
-      data["gimbal_yaw_vel"] = normalized_gimbal.yaw_vel.deg;
-      data["gimbal_pitch"] = normalized_gimbal.pitch.deg;
-      data["gimbal_pitch_vel"] = normalized_gimbal.pitch_vel.deg;
-      data["target_yaw"] = rad2deg(plan.target_yaw);
-      data["target_pitch"] = rad2deg(plan.target_pitch);
-      data["plan_yaw"] = rad2deg(plan.yaw);
-      data["plan_yaw_vel"] = rad2deg(plan.yaw_vel);
-      data["plan_yaw_acc"] = rad2deg(plan.yaw_acc);
-      data["plan_pitch"] = rad2deg(plan.pitch);
-      data["plan_pitch_vel"] = rad2deg(plan.pitch_vel);
-      data["plan_pitch_acc"] = rad2deg(plan.pitch_acc);
-      data["fire"] = plan.fire ? 1 : 0;
-      data["fired"] = fired ? 1 : 0;
-      data["bullet_speed"] = gs.bullet_speed;
-
-      nlohmann::json snapshot;
-      snapshot["has_target"] = target.has_value();
-      snapshot["fire"] = plan.fire;
-      snapshot["fired"] = fired;
-      snapshot["gimbal_source_unit"] = normalized_gimbal.source_is_degree ? "deg" : "rad";
-      snapshot["gimbal_yaw_raw"] = normalized_gimbal.yaw.raw;
-      snapshot["gimbal_yaw_deg"] = normalized_gimbal.yaw.deg;
-      snapshot["gimbal_yaw_rad"] = normalized_gimbal.yaw.rad;
-      snapshot["gimbal_pitch_raw"] = normalized_gimbal.pitch.raw;
-      snapshot["gimbal_pitch_deg"] = normalized_gimbal.pitch.deg;
-      snapshot["gimbal_pitch_rad"] = normalized_gimbal.pitch.rad;
-      snapshot["gimbal_yaw_vel_raw"] = normalized_gimbal.yaw_vel.raw;
-      snapshot["gimbal_yaw_vel_deg"] = normalized_gimbal.yaw_vel.deg;
-      snapshot["gimbal_yaw_vel_rad"] = normalized_gimbal.yaw_vel.rad;
-      snapshot["gimbal_pitch_vel_raw"] = normalized_gimbal.pitch_vel.raw;
-      snapshot["gimbal_pitch_vel_deg"] = normalized_gimbal.pitch_vel.deg;
-      snapshot["gimbal_pitch_vel_rad"] = normalized_gimbal.pitch_vel.rad;
-      snapshot["target_yaw_deg"] = rad2deg(plan.target_yaw);
-      snapshot["target_yaw_rad"] = plan.target_yaw;
-      snapshot["target_pitch_deg"] = rad2deg(plan.target_pitch);
-      snapshot["target_pitch_rad"] = plan.target_pitch;
-      snapshot["plan_yaw_deg"] = rad2deg(plan.yaw);
-      snapshot["plan_yaw_rad"] = plan.yaw;
-      snapshot["plan_pitch_deg"] = rad2deg(plan.pitch);
-      snapshot["plan_pitch_rad"] = plan.pitch;
-      snapshot["plan_yaw_vel_deg"] = rad2deg(plan.yaw_vel);
-      snapshot["plan_yaw_vel_rad"] = plan.yaw_vel;
-      snapshot["plan_pitch_vel_deg"] = rad2deg(plan.pitch_vel);
-      snapshot["plan_pitch_vel_rad"] = plan.pitch_vel;
-      snapshot["plan_yaw_acc_deg"] = rad2deg(plan.yaw_acc);
-      snapshot["plan_yaw_acc_rad"] = plan.yaw_acc;
-      snapshot["plan_pitch_acc_deg"] = rad2deg(plan.pitch_acc);
-      snapshot["plan_pitch_acc_rad"] = plan.pitch_acc;
-      snapshot["bullet_speed_mps"] = gs.bullet_speed;
-      snapshot["bullet_speed_effective_mps"] =
-        (gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0) ? 22.0 : gs.bullet_speed;
-      snapshot["bullet_speed_fallback"] =
-        gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0;
-      snapshot["bullet_speed_source"] = "serial";
-
-      if (target.has_value()) {
-        data["target_z"] = target->ekf_x()[4];
-        data["target_vz"] = target->ekf_x()[5];
-        data["target_h"] = target->ekf_x()[10];
-        data["w"] = target->ekf_x()[7];
-        data["tracker_match_valid"] = target->tracker_debug_match_valid ? 1 : 0;
-        data["tracker_match_id"] = target->tracker_debug_match_id;
-        data["tracker_match_score"] = target->tracker_debug_match_score;
-        data["tracker_reprojection_px"] = target->tracker_debug_reprojection_px;
-
-        snapshot["target_z_m"] = target->ekf_x()[4];
-        snapshot["target_vz_mps"] = target->ekf_x()[5];
-        snapshot["target_h_m"] = target->ekf_x()[10];
-        snapshot["target_w_rad_s"] = target->ekf_x()[7];
-        snapshot["tracker_candidate_count"] = target->tracker_debug_candidate_count;
-        snapshot["tracker_match_valid"] = target->tracker_debug_match_valid;
-        snapshot["tracker_match_id"] = target->tracker_debug_match_id;
-        snapshot["tracker_match_score"] = target->tracker_debug_match_score;
-        snapshot["tracker_reprojection_px"] = target->tracker_debug_reprojection_px;
-        snapshot["tracker_xy_error_m"] = target->tracker_debug_xy_error_m;
-        snapshot["tracker_z_error_m"] = target->tracker_debug_z_error_m;
-      } else {
-        data["w"] = 0.0;
-        data["tracker_match_valid"] = 0;
-        data["tracker_match_id"] = -1;
-        data["tracker_match_score"] = -1.0;
-        data["tracker_reprojection_px"] = -1.0;
-        snapshot["target_z_m"] = nullptr;
-        snapshot["target_vz_mps"] = nullptr;
-        snapshot["target_h_m"] = nullptr;
-        snapshot["target_w_rad_s"] = nullptr;
-        snapshot["tracker_candidate_count"] = 0;
-        snapshot["tracker_match_valid"] = false;
-        snapshot["tracker_match_id"] = -1;
-        snapshot["tracker_match_score"] = nullptr;
-        snapshot["tracker_reprojection_px"] = nullptr;
-        snapshot["tracker_xy_error_m"] = nullptr;
-        snapshot["tracker_z_error_m"] = nullptr;
-      }
-
-      data["planner_selected_armor"] = planner.debug_armor_id;
-      data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
-      data["planner_hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
-      data["planner_hit_iters"] = planner.debug_hit_iter_count;
-      data["planner_hit_converged"] = planner.debug_hit_converged ? 1 : 0;
-      data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
-      data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
-      data["planner_turn_sign"] = tools::debug::spin_direction_sign(target.has_value() ? target->ekf_x()[7] : 0.0);
-      data["planner_selected_physical_armor"] = planner.debug_physical_armor_id;
-      data["planner_selected_z_offset"] = planner.debug_selected_z_offset;
-      data["planner_selected_aim_z_compensation"] = planner.debug_selected_aim_z_compensation;
-      data["planner_fixed_model"] = planner.debug_fixed_center_rotation_model ? 1 : 0;
-
-      snapshot["selected_armor"] = planner.debug_armor_id;
-      snapshot["selected_physical_armor"] = planner.debug_physical_armor_id;
-      snapshot["delay_ms"] = planner.debug_delay_time * 1000.0;
-      snapshot["hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
-      snapshot["hit_iter_count"] = planner.debug_hit_iter_count;
-      snapshot["hit_converged"] = planner.debug_hit_converged;
-      snapshot["spin_gate"] = planner.debug_used_spin_gate;
-      snapshot["center_yaw_deg"] = rad2deg(planner.debug_center_yaw);
-      snapshot["turn_direction"] = tools::debug::spin_direction_to_string(
-        target.has_value() ? target->ekf_x()[7] : 0.0);
-      snapshot["delta_angle_deg_list"] = nlohmann::json::array();
-      for (const double delta_angle : planner.debug_delta_angle_list) {
-        snapshot["delta_angle_deg_list"].push_back(rad2deg(delta_angle));
-      }
-      snapshot["selected_z_offset_m"] = planner.debug_selected_z_offset;
-      snapshot["selected_aim_z_compensation_m"] = planner.debug_selected_aim_z_compensation;
-      snapshot["fixed_center_rotation_model"] = planner.debug_fixed_center_rotation_model;
-
-      {
-        std::lock_guard<std::mutex> lock(command_state_mutex);
-        command_state = std::move(snapshot);
-      }
-
-      plotter.plot(data);
-      if (web_debugger) web_debugger->update_plot_sample(data);
-
-      std::this_thread::sleep_for(10ms);
-    }
-  });
 
   cv::Mat img;
   std::chrono::steady_clock::time_point t;
   cv::Mat ballistic_panel(460, 840, CV_8UC3);
   auto last_web_frame_time = std::chrono::steady_clock::now() - web_frame_interval;
   auto last_web_state_time = std::chrono::steady_clock::now() - web_state_interval;
+  const auto t0 = std::chrono::steady_clock::now();
+  uint16_t last_bullet_count = 0;
 
   while (!exiter.exit()) {
     camera.read(img, t);
@@ -348,39 +180,89 @@ int main(int argc, char * argv[])
     auto armors = yolo.detect(img);
     auto targets = tracker.track(armors, t);
     const auto gs = gimbal.state();
+    const auto normalized_gimbal = normalize_gimbal_state(gs, gimbal_state_unit_mode);
 
     std::optional<auto_aim::Target> current_target;
     if (!targets.empty()) current_target = targets.front();
 
-    const auto current_plan = debug_planner.plan(current_target, gs.bullet_speed);
+    const auto current_plan = planner.plan(current_target, gs.bullet_speed);
+    gimbal.send(
+      current_plan.control, current_plan.fire, current_plan.yaw, current_plan.yaw_vel,
+      current_plan.yaw_acc, current_plan.pitch, current_plan.pitch_vel, current_plan.pitch_acc);
+
+    const bool fired = gs.bullet_count > last_bullet_count;
+    last_bullet_count = gs.bullet_count;
+
     BallisticDiagnostic ballistic_diag;
     if (current_target.has_value() && current_plan.control) {
       ballistic_diag = build_ballistic_diagnostic(
-        current_plan, debug_planner.debug_xyza, current_target->armor_type, gs.bullet_speed,
+        current_plan, planner.debug_xyza, current_target->armor_type, gs.bullet_speed,
         yaw_offset, pitch_offset);
     }
-
-    if (!targets.empty())
-      target_queue.push(targets.front());
-    else
-      target_queue.push(std::nullopt);
 
     const double latency_ms =
       tools::delta_time(std::chrono::steady_clock::now(), t) * 1000.0;
     const double current_w = current_target.has_value() ? current_target->ekf_x()[7] : 0.0;
     const double current_h = current_target.has_value() ? current_target->ekf_x()[10] : 0.0;
     const double current_selected_z_offset =
-      current_target.has_value() ? debug_planner.debug_selected_z_offset : 0.0;
+      current_target.has_value() ? planner.debug_selected_z_offset : 0.0;
     const double current_selected_aim_z_compensation =
-      current_target.has_value() ? debug_planner.debug_selected_aim_z_compensation : 0.0;
+      current_target.has_value() ? planner.debug_selected_aim_z_compensation : 0.0;
     const bool current_fixed_model =
-      current_target.has_value() && debug_planner.debug_fixed_center_rotation_model;
+      current_target.has_value() && planner.debug_fixed_center_rotation_model;
 
-    nlohmann::json latest_command_state;
-    {
-      std::lock_guard<std::mutex> lock(command_state_mutex);
-      latest_command_state = command_state;
+    nlohmann::json data;
+    data["t"] = tools::delta_time(std::chrono::steady_clock::now(), t0);
+    data["gimbal_yaw"] = normalized_gimbal.yaw.deg;
+    data["gimbal_yaw_vel"] = normalized_gimbal.yaw_vel.deg;
+    data["gimbal_pitch"] = normalized_gimbal.pitch.deg;
+    data["gimbal_pitch_vel"] = normalized_gimbal.pitch_vel.deg;
+    data["target_yaw"] = rad2deg(current_plan.target_yaw);
+    data["target_pitch"] = rad2deg(current_plan.target_pitch);
+    data["plan_yaw"] = rad2deg(current_plan.yaw);
+    data["plan_yaw_vel"] = rad2deg(current_plan.yaw_vel);
+    data["plan_yaw_acc"] = rad2deg(current_plan.yaw_acc);
+    data["plan_pitch"] = rad2deg(current_plan.pitch);
+    data["plan_pitch_vel"] = rad2deg(current_plan.pitch_vel);
+    data["plan_pitch_acc"] = rad2deg(current_plan.pitch_acc);
+    data["fire"] = current_plan.fire ? 1 : 0;
+    data["fired"] = fired ? 1 : 0;
+    data["bullet_speed"] = gs.bullet_speed;
+
+    if (current_target.has_value()) {
+      data["target_z"] = current_target->ekf_x()[4];
+      data["target_vz"] = current_target->ekf_x()[5];
+      data["target_h"] = current_target->ekf_x()[10];
+      data["w"] = current_target->ekf_x()[7];
+      data["tracker_match_valid"] = current_target->tracker_debug_match_valid ? 1 : 0;
+      data["tracker_match_id"] = current_target->tracker_debug_match_id;
+      data["tracker_match_score"] = current_target->tracker_debug_match_score;
+      data["tracker_reprojection_px"] = current_target->tracker_debug_reprojection_px;
+    } else {
+      data["w"] = 0.0;
+      data["tracker_match_valid"] = 0;
+      data["tracker_match_id"] = -1;
+      data["tracker_match_score"] = -1.0;
+      data["tracker_reprojection_px"] = -1.0;
     }
+
+    data["planner_selected_armor"] = planner.debug_armor_id;
+    data["planner_delay_ms"] = planner.debug_delay_time * 1000.0;
+    data["planner_hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
+    data["planner_hit_iters"] = planner.debug_hit_iter_count;
+    data["planner_hit_converged"] = planner.debug_hit_converged ? 1 : 0;
+    data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
+    data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
+    data["planner_turn_sign"] =
+      tools::debug::spin_direction_sign(current_target.has_value() ? current_target->ekf_x()[7] : 0.0);
+    data["planner_selected_physical_armor"] = planner.debug_physical_armor_id;
+    data["planner_selected_z_offset"] = planner.debug_selected_z_offset;
+    data["planner_selected_aim_z_compensation"] = planner.debug_selected_aim_z_compensation;
+    data["planner_fixed_model"] = planner.debug_fixed_center_rotation_model ? 1 : 0;
+
+    plotter.plot(data);
+    if (web_debugger) web_debugger->update_plot_sample(data);
+
     const nlohmann::json overlay_config =
       web_debugger ? web_debugger->overlay_config() : nlohmann::json::object();
     const auto apply_overlay_config =
@@ -412,6 +294,7 @@ int main(int argc, char * argv[])
 
     if (web_debugger && now - last_web_state_time >= web_state_interval) {
       nlohmann::json web_state;
+      nlohmann::json command_state;
       web_state["server"]["unix_ms"] = unix_time_ms();
       web_state["frame"]["latency_ms"] = latency_ms;
       web_state["frame"]["image_width"] = img.cols;
@@ -433,28 +316,28 @@ int main(int argc, char * argv[])
       web_state["preview"]["plan_pitch_deg"] = rad2deg(current_plan.pitch);
       web_state["preview"]["plan_pitch_rad"] = current_plan.pitch;
       if (current_target.has_value()) {
-        web_state["preview"]["target_x_m"] = debug_planner.debug_xyza[0];
-        web_state["preview"]["target_y_m"] = debug_planner.debug_xyza[1];
-        web_state["preview"]["target_z_m"] = debug_planner.debug_xyza[2];
+        web_state["preview"]["target_x_m"] = planner.debug_xyza[0];
+        web_state["preview"]["target_y_m"] = planner.debug_xyza[1];
+        web_state["preview"]["target_z_m"] = planner.debug_xyza[2];
       } else {
         web_state["preview"]["target_x_m"] = nullptr;
         web_state["preview"]["target_y_m"] = nullptr;
         web_state["preview"]["target_z_m"] = nullptr;
       }
-      web_state["planner"]["selected_armor"] = debug_planner.debug_armor_id;
-      web_state["planner"]["physical_armor"] = debug_planner.debug_physical_armor_id;
-      web_state["planner"]["spin_gate"] = debug_planner.debug_used_spin_gate;
-      web_state["planner"]["delay_ms"] = debug_planner.debug_delay_time * 1000.0;
-      web_state["planner"]["hit_fly_time_ms"] = debug_planner.debug_hit_fly_time * 1000.0;
-      web_state["planner"]["hit_iter_count"] = debug_planner.debug_hit_iter_count;
-      web_state["planner"]["hit_converged"] = debug_planner.debug_hit_converged;
-      web_state["planner"]["center_yaw_deg"] = rad2deg(debug_planner.debug_center_yaw);
+      web_state["planner"]["selected_armor"] = planner.debug_armor_id;
+      web_state["planner"]["physical_armor"] = planner.debug_physical_armor_id;
+      web_state["planner"]["spin_gate"] = planner.debug_used_spin_gate;
+      web_state["planner"]["delay_ms"] = planner.debug_delay_time * 1000.0;
+      web_state["planner"]["hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
+      web_state["planner"]["hit_iter_count"] = planner.debug_hit_iter_count;
+      web_state["planner"]["hit_converged"] = planner.debug_hit_converged;
+      web_state["planner"]["center_yaw_deg"] = rad2deg(planner.debug_center_yaw);
       web_state["planner"]["turn_direction"] =
         tools::debug::spin_direction_to_string(current_w);
       web_state["planner"]["turn_sign"] =
         tools::debug::spin_direction_sign(current_w);
       web_state["planner"]["delta_angle_deg_list"] = nlohmann::json::array();
-      for (const double delta_angle : debug_planner.debug_delta_angle_list) {
+      for (const double delta_angle : planner.debug_delta_angle_list) {
         web_state["planner"]["delta_angle_deg_list"].push_back(rad2deg(delta_angle));
       }
       web_state["planner"]["w_rad_s"] = current_w;
@@ -485,13 +368,70 @@ int main(int argc, char * argv[])
       web_state["overlay"]["controls"] =
         overlay_config.is_object() ? overlay_config : nlohmann::json::object();
       web_state["ballistic"] = ballistic_to_json(ballistic_diag);
-      web_state["command"] = latest_command_state;
-      web_state["command"]["bullet_speed_mps"] = gs.bullet_speed;
-      web_state["command"]["bullet_speed_source"] = "serial";
-      web_state["command"]["bullet_speed_effective_mps"] =
+      command_state["has_target"] = current_target.has_value();
+      command_state["fire"] = current_plan.fire;
+      command_state["fired"] = fired;
+      command_state["gimbal_source_unit"] = normalized_gimbal.source_is_degree ? "deg" : "rad";
+      command_state["gimbal_yaw_raw"] = normalized_gimbal.yaw.raw;
+      command_state["gimbal_yaw_deg"] = normalized_gimbal.yaw.deg;
+      command_state["gimbal_yaw_rad"] = normalized_gimbal.yaw.rad;
+      command_state["gimbal_pitch_raw"] = normalized_gimbal.pitch.raw;
+      command_state["gimbal_pitch_deg"] = normalized_gimbal.pitch.deg;
+      command_state["gimbal_pitch_rad"] = normalized_gimbal.pitch.rad;
+      command_state["gimbal_yaw_vel_raw"] = normalized_gimbal.yaw_vel.raw;
+      command_state["gimbal_yaw_vel_deg"] = normalized_gimbal.yaw_vel.deg;
+      command_state["gimbal_yaw_vel_rad"] = normalized_gimbal.yaw_vel.rad;
+      command_state["gimbal_pitch_vel_raw"] = normalized_gimbal.pitch_vel.raw;
+      command_state["gimbal_pitch_vel_deg"] = normalized_gimbal.pitch_vel.deg;
+      command_state["gimbal_pitch_vel_rad"] = normalized_gimbal.pitch_vel.rad;
+      command_state["target_yaw_deg"] = rad2deg(current_plan.target_yaw);
+      command_state["target_yaw_rad"] = current_plan.target_yaw;
+      command_state["target_pitch_deg"] = rad2deg(current_plan.target_pitch);
+      command_state["target_pitch_rad"] = current_plan.target_pitch;
+      command_state["plan_yaw_deg"] = rad2deg(current_plan.yaw);
+      command_state["plan_yaw_rad"] = current_plan.yaw;
+      command_state["plan_pitch_deg"] = rad2deg(current_plan.pitch);
+      command_state["plan_pitch_rad"] = current_plan.pitch;
+      command_state["plan_yaw_vel_deg"] = rad2deg(current_plan.yaw_vel);
+      command_state["plan_yaw_vel_rad"] = current_plan.yaw_vel;
+      command_state["plan_pitch_vel_deg"] = rad2deg(current_plan.pitch_vel);
+      command_state["plan_pitch_vel_rad"] = current_plan.pitch_vel;
+      command_state["plan_yaw_acc_deg"] = rad2deg(current_plan.yaw_acc);
+      command_state["plan_yaw_acc_rad"] = current_plan.yaw_acc;
+      command_state["plan_pitch_acc_deg"] = rad2deg(current_plan.pitch_acc);
+      command_state["plan_pitch_acc_rad"] = current_plan.pitch_acc;
+      command_state["bullet_speed_mps"] = gs.bullet_speed;
+      command_state["bullet_speed_source"] = "serial";
+      command_state["bullet_speed_effective_mps"] =
         (gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0) ? 22.0 : gs.bullet_speed;
-      web_state["command"]["bullet_speed_fallback"] =
+      command_state["bullet_speed_fallback"] =
         gs.bullet_speed < 10.0 || gs.bullet_speed > 25.0;
+      if (current_target.has_value()) {
+        command_state["target_z_m"] = current_target->ekf_x()[4];
+        command_state["target_vz_mps"] = current_target->ekf_x()[5];
+        command_state["target_h_m"] = current_target->ekf_x()[10];
+        command_state["target_w_rad_s"] = current_target->ekf_x()[7];
+        command_state["tracker_candidate_count"] = current_target->tracker_debug_candidate_count;
+        command_state["tracker_match_valid"] = current_target->tracker_debug_match_valid;
+        command_state["tracker_match_id"] = current_target->tracker_debug_match_id;
+        command_state["tracker_match_score"] = current_target->tracker_debug_match_score;
+        command_state["tracker_reprojection_px"] = current_target->tracker_debug_reprojection_px;
+        command_state["tracker_xy_error_m"] = current_target->tracker_debug_xy_error_m;
+        command_state["tracker_z_error_m"] = current_target->tracker_debug_z_error_m;
+      } else {
+        command_state["target_z_m"] = nullptr;
+        command_state["target_vz_mps"] = nullptr;
+        command_state["target_h_m"] = nullptr;
+        command_state["target_w_rad_s"] = nullptr;
+        command_state["tracker_candidate_count"] = 0;
+        command_state["tracker_match_valid"] = false;
+        command_state["tracker_match_id"] = -1;
+        command_state["tracker_match_score"] = nullptr;
+        command_state["tracker_reprojection_px"] = nullptr;
+        command_state["tracker_xy_error_m"] = nullptr;
+        command_state["tracker_z_error_m"] = nullptr;
+      }
+      web_state["command"] = command_state;
       web_debugger->update_state(web_state);
       web_debugger->update_log(web_state);
       last_web_state_time = now;
@@ -505,16 +445,16 @@ int main(int argc, char * argv[])
         current_target.has_value() ? armor_name_to_string(current_target->name) : "none";
       visual_options.armor_type =
         current_target.has_value() ? armor_type_to_string(current_target->armor_type) : "none";
-      visual_options.planner_armor_id = debug_planner.debug_armor_id;
-      visual_options.planner_physical_armor_id = debug_planner.debug_physical_armor_id;
-      visual_options.planner_spin_gate = debug_planner.debug_used_spin_gate;
-      visual_options.planner_delay_ms = debug_planner.debug_delay_time * 1000.0;
-      visual_options.planner_center_yaw_deg = rad2deg(debug_planner.debug_center_yaw);
-      visual_options.planner_hit_fly_time_ms = debug_planner.debug_hit_fly_time * 1000.0;
-      visual_options.planner_hit_iter_count = debug_planner.debug_hit_iter_count;
-      visual_options.planner_hit_converged = debug_planner.debug_hit_converged;
+      visual_options.planner_armor_id = planner.debug_armor_id;
+      visual_options.planner_physical_armor_id = planner.debug_physical_armor_id;
+      visual_options.planner_spin_gate = planner.debug_used_spin_gate;
+      visual_options.planner_delay_ms = planner.debug_delay_time * 1000.0;
+      visual_options.planner_center_yaw_deg = rad2deg(planner.debug_center_yaw);
+      visual_options.planner_hit_fly_time_ms = planner.debug_hit_fly_time * 1000.0;
+      visual_options.planner_hit_iter_count = planner.debug_hit_iter_count;
+      visual_options.planner_hit_converged = planner.debug_hit_converged;
       visual_options.planner_delta_angles_deg.clear();
-      for (const double delta_angle : debug_planner.debug_delta_angle_list) {
+      for (const double delta_angle : planner.debug_delta_angle_list) {
         visual_options.planner_delta_angles_deg.push_back(rad2deg(delta_angle));
       }
       visual_options.planner_turn_direction =
@@ -548,7 +488,7 @@ int main(int argc, char * argv[])
       apply_overlay_config(visual_options);
 
       const auto display_img = tools::debug_visualization::render_live_debug_frame(
-        img, solver, current_target, current_plan, debug_planner, visual_options);
+        img, solver, current_target, current_plan, planner, visual_options);
 
       draw_ballistic_panel(ballistic_panel, ballistic_diag);
 
@@ -571,8 +511,6 @@ int main(int argc, char * argv[])
     }
   }
 
-  quit = true;
-  if (plan_thread.joinable()) plan_thread.join();
   gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
   if (show_local) cv::destroyAllWindows();
 

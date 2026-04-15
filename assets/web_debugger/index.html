@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Artisans战队自瞄网页调试器</title>
+    <title>Artisans战队在线网页调试器</title>
     <link rel="stylesheet" href="/static/css/style.css" />
   </head>
   <body>
@@ -14,15 +14,22 @@
       <div class="brand-block">
         <div class="brand-mark">ATS</div>
         <div>
-          <h1>Artisans战队自瞄网页调试器</h1>
+          <h1>Artisans战队在线网页调试器</h1>
           <p id="server-url">访问地址: --</p>
         </div>
       </div>
-      <nav class="view-switch">
-        <button class="view-btn active" data-view="overview" type="button">总览</button>
-        <button class="view-btn" data-view="analysis" type="button">分析</button>
-        <button class="view-btn" data-view="inspector" type="button">详情</button>
-      </nav>
+      <div class="header-controls">
+        <div class="mode-switch">
+          <button class="mode-btn active" data-mode="1" type="button">自瞄</button>
+          <button class="mode-btn" data-mode="2" type="button">小符</button>
+          <button class="mode-btn" data-mode="3" type="button">大符</button>
+        </div>
+        <nav class="view-switch">
+          <button class="view-btn active" data-view="overview" type="button">总览</button>
+          <button class="view-btn" data-view="analysis" type="button">分析</button>
+          <button class="view-btn" data-view="inspector" type="button">详情</button>
+        </nav>
+      </div>
     </header>
 
     <main class="app-shell">
@@ -56,6 +63,10 @@
               <div class="status-chip">
                 <span>链路</span>
                 <strong id="status-link">Waiting</strong>
+              </div>
+              <div class="status-chip">
+                <span>模式</span>
+                <strong id="status-mode">自瞄</strong>
               </div>
               <div class="status-chip">
                 <span>开火</span>

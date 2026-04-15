@@ -25,6 +25,8 @@ namespace
 constexpr std::chrono::milliseconds kPollInterval(200);
 constexpr std::chrono::milliseconds kStreamPollInterval(25);
 constexpr size_t kMaxRequestBytes = 8192;
+constexpr int kMinWebMode = 1;
+constexpr int kMaxWebMode = 3;
 
 int64_t steady_now_ms()
 {
@@ -166,6 +168,67 @@ std::string to_lower_copy(std::string value)
     value.begin(), value.end(), value.begin(),
     [](unsigned char ch) {return static_cast<char>(std::tolower(ch));});
   return value;
+}
+
+int clamp_web_mode(int mode)
+{
+  return std::clamp(mode, kMinWebMode, kMaxWebMode);
+}
+
+std::string web_mode_key(int mode)
+{
+  switch (clamp_web_mode(mode)) {
+    case 1:
+      return "auto_aim";
+    case 2:
+      return "small_buff";
+    case 3:
+      return "big_buff";
+    default:
+      return "auto_aim";
+  }
+}
+
+std::string web_mode_label(int mode)
+{
+  switch (clamp_web_mode(mode)) {
+    case 1:
+      return "自瞄";
+    case 2:
+      return "小符";
+    case 3:
+      return "大符";
+    default:
+      return "自瞄";
+  }
+}
+
+nlohmann::json web_mode_payload(int mode)
+{
+  const int clamped_mode = clamp_web_mode(mode);
+  return nlohmann::json::object({
+    {"mode", clamped_mode},
+    {"mode_key", web_mode_key(clamped_mode)},
+    {"mode_label", web_mode_label(clamped_mode)},
+    {"source", "web"},
+    {"choices", nlohmann::json::array({
+      nlohmann::json::object({
+        {"mode", 1},
+        {"key", "auto_aim"},
+        {"label", "自瞄"},
+      }),
+      nlohmann::json::object({
+        {"mode", 2},
+        {"key", "small_buff"},
+        {"label", "小符"},
+      }),
+      nlohmann::json::object({
+        {"mode", 3},
+        {"key", "big_buff"},
+        {"label", "大符"},
+      }),
+    })},
+  });
 }
 
 size_t parse_content_length(const std::string & header_block)
@@ -325,6 +388,16 @@ void WebDebugger::set_runtime_config_path(const std::string & config_path)
 {
   runtime_config_path_ = tools::resolve_config_path_string(config_path);
   tools::runtime_params::register_config(runtime_config_path_);
+}
+
+void WebDebugger::set_selected_mode(int mode)
+{
+  selected_mode_.store(clamp_web_mode(mode));
+}
+
+int WebDebugger::selected_mode() const
+{
+  return clamp_web_mode(selected_mode_.load());
 }
 
 void WebDebugger::update_main_frame(const cv::Mat & frame, int jpeg_quality)
@@ -529,6 +602,31 @@ void WebDebugger::handle_client(int client_fd)
     }
     send_response(
       client_fd, "200 OK", "application/json; charset=utf-8", payload);
+    return;
+  }
+
+  if (path == "/api/mode") {
+    if (method == "GET") {
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        web_mode_payload(selected_mode()).dump());
+      return;
+    }
+
+    try {
+      const auto incoming = body.empty() ? nlohmann::json::object() : nlohmann::json::parse(body);
+      if (!incoming.contains("mode") || !incoming.at("mode").is_number_integer()) {
+        throw std::runtime_error("mode must be an integer");
+      }
+      set_selected_mode(incoming.at("mode").get<int>());
+      send_response(
+        client_fd, "200 OK", "application/json; charset=utf-8",
+        web_mode_payload(selected_mode()).dump());
+    } catch (const std::exception & e) {
+      send_response(
+        client_fd, "400 Bad Request", "application/json; charset=utf-8",
+        nlohmann::json({{"error", e.what()}}).dump());
+    }
     return;
   }
 

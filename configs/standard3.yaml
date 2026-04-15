@@ -143,6 +143,7 @@ max_rectangular_error: 25 # degree
 #####-----tracker参数-----#####
 min_detect_count: 3
 max_temp_lost_count: 15
+
 outpost_max_temp_lost_count: 75
 outpost_radius: 0.2765
 outpost_armor_z_offsets: [0.0, -0.102, 0.102]

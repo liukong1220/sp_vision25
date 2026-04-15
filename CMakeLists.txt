@@ -43,7 +43,7 @@ add_executable(standard src/standard.cpp)
 add_executable(mt_standard src/mt_standard.cpp)
 add_executable(standard_mpc src/standard_mpc.cpp)
 add_executable(auto_aim_debug_mpc src/auto_aim_debug_mpc.cpp)
-add_executable(mt_auto_aim_debug src/mt_auto_aim_debug.cpp)
+add_executable(auto_debug src/auto_debug.cpp)
 add_executable(auto_buff_debug src/auto_buff_debug.cpp)
 add_executable(auto_buff_debug_mpc src/auto_buff_debug_mpc.cpp)
 add_executable(uav src/uav.cpp)
@@ -53,7 +53,7 @@ target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_bu
 target_link_libraries(mt_standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(standard_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 target_link_libraries(auto_aim_debug_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools debug_visualization io)
-target_link_libraries(mt_auto_aim_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
+target_link_libraries(auto_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools debug_visualization io)
 target_link_libraries(auto_buff_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io ${CERES_LIBRARIES})
 target_link_libraries(auto_buff_debug_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io ${CERES_LIBRARIES})
 target_link_libraries(uav ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
@@ -64,7 +64,7 @@ set(SP_VISION_RUNTIME_TARGETS
   mt_standard
   standard_mpc
   auto_aim_debug_mpc
-  mt_auto_aim_debug
+  auto_debug
   auto_buff_debug
   auto_buff_debug_mpc
   uav
@@ -111,7 +111,7 @@ add_executable(dm_test tests/dm_test.cpp)
 add_executable(minimum_vision_system tests/minimum_vision_system.cpp)
 
 target_link_libraries(auto_aim_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-target_link_libraries(auto_aim_test_web ${OpenCV_LIBS} fmt::fmt yaml-cpp tools debug_visualization io auto_aim)
+target_link_libraries(auto_aim_test_web ${OpenCV_LIBS} fmt::fmt yaml-cpp tools debug_visualization io auto_aim auto_buff)
 target_link_libraries(auto_buff_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io)
 target_link_libraries(camera_detect_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim io)
 target_link_libraries(camera_test ${OpenCV_LIBS} fmt::fmt tools io)

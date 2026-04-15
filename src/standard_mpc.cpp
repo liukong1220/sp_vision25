@@ -165,7 +165,7 @@ int main(int argc, char * argv[])
         buff_plan = buff_aimer.mpc_aim(target_copy, t, gs, true);
       }
       gimbal.send(
-        buff_plan.control, buff_plan.fire, buff_plan.yaw, buff_plan.yaw_vel, buff_plan.yaw_acc,
+        buff_plan.control, buff_plan.fire, src/standard_mpc.cppbuff_plan.yaw, buff_plan.yaw_vel, buff_plan.yaw_acc,
         buff_plan.pitch, buff_plan.pitch_vel, buff_plan.pitch_acc);
 
     } else
