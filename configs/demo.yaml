@@ -91,6 +91,7 @@ Q_pitch: [9e6,0]
 R_pitch: [1]
 
 #####-----buff_detector参数-----#####
+model: "assets/yolo11_buff_int8.xml"
 detect:
   contrast: 1
   brightness: 
@@ -117,8 +118,8 @@ detect:
 #####-----buff_aimer参数-----#####
 aim_time: 0.150         # s
 wait_time: 0.300        # s
-command_fire_gap: 0.080 # s
-predict_time: 0.150     # s
+fire_gap_time: 0.700   # s
+predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况调整
 
 #####-----web_debugger参数-----#####
 show_local: false
