@@ -45,7 +45,7 @@ int main(int argc, char * argv[])
   }
   auto config_path = cli.get<std::string>(0);
 
-  io::ROS2 ros2;
+  io::ROS2 ros2(config_path);
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
   io::USBCamera usbcam1("video0", config_path);

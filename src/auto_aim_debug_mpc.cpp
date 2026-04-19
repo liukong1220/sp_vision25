@@ -41,7 +41,7 @@ using tools::debug::unix_time_ms;
 
 const std::string keys =
   "{help h usage ? |                        | 输出命令行参数说明}"
-  "{@config-path   | configs/standard3.yaml | 位置参数yaml配置文件路径 }"
+  "{@config-path   | configs/sentry.yaml | 位置参数yaml配置文件路径 }"
   "{show-local     | false                  | 保留本地OpenCV调试窗口(显式传参时覆盖yaml) }"
   "{disable-web    | false                  | 禁用内置网页调试器(显式传参时覆盖yaml) }"
   "{web-host       | 0.0.0.0                | 网页调试器绑定地址(显式传参时覆盖yaml) }"

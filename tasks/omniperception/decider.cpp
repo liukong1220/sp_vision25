@@ -22,31 +22,6 @@ Decider::Decider(const std::string & config_path) : detector_(config_path), coun
   enemy_color_ =
     (yaml["enemy_color"].as<std::string>() == "red") ? auto_aim::Color::red : auto_aim::Color::blue;
   mode_ = yaml["mode"].as<double>();
-
-  const auto vision_fusion = yaml["vision_fusion"];
-  if (vision_fusion) {
-    enable_goal_suggestion_ = vision_fusion["enable_goal_suggestion"]
-                                ? vision_fusion["enable_goal_suggestion"].as<bool>()
-                                : enable_goal_suggestion_;
-    left_goal_index_ =
-      vision_fusion["left_goal_index"] ? vision_fusion["left_goal_index"].as<int>() : left_goal_index_;
-    front_goal_index_ = vision_fusion["front_goal_index"]
-                          ? vision_fusion["front_goal_index"].as<int>()
-                          : front_goal_index_;
-    right_goal_index_ = vision_fusion["right_goal_index"]
-                          ? vision_fusion["right_goal_index"].as<int>()
-                          : right_goal_index_;
-    close_range_goal_index_ = vision_fusion["close_range_goal_index"]
-                                ? vision_fusion["close_range_goal_index"].as<int>()
-                                : close_range_goal_index_;
-    front_yaw_abs_threshold_rad_ =
-      vision_fusion["front_yaw_abs_threshold_deg"]
-        ? vision_fusion["front_yaw_abs_threshold_deg"].as<double>() / 57.3
-        : front_yaw_abs_threshold_rad_;
-    close_range_threshold_m_ = vision_fusion["close_range_threshold_m"]
-                                 ? vision_fusion["close_range_threshold_m"].as<double>()
-                                 : close_range_threshold_m_;
-  }
 }
 
 io::Command Decider::decide(
@@ -237,36 +212,6 @@ VisionTargetInfo Decider::get_target_info(
   return VisionTargetInfo{};
 }
 
-int Decider::suggest_goal_index(const VisionTargetInfo & target_info) const
-{
-  // 第一代策略只在“目标位置可信”时给导航建议，
-  // 如果视觉当前只有云台角指令，没有稳定空间位置，就让行为树回退到锚点。
-  if (!enable_goal_suggestion_ || !target_info.valid) return -1;
-
-  const double x = target_info.position_gimbal.x();
-  const double y = target_info.position_gimbal.y();
-  const double distance = target_info.position_gimbal.norm();
-
-  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(distance) || distance <= 1e-6) {
-    return -1;
-  }
-
-  // gimbal 坐标系下使用 x 前、y 左 的常见约定，
-  // 因此 yaw > 0 表示目标落在左前方，yaw < 0 表示右前方。
-  const double yaw = std::atan2(y, x);
-
-  // 近距离目标优先推荐贴近压制位，避免已经贴脸的目标还继续走大范围巡逻。
-  if (close_range_goal_index_ >= 0 && distance <= close_range_threshold_m_) {
-    return close_range_goal_index_;
-  }
-
-  // 前向目标直接推荐正面压制位；左右侧目标则按符号分流到左右支援点。
-  if (std::abs(yaw) <= front_yaw_abs_threshold_rad_) {
-    return front_goal_index_;
-  }
-  return yaw > 0.0 ? left_goal_index_ : right_goal_index_;
-}
-
 io::VisionTargetState Decider::build_vision_target_state(
   const io::Command & command, const VisionTargetInfo & target_info) const
 {
@@ -285,7 +230,6 @@ io::VisionTargetState Decider::build_vision_target_state(
 
   state.target_distance = target_info.position_gimbal.norm();
   state.target_position_gimbal = target_info.position_gimbal;
-  state.suggested_goal_index = suggest_goal_index(target_info);
   return state;
 }
 

@@ -10,7 +10,7 @@ namespace io
 class ROS2
 {
 public:
-  ROS2();
+  explicit ROS2(const std::string & config_path = "");
 
   ~ROS2();
 

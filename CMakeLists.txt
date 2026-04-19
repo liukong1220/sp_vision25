@@ -21,6 +21,10 @@ find_package(OpenVINO REQUIRED)
 find_package(ament_cmake QUIET)
 find_package(rclcpp QUIET)
 find_package(std_msgs QUIET)
+find_package(geometry_msgs QUIET)
+find_package(tf2 QUIET)
+find_package(tf2_ros QUIET)
+find_package(tf2_geometry_msgs QUIET)
 find_package(rosidl_typesupport_cpp QUIET)
 find_package(fastrtps_cmake_module QUIET)
 find_package(fastcdr QUIET CONFIG)
@@ -161,7 +165,7 @@ list(APPEND SP_VISION_RUNTIME_TARGETS
 )
 
 # 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
-if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND fastrtps_cmake_module_FOUND AND fastcdr_FOUND AND rmw_FOUND AND sp_msgs_FOUND)
+if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND AND tf2_FOUND AND tf2_ros_FOUND AND tf2_geometry_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND fastrtps_cmake_module_FOUND AND fastcdr_FOUND AND rmw_FOUND AND sp_msgs_FOUND)
     # 编译 sentry 和 publish_test
     add_executable(sentry src/sentry.cpp)
     add_executable(sentry_bp src/sentry_bp.cpp)

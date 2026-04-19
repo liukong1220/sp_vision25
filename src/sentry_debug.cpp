@@ -43,7 +43,7 @@ int main(int argc, char * argv[])
   }
   auto config_path = cli.get<std::string>(0);
 
-  io::ROS2 ros2;
+  io::ROS2 ros2(config_path);
   io::CBoard cboard(config_path);
   io::Camera camera(config_path);
   io::Camera back_camera(tools::resolve_runtime_path_string("configs/camera.yaml"));

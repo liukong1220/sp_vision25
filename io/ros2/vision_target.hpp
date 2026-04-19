@@ -3,6 +3,8 @@
 
 #include <Eigen/Dense>
 
+#include <string>
+
 namespace io
 {
 
@@ -17,13 +19,14 @@ struct VisionTargetState
   bool nav_hold = false;
   bool fire_permitted = false;
   int target_id = 0;
-  int suggested_goal_index = -1;
   double confidence = 0.0;
   double target_distance = 0.0;
   double target_yaw = 0.0;
   double target_pitch = 0.0;
   Eigen::Vector3d target_position_gimbal = Eigen::Vector3d::Zero();
   Eigen::Vector3d target_position_map = Eigen::Vector3d::Zero();
+  bool has_target_position_map = false;
+  std::string target_position_map_frame;
 };
 
 }  // namespace io

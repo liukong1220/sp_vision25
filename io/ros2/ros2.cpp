@@ -1,11 +1,11 @@
 #include "ros2.hpp"
 namespace io
 {
-ROS2::ROS2()
+ROS2::ROS2(const std::string & config_path)
 {
   rclcpp::init(0, nullptr);
 
-  publish2nav_ = std::make_shared<Publish2Nav>();
+  publish2nav_ = std::make_shared<Publish2Nav>(config_path);
 
   subscribe2nav_ = std::make_shared<Subscribe2Nav>();
 

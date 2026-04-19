@@ -73,17 +73,6 @@ private:
   int mode_;
   int count_;
 
-  // 第一代视觉导航融合参数。
-  // 当前先用“目标相对方位 + 距离”给行为树提供建议点索引，
-  // 等后面接入更强的地图语义后，再把它升级成真正的区域级映射。
-  bool enable_goal_suggestion_ = false;
-  int left_goal_index_ = -1;
-  int front_goal_index_ = -1;
-  int right_goal_index_ = -1;
-  int close_range_goal_index_ = -1;
-  double front_yaw_abs_threshold_rad_ = 20.0 / 57.3;
-  double close_range_threshold_m_ = 4.0;
-
   auto_aim::Color enemy_color_;
   auto_aim::YOLO detector_;
   std::vector<auto_aim::ArmorName> invincible_armor_;  //无敌状态机器人编号,英雄为1，哨兵为6
@@ -112,9 +101,6 @@ private:
     {auto_aim::ArmorName::outpost, auto_aim::ArmorPriority::third},
     {auto_aim::ArmorName::base, auto_aim::ArmorPriority::third},
     {auto_aim::ArmorName::not_armor, auto_aim::ArmorPriority::third}};
-
-  // 根据目标相对方位给行为树一个“建议前往哪个点”的索引。
-  int suggest_goal_index(const VisionTargetInfo & target_info) const;
 };
 
 enum PriorityMode
