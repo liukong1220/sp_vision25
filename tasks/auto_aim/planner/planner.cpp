@@ -22,6 +22,28 @@ constexpr double kNormalVisibleAngle = 60.0 / 57.3;
 constexpr double kSpinSpeedThreshold = 2.0;
 constexpr int kHitTimeIterMax = 6;
 constexpr double kHitTimeTol = 1e-3;
+constexpr double kMinOutpostFireAngle = 4.0 / 57.3;
+constexpr double kMaxOutpostFireAngle = 12.0 / 57.3;
+
+double resolve_outpost_fire_phase_angle(double leaving_angle)
+{
+  if (leaving_angle <= 1e-6) return 8.0 / 57.3;
+
+  const double fire_angle =
+    std::clamp(leaving_angle * 0.5, kMinOutpostFireAngle, kMaxOutpostFireAngle);
+  return std::min(fire_angle, leaving_angle);
+}
+
+double resolve_selected_delta_angle(const AimSelection & selection)
+{
+  if (
+    selection.armor_id < 0 ||
+    selection.armor_id >= static_cast<int>(selection.delta_angle_list.size()))
+  {
+    return 0.0;
+  }
+  return selection.delta_angle_list[selection.armor_id];
+}
 
 AimSelection choose_aim_selection(
   const Target & target, double coming_angle, double leaving_angle, int & lock_id)
@@ -44,6 +66,7 @@ AimSelection choose_aim_selection(
     selection.armor_id = armor_id;
     selection.used_spin_gate = used_spin_gate;
     selection.xyza = armor_xyza_list[armor_id];
+    selection.selected_delta_angle = resolve_selected_delta_angle(selection);
   };
 
   auto fallback_to_closest = [&]() {
@@ -242,6 +265,10 @@ Plan Planner::plan(Target target, double bullet_speed)
   debug_hit_fly_time = 0.0;
   debug_hit_iter_count = 0;
   debug_hit_converged = false;
+  debug_fire_tracking_error = 0.0;
+  debug_fire_phase_limit = 0.0;
+  debug_fire_track_ready = false;
+  debug_fire_phase_ready = false;
 
   // 0. Check bullet speed
   if (bullet_speed < 10 || bullet_speed > 25) {
@@ -269,9 +296,9 @@ Plan Planner::plan(Target target, double bullet_speed)
   // 2. Get trajectory
   double yaw0;
   Trajectory traj;
+  AimSelection selection;
   try {
-    int planning_lock_id = lock_id_;
-    AimSelection selection;
+    int planning_lock_id = hit_solution.selection.armor_id >= 0 ? hit_solution.selection.armor_id : lock_id_;
     const auto yaw_pitch =
       solve_aim_command(target, bullet_speed, planning_lock_id, &selection);
     update_debug_selection(target, selection);
@@ -317,11 +344,26 @@ Plan Planner::plan(Target target, double bullet_speed)
     plan.yaw, plan.yaw_vel, plan.yaw_acc, plan.pitch, plan.pitch_vel, plan.pitch_acc);
 
   auto shoot_offset_ = 2;
-  plan.fire =
+  const double tracking_error =
     std::hypot(
       traj(0, HALF_HORIZON + shoot_offset_) - yaw_solver_->work->x(0, HALF_HORIZON + shoot_offset_),
       traj(2, HALF_HORIZON + shoot_offset_) -
-        pitch_solver_->work->x(0, HALF_HORIZON + shoot_offset_)) < fire_thresh_;
+        pitch_solver_->work->x(0, HALF_HORIZON + shoot_offset_));
+  debug_fire_tracking_error = tracking_error;
+  debug_fire_track_ready = tracking_error < fire_thresh_;
+  debug_fire_phase_ready = true;
+
+  bool fire_ready = debug_fire_track_ready;
+  if (target.name == ArmorName::outpost) {
+    // Keep using the nearest board for trajectory continuity in the inter-board gap,
+    // but only allow fire once the selected plate is back in a tight hit phase.
+    debug_fire_phase_limit = resolve_outpost_fire_phase_angle(leaving_angle);
+    debug_fire_phase_ready =
+      std::abs(selection.selected_delta_angle) <= debug_fire_phase_limit;
+    fire_ready = fire_ready && hit_solution.converged && debug_fire_phase_ready;
+  }
+
+  plan.fire = fire_ready;
   return plan;
 }
 
@@ -503,6 +545,7 @@ void Planner::update_debug_selection(const Target & target, const AimSelection &
   debug_center_yaw = selection.center_yaw;
   debug_selected_z_offset = target.armor_z_offset(selection.armor_id);
   debug_selected_aim_z_compensation = resolve_aim_z_compensation(target, selection.armor_id);
+  debug_selected_delta_angle = selection.selected_delta_angle;
   debug_xyza[2] += debug_selected_aim_z_compensation;
   debug_fixed_center_rotation_model = target.fixed_center_rotation_model();
   debug_delta_angle_list = selection.delta_angle_list;

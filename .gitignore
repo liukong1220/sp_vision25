@@ -14,4 +14,6 @@ watchdog.sh
 records_24/
 records_25/
 
+.cmake-build/
+
 assets/demo/*.mp4
