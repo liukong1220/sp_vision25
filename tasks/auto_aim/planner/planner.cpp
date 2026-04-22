@@ -357,9 +357,10 @@ Plan Planner::plan(Target target, double bullet_speed)
   if (target.name == ArmorName::outpost) {
     // Keep using the nearest board for trajectory continuity in the inter-board gap,
     // but only allow fire once the selected plate is back in a tight hit phase.
+    const bool spin_gate_ready = !target.jumped || selection.used_spin_gate;
     debug_fire_phase_limit = resolve_outpost_fire_phase_angle(leaving_angle);
     debug_fire_phase_ready =
-      std::abs(selection.selected_delta_angle) <= debug_fire_phase_limit;
+      spin_gate_ready && std::abs(selection.selected_delta_angle) <= debug_fire_phase_limit;
     fire_ready = fire_ready && hit_solution.converged && debug_fire_phase_ready;
   }
 
