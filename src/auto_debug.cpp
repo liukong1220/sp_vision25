@@ -685,7 +685,12 @@ int main(int argc, char * argv[])
       plot_data["planner_selected_z_offset"] = planner->debug_selected_z_offset;
       plot_data["planner_selected_aim_z_compensation"] =
         planner->debug_selected_aim_z_compensation;
+      plot_data["planner_selected_delta_deg"] = rad2deg(planner->debug_selected_delta_angle);
       plot_data["planner_fixed_model"] = planner->debug_fixed_center_rotation_model ? 1 : 0;
+      plot_data["planner_fire_tracking_error_deg"] = rad2deg(planner->debug_fire_tracking_error);
+      plot_data["planner_fire_phase_limit_deg"] = rad2deg(planner->debug_fire_phase_limit);
+      plot_data["planner_fire_track_ready"] = planner->debug_fire_track_ready ? 1 : 0;
+      plot_data["planner_fire_phase_ready"] = planner->debug_fire_phase_ready ? 1 : 0;
 
       if (current_target.has_value() && current_plan.control) {
         ballistic_diag = build_ballistic_diagnostic(
@@ -870,7 +875,14 @@ int main(int argc, char * argv[])
         web_state["planner"]["selected_z_offset_m"] = current_selected_z_offset;
         web_state["planner"]["selected_aim_z_compensation_m"] =
           current_selected_aim_z_compensation;
+        web_state["planner"]["selected_delta_deg"] = rad2deg(planner->debug_selected_delta_angle);
         web_state["planner"]["fixed_center_rotation_model"] = current_fixed_model;
+        web_state["planner"]["fire_tracking_error_deg"] =
+          rad2deg(planner->debug_fire_tracking_error);
+        web_state["planner"]["fire_phase_limit_deg"] =
+          rad2deg(planner->debug_fire_phase_limit);
+        web_state["planner"]["fire_track_ready"] = planner->debug_fire_track_ready;
+        web_state["planner"]["fire_phase_ready"] = planner->debug_fire_phase_ready;
 
         if (current_target.has_value()) {
           web_state["tracker"]["candidate_count"] = current_target->tracker_debug_candidate_count;

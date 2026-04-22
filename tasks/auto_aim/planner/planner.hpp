@@ -40,6 +40,7 @@ struct AimSelection
   int armor_id = -1;
   bool used_spin_gate = false;
   double center_yaw = 0.0;
+  double selected_delta_angle = 0.0;
   Eigen::Vector4d xyza = Eigen::Vector4d::Zero();
   std::vector<double> delta_angle_list;
 };
@@ -55,10 +56,15 @@ public:
   double debug_center_yaw = 0.0;
   double debug_selected_z_offset = 0.0;
   double debug_selected_aim_z_compensation = 0.0;
+  double debug_selected_delta_angle = 0.0;
   bool debug_fixed_center_rotation_model = false;
   double debug_hit_fly_time = 0.0;
   int debug_hit_iter_count = 0;
   bool debug_hit_converged = false;
+  double debug_fire_tracking_error = 0.0;
+  double debug_fire_phase_limit = 0.0;
+  bool debug_fire_track_ready = false;
+  bool debug_fire_phase_ready = false;
   std::vector<double> debug_delta_angle_list;
   Planner(const std::string & config_path);
 
