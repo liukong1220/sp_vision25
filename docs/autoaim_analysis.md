@@ -17,9 +17,11 @@
 2. 跟踪层：
    这里是前哨站最核心的特化。项目把前哨站建模为 `3` 块装甲板、同一半径、不同高度的旋转目标，并为它写了专用的匹配和状态预测逻辑。
 3. 火控层：
-   项目同时保留了两套火控方案：
-   `Aimer + Shooter` 的普通方案，以及 `Planner(MPC)` 的连续控制方案。
-   前哨站在这两套方案里都复用了通用接口，但 `Planner` 分支现在已经有更完整的前哨站专用窗口、延迟和击打高度补偿。
+   项目同时保留了两套火控思路：
+   传统 `Aimer` 选板/弹道解算，以及 `Planner(MPC)` 的连续控制方案。
+   其中完整的 `Aimer + Shooter` 串联主要出现在 `mt_standard.cpp`、`uav.cpp`、`sentry*.cpp` 这类入口；
+   `standard.cpp` 当前只走到 `Aimer -> CBoard.send(command)`。
+   前哨站在这两套方案里都复用了通用接口，但 `Planner` 分支现在已经有更完整的前哨站专用窗口、延迟、击打高度补偿和开火相位门。
 
 一句话概括：
 
@@ -41,7 +43,6 @@
 - `auto_aim::Solver`
 - `auto_aim::Tracker`
 - `auto_aim::Aimer`
-- `auto_aim::Shooter`
 
 链路形式是：
 
@@ -51,11 +52,14 @@
   -> Solver 解算
   -> Tracker 跟踪
   -> Aimer 计算 yaw/pitch
-  -> Shooter 做击发门控
   -> CBoard 下发
 ```
 
-这个入口更适合学习“传统自瞄火控”。
+要特别注意：
+
+1. `standard.cpp` 虽然实例化了 `Shooter`，但当前没有真正调用 `shooter.shoot()`；
+2. 因此它更适合学习“传统自瞄的最小主链”，而不是完整的传统开火门控链路；
+3. 如果你要看完整的 `Aimer + Shooter` 串联，应该进一步看 `mt_standard.cpp`、`uav.cpp` 或 `sentry*.cpp`。
 
 ### 2.2 `src/standard_mpc.cpp`
 
@@ -88,6 +92,12 @@
 
 如果你主要想理解“前哨站实战调参是怎么落到代码上的”，建议优先看这个入口。
 
+还要补充一条当前实现差异：
+
+1. `standard_mpc.cpp` 使用独立 `plan_thread`；
+2. `auto_aim_debug_mpc.cpp` 当前是在主循环里直接完成 `detect -> track -> plan -> send`，再叠加调试输出；
+3. 所以它们算法主链一致，但线程组织方式并不完全相同。
+
 ### 2.4 三条主链路总览图
 
 ```mermaid
@@ -100,7 +110,6 @@ flowchart TD
     Target[Target / optional Target]
 
     Standard[Aimer]
-    Shooter[Shooter]
     CBoard[io::CBoard]
 
     Planner[Planner MPC]
@@ -115,8 +124,7 @@ flowchart TD
     Tracker --> Target
 
     Target --> Standard
-    Standard --> Shooter
-    Shooter --> CBoard
+    Standard --> CBoard
 
     Target --> Planner
     Planner --> Gimbal
@@ -134,19 +142,22 @@ sequenceDiagram
     participant Solver as auto_aim::Solver
     participant Tracker as auto_aim::Tracker
     participant Aimer as auto_aim::Aimer
-    participant Shooter as auto_aim::Shooter
 
     Cam->>YOLO: read(img, t) / detect(img)
     Board->>Solver: imu_at(t - 1ms)
     Solver->>Tracker: set_R_gimbal2world(q)
     YOLO-->>Tracker: list<Armor>
     Tracker-->>Aimer: list<Target>
-    Aimer-->>Shooter: io::Command(yaw, pitch)
-    Shooter-->>Board: shoot gate
+    Aimer-->>Board: io::Command(yaw, pitch)
     Board->>Board: send(command)
 ```
 
-### 2.6 `standard_mpc.cpp` / `auto_aim_debug_mpc.cpp` 时序图
+说明：
+
+1. 这张图对应的是当前 `standard.cpp` 的真实行为；
+2. 如果你要看 `Aimer + Shooter` 都接上的完整传统链路，请改看 `mt_standard.cpp` 或 `uav/sentry`。
+
+### 2.6 `standard_mpc.cpp` 时序图
 
 ```mermaid
 sequenceDiagram
@@ -171,6 +182,11 @@ sequenceDiagram
         Gimbal->>Gimbal: send(...)
     end
 ```
+
+补充说明：
+
+1. `standard_mpc.cpp` 是“主线程感知 + plan_thread 规划”；
+2. `auto_aim_debug_mpc.cpp` 当前则是“主循环直接 detect -> track -> plan -> send”，只是额外挂了更多调试与网页输出。
 
 ## 3. 共用数据结构与坐标链路
 
@@ -454,9 +470,15 @@ flowchart TD
 
 普通目标在项目里有两套火控。
 
-#### 方案 A：`Aimer + Shooter`
+#### 方案 A：`Aimer` 与 `Shooter`
 
-用于 `src/standard.cpp` 这类入口。
+传统模块能力上，项目仍然保留 `Aimer + Shooter` 这条路线；
+但在入口层要区分：
+
+1. `standard.cpp`
+   当前只走 `Aimer -> cboard.send(command)`；
+2. `mt_standard.cpp`、`uav.cpp`、`sentry*.cpp`
+   才真正把 `Shooter::shoot()` 串在 `Aimer` 后面。
 
 `Aimer::aim()` 的核心逻辑是：
 
@@ -473,13 +495,20 @@ flowchart TD
 2. 小陀螺：
    用 `comming_angle / leaving_angle` 决定哪块板正在进入射击窗口
 
-`Shooter` 则在最后增加一层门控：
+如果入口接了 `Shooter`，它会在最后再增加一层门控：
 
 1. 命令不能突变太大
 2. 当前云台角要接近上一帧命令
 3. `debug_aim_point` 必须有效
 
 这样可以减少“命令刚跳变就误击发”。
+
+但一定要记住：
+
+```text
+模块里存在 Shooter
+不等于 standard.cpp 当前就在用 Shooter
+```
 
 #### 方案 B：`Planner(MPC)`
 
@@ -663,7 +692,11 @@ Aimer 分支的前哨站窗口目前仍然是代码内固定值
 1. 前哨站选板角窗口可单独配置
 2. 前哨站可使用固定专用延迟，而不是走通用高低速延迟切换
 3. 前哨站三块板可以附加单独的击打高度补偿
-4. 调试信息会额外暴露：
+4. 对前哨开火还会额外检查：
+   - 命中时刻固定点迭代是否收敛
+   - 选中板是否进入更紧的相位窗口
+   - 如果已经 `jumped`，是否真的是通过 `spin gate` 选中的板，而不是 fallback 板
+5. 调试信息会额外暴露：
    - 选中局部板号
    - 选中物理板号
    - 原始板高度偏置
@@ -715,8 +748,16 @@ flowchart TD
 | 匹配方式 | 默认近邻 + 角度误差 | 专用 `id + offset` 联合匹配 |
 | 物理板重映射 | 无 | 有 |
 | Aimer 窗口 | 配置 `comming/leaving` | 强制 `70/30` |
-| Planner 窗口 | 通用参数 | 有前哨站专用参数 |
+| Planner 窗口 | 通用参数 | 有前哨站专用参数与相位开火门 |
 | 高度补偿 | 通常靠 `pitch_offset` | 可单独对某块物理板加 `z` 补偿 |
+
+```
+eg运算：
+   outpost_spin_speed_lock ≈ 2.51 rad/s ≈ 144°/s
+   outpost_delay_time ≈ 0.078 s
+   再加上常见飞行时间大约 0.12 ~ 0.18 s
+   总提前时间大约 0.20 ~ 0.26 s，对应相位大约 29° ~ 37°。再加 15° ~ 20° 保险量，coming_angle 落在 45° ~ 57° 很正常，所以你现在的 60° 是讲得通的。
+```
 
 ## 10. 调试与学习时建议重点看的文件
 
@@ -725,6 +766,7 @@ flowchart TD
 ### 10.1 第一步：看入口
 
 - `src/standard.cpp`
+- `src/mt_standard.cpp`
 - `src/standard_mpc.cpp`
 - `src/auto_aim_debug_mpc.cpp`
 
@@ -733,6 +775,7 @@ flowchart TD
 先弄清楚不同入口到底调用的是：
 
 - `Aimer`
+- `Shooter`
 - 还是 `Planner`
 
 否则后面很容易出现“改了参数但根本没生效”的情况。
@@ -799,6 +842,8 @@ flowchart TD
 - 角窗口
 - 固定延迟
 - 板级高度补偿
+- 命中时刻收敛判断
+- 相位开火门
 
 而 `Aimer` 分支目前还没做到这么细。
 
@@ -831,7 +876,7 @@ Planner/Aimer 负责决定“现在该打哪块板、提前多少、压多少 pi
 
 1. 普通装甲板方案的重点是“四板/两板目标建模 + 通用选板 + 通用弹道补偿”。
 2. 前哨站方案的重点是“三板模型 + 板号重映射 + 固定中心旋转 + 专用火控窗口/延迟/高度补偿”。
-3. 如果只是想理解项目结构，`standard.cpp` 足够。
+3. 如果只是想理解最简主链，`standard.cpp` 足够；如果想看传统完整火控，还要补看 `mt_standard.cpp`。
 4. 如果想真正理解当前工程的前哨站打法，应该优先读 `tracker.cpp + target.cpp + planner.cpp + auto_aim_debug_mpc.cpp`。
 
 可以把这份文档当作这几个文件的阅读导航：

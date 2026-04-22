@@ -1,838 +1,1125 @@
-
 # Outpost 识别、跟踪与控制算法解析
 
-以下分析基于/home/ats/awakening仓库代码整理，目标是把项目里与 `outpost` 相关的识别、跟踪、控制链路完整拆开，方便后续做参数整定、算法替换和结构优化。
+以下分析完全基于当前 `/home/aw/sp_vision25` 仓库代码整理，目标是把项目里与 `outpost` 相关的识别、解算、跟踪、控制链路完整拆开，方便后续做参数整定、算法验收和实车定位。
 
 ## 1. 结论先行
 
-当前项目里的 `outpost` 并不是一套完全独立的模块，而是复用了整条自动瞄准链路，只在几个关键位置做了专门建模：
+当前项目里的 `outpost` 不是一套完全独立的新系统，而是在通用自动瞄准链路上做了三层特化：
 
 1. 识别层：
-   `outpost` 主要体现在类别标签上，检测器负责把目标标成 `ArmorClass::OUTPOST` 并输出 4 个角点；检测阶段没有专门的 outpost 几何或旋转预测。
+   `outpost` 首先只是一个 `ArmorName::outpost` 类别，检测结果仍然是 4 个角点的装甲板观测，没有直接输出转轴中心或角速度。
 2. 跟踪层：
-   真正的 outpost 特化在这里。项目把 outpost 视为 `3` 块装甲板组成的旋转目标，使用 11 维状态的 ESEKF，并对运动模型、过程噪声、装甲板高度差、装甲 pitch 角做了专门分支。
+   这里是前哨算法最核心的特化。项目把前哨建模为 `3` 块装甲板、同一半径、不同高度的旋转目标，并为它写了专用的匹配、物理板号重映射、固定中心预测和角速度锁定逻辑。
 3. 控制层：
-   `VeryAimer` 基本沿用通用的弹道解算和轨迹生成，但在装甲板选择逻辑上没有为 outpost 做充分专门化，很多模式会退化成“选当前最正对相机的那块板”。
+   当前项目同时保留 `Aimer` 和 `Planner(MPC)` 两套火控思路。
+   其中前哨相关策略最完整的是 `Planner` 分支：支持前哨独立角窗口、独立延迟、板级高度补偿、命中时刻迭代和开火相位门。
+
+一句话概括当前工程：
+
+```text
+前哨 = 通用检测/解算 + 前哨专用 3 板跟踪 + 火控框架中的前哨专用策略
+普通装甲板 = 通用检测/解算 + 2/4 板目标跟踪 + 通用火控
+```
 
 ## 2. 代码入口与主链路
 
-主运行链路在 `src/runtime/auto_aim.cpp`：
+当前工程自动瞄准主要有三条和前哨强相关的入口。
+
+### 2.1 `src/standard.cpp`
+
+这是普通自瞄入口，使用：
+
+- `io::CBoard`
+- `auto_aim::YOLO`
+- `auto_aim::Solver`
+- `auto_aim::Tracker`
+- `auto_aim::Aimer`
+
+当前这条链路的实际调用是：
 
 ```text
-图像输入
-  -> push_common_frame
-      -> 根据上一帧目标预测 ROI
-  -> ArmorDetector
-      -> 网络检测
-      -> 数字分类
-      -> 灯条颜色分类
-  -> tracker
-      -> 颜色筛选
-      -> ArmorTracker::track
-      -> AutoAimFsmController::update
-  -> solver
-      -> VeryAimer::very_aim
-      -> 下发云台控制/开火建议
+相机图像
+  -> YOLO 检测
+  -> Solver 解算
+  -> Tracker 跟踪
+  -> Aimer 计算 yaw/pitch
+  -> CBoard.send(command)
 ```
 
-关键调用关系：
+要特别注意：
 
-- ROI 预测与裁剪：`src/runtime/auto_aim.cpp:300-338`
-- 检测：`src/runtime/auto_aim.cpp:435-460`
-- 跟踪：`src/runtime/auto_aim.cpp:463-507`
-- 控制求解：`src/runtime/auto_aim.cpp:508-556`
+1. `standard.cpp` 虽然实例化了 `Shooter`，但当前并没有真正调用 `shooter.shoot()`；
+2. 这意味着这条入口主要负责出瞄准角，不是当前项目里前哨验收最完整的分支。
 
-因此，`outpost` 的完整路径是：
+### 2.2 `src/standard_mpc.cpp`
+
+这是 MPC 控制入口，使用：
+
+- `io::Gimbal`
+- `auto_aim::YOLO`
+- `auto_aim::Solver`
+- `auto_aim::Tracker`
+- `auto_aim::Planner`
+
+链路形式是：
 
 ```text
-ArmorInfer 标出 OUTPOST
-  -> ArmorDetector 整理角点/颜色/数字
-  -> ArmorTracker 按 outpost 的 3 板模型建 EKF
-  -> VeryAimer 按预测状态做弹道和轨迹规划
-  -> 输出 yaw/pitch/fire_advice
+感知线程：相机 -> YOLO -> Solver -> Tracker -> Target
+规划线程：Target -> Planner(MPC) -> Gimbal.send(...)
+```
+
+### 2.3 `src/auto_aim_debug_mpc.cpp`
+
+这是最适合做前哨调试和验收的入口。它在 `standard_mpc.cpp` 的基础上额外提供了：
+
+- 网页调试器
+- 弹道诊断面板
+- `planner` 和 `tracker` 内部量可视化
+- 前哨选板、物理板号、命中时刻、相位门、匹配得分等调试量输出
+
+因此，当前工程里 `outpost` 的完整路径可以概括为：
+
+```text
+YOLO / Detector 标出 outpost
+  -> Solver 把 2D 角点解算成 3D 装甲板观测
+  -> Tracker 按前哨 3 板模型跟踪
+  -> Planner 或 Aimer 选择应击打的板
+  -> 输出 yaw / pitch
+  -> 若走 Planner 分支，再额外给出 fire
 ```
 
 ## 3. 识别层解析
 
 ### 3.1 类别定义
 
-装甲板类别定义在 `src/tasks/auto_aim/type.hpp:15`：
+当前项目的装甲板类别定义在 `tasks/auto_aim/armor.hpp`：
 
 ```cpp
-enum class ArmorClass : int { SENTRY = 0, NO1, NO2, NO3, NO4, NO5, OUTPOST, BASE, UNKNOWN };
+enum ArmorName
+{
+  one,
+  two,
+  three,
+  four,
+  five,
+  sentry,
+  outpost,
+  base,
+  not_armor
+};
 ```
 
-`armor_num_by_armor_class()` 在 `src/tasks/auto_aim/type.hpp:154-157` 中把 `OUTPOST` 映射为 `3`，这决定了后续跟踪器会把它当作 3 板旋转体处理。
+同时，`armor_properties` 把前哨明确登记为：
+
+```text
+{blue/red/extinguish, outpost, small}
+```
+
+这意味着当前工程里：
+
+1. 前哨在检测层就是一个 `ArmorName::outpost`
+2. 它在几何模板上按小装甲板处理
 
 ### 3.2 检测器如何识别 outpost
 
-当前配置 `config/omni.yaml` 与 `config/test.yaml` 都使用：
+项目通过 `tasks/auto_aim/yolo.cpp` 统一封装检测器，根据配置里的 `yolo_name` 选择：
+
+- `YOLOV5`
+- `YOLOV8`
+- `YOLO11`
+
+当前主配置 `configs/standard3.yaml` 使用的是：
 
 ```yaml
-armor_detector:
-  armor_infer:
-    model_type: tup
+yolo_name: yolov5
+device: GPU
+use_traditional: true
 ```
 
-对应 `ArmorInfer` 中的 `TUP` 模式：
+也就是说，主链路实际是：
 
-- 输入尺寸：`416 x 416`
-- 输出内容：4 个角点 + 置信度 + 颜色 + 数字类别
-- 类别映射里包含 `ArmorClass::OUTPOST`
+```text
+YOLOV5 网络检测
+  + 可选传统方法二次角点矫正
+```
 
-代码位置：
+以 `tasks/auto_aim/yolos/yolov5.cpp` 为例，网络输出包含：
 
-- `src/tasks/auto_aim/armor_detect/armor_infer.cpp:27-43`
-- `src/tasks/auto_aim/armor_detect/armor_infer.cpp:258-337`
+1. 颜色类别
+2. 编号类别
+3. 4 个角点
+4. 置信度
 
-对于当前项目，网络输出的是装甲板四角点，而不是 outpost 中心、转轴或角速度。
+对前哨来说，识别层输出的仍然只是：
+
+```text
+“这是一块 outpost 装甲板 + 这块板的四角点”
+```
+
+并不会直接给出：
+
+- 前哨转轴中心
+- 三块板的整体编号
+- 角速度
 
 ### 3.3 识别后处理
 
-`ArmorDetector::detect()` 的流程在 `src/tasks/auto_aim/armor_detect/armor_detector.cpp:330-360`：
+`YOLOV5::parse()` 的主要流程是：
 
-1. 对 ROI 做网络推理。
-2. `ArmorInfer::process()` 解码得到 `Armor::net`。
-3. 如果启用数字分类器：
-   截取数字 ROI，做二值化，再用 `mlp.onnx` 分类。
-4. 如果启用颜色分类器：
-   取左右灯条区域，比较 R/B 均值判断颜色。
-5. `armor.tidy()`：
-   把 `net` 结果整合成最终 `Armor`。
-6. 把角点从网络输入尺度映射回原图，再加上 ROI 偏移。
+1. 从网络输出中读取颜色、类别、角点和置信度；
+2. 通过 NMS 过滤重复检测；
+3. 构造 `Armor`；
+4. 用 `check_name()` 过滤 `not_armor` 与低置信度目标；
+5. 用 `check_type()` 检查类别和大小装甲板的一致性；
+6. 如果启用了 `use_traditional`，用 `detector_.detect(*it, bgr_img)` 做角点二次矫正；
+7. 生成归一化中心点 `center_norm`。
 
-与 outpost 直接相关的地方有两处：
+与前哨直接相关的点有三个：
 
-1. 数字分类标签中包含 `OUTPOST`
-   代码在 `src/tasks/auto_aim/armor_detect/armor_detector.cpp:296-299`
-2. `ArmorClass::OUTPOST` 被当作小装甲板
-   `armor_type_by_armor_class()` 只把 `NO1` 当大装甲板，`OUTPOST` 会走 `SimpleSmall`
+1. `outpost` 在类别系统里是合法目标；
+2. `check_type()` 会禁止 `outpost` 走大装甲板类型；
+3. 传统检测器在这里承担的是“角点优化”或独立传统检测，不是前哨专用识别器。
 
 ### 3.4 识别层对 outpost 的真实作用
 
-从工程角度看，检测层对 outpost 的职责只有三件事：
+从工程角度看，检测层对前哨的职责只有三件事：
 
-1. 把目标标成 `OUTPOST`
-2. 给出 4 个稳定角点
-3. 给后续 PnP / EKF 一个可用的装甲板观测
+1. 把目标标成 `ArmorName::outpost`
+2. 给出尽量稳定的四角点
+3. 给后续 `Solver` 和 `Tracker` 提供一块可解算的装甲板观测
 
-也就是说，当前 outpost 的“识别难点”并没有在检测层被单独建模。真正的难点被推给了跟踪层和控制层。
+也就是说，当前工程里前哨的主要难点不在 detector，而在：
+
+1. 3 板几何恢复
+2. 板号与物理高度重映射
+3. 选板与开火时机控制
 
 ## 4. 跟踪层解析
 
 ### 4.1 跟踪器状态机
 
-`ArmorTracker` 的外层跟踪状态机在 `src/tasks/auto_aim/armor_tracker/armor_tracker.cpp:146-186`，状态包括：
+`tasks/auto_aim/tracker.cpp` 的外层状态机包括：
 
-- `LOST`
-- `DETECTING`
-- `TRACKING`
-- `TEMP_LOST`
+- `lost`
+- `detecting`
+- `tracking`
+- `temp_lost`
+- `switching`
 
-逻辑很典型：
+其中前四个是自动瞄准主链路常用状态，`switching` 主要用于全向感知切目标流程。
 
-- 初次看到目标后进入 `DETECTING`
-- 连续命中超过阈值进入 `TRACKING`
-- 短时丢失进入 `TEMP_LOST`
-- 丢失过久回 `LOST`
+基本逻辑是：
+
+1. `lost -> detecting`
+   首次找到可信目标
+2. `detecting -> tracking`
+   连续检测次数达到 `min_detect_count`
+3. `tracking -> temp_lost`
+   当前帧没找到匹配目标
+4. `temp_lost -> lost`
+   临时丢失超过阈值
+
+对前哨还有一个专门差异：
+
+1. `temp_lost` 阈值会切到 `outpost_max_temp_lost_count`
+2. 也就是前哨允许比普通目标更长时间的短暂丢失
 
 ### 4.2 初始化
 
-`ArmorTarget` 构造函数在 `src/tasks/auto_aim/armor_tracker/armor_target.cpp:13-116`。
+`Tracker::set_target()` 会根据装甲板类型构造不同 `Target`：
 
-初始化做了几件关键事：
+1. 平衡步兵：
+   `2` 板模型
+2. 前哨：
+   `3` 板模型
+3. 基地：
+   `3` 板模型
+4. 其他普通目标：
+   `4` 板模型
 
-1. 使用角点 + 相机内参做 `solvePnP(IPPE)`，得到当前装甲板在相机坐标系下的 pose。
-2. 变换到 `odom` 坐标系。
-3. 从当前观测装甲板反推旋转中心 `(cx, cy, cz)`。
-4. 设定不同目标类型的初始协方差 `P0` 和初始半径 `r_pre`。
+对前哨的初始化参数是：
 
-对 outpost 的专门初始化：
+```text
+P0 diag = [1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0]
+radius = outpost_radius
+armor_num = 3
+armor_z_offsets = outpost_armor_z_offsets
+fixed_center_rotation_model = outpost_fixed_center_rotation_model
+spin_speed_lock = outpost_spin_speed_lock
+```
 
-- `P0`：
-  `diag = [1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0.1, 0.1]`
-- `r_pre = 0.2765`
+默认主配置 `configs/standard3.yaml` 中对应的是：
 
-对应代码：
-
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:30-33`
+```yaml
+outpost_radius: 0.2765
+outpost_armor_z_offsets: [0.0, -0.102, 0.102]
+outpost_fixed_center_rotation_model: true
+outpost_spin_speed_lock: 2.51
+```
 
 ### 4.3 状态定义
 
-当前实际使用的是 `motion_model_point.hpp` 里的模型，命名空间为 `awakening::armor_point_motion_model`。
-
-状态维度：
+`Target` 内部使用统一的 11 维 EKF 状态：
 
 ```text
-x = [cx, vcx, cy, vcy, cz, vcz, yaw, vyaw, r, p1, p2]^T
+x = [cx, vcx, cy, vcy, cz, vcz, yaw, vyaw, r, l, h]
 ```
 
-代码位置：
+含义如下：
 
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:17-28`
-
-其中：
-
-- `cx, cy, cz`：目标旋转中心位置
+- `cx, cy, cz`：旋转中心位置
 - `vcx, vcy, vcz`：中心速度
 - `yaw`：参考装甲板相位
 - `vyaw`：角速度
 - `r`：基础半径
-- 对普通四板目标：
-  `p1 = l`，`p2 = h`
-- 对 outpost：
-  `p1 = outpost01DZ`，`p2 = outpost02DZ`
+- `l, h`：
+  对普通 4 板目标表示长短半径差和高度差
 
-也就是说，这个模型是“通用底盘模型”和“outpost 三板模型”复用同一个 11 维状态，只是最后两个维度的物理意义不同。
+对前哨要特别注意：
+
+1. 当前前哨仍然复用这套 11 维状态接口；
+2. 但三块板的真实高度关系，主要不是靠 `h` 建模，而是靠 `outpost_armor_z_offsets`；
+3. 也就是说，前哨在状态向量上“共用外形”，在几何解释上“走专门分支”。
 
 ### 4.4 outpost 的装甲板几何建模
 
-装甲板 `id` 对应的 pose 由 `Measure::armor_pose()` 给出，代码在：
-
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:228-247`
-
-核心公式如下。
-
-装甲板相位：
+`Target::h_armor_xyz()` 里，普通 4 板目标采用：
 
 ```text
-yaw_i = yaw + id * 2pi / armor_num
+偶数板：半径 r，高度 cz
+奇数板：半径 r + l，高度 cz + h
 ```
 
-其中 outpost 有：
+而前哨由于 `armor_num = 3`，不会进入 `use_l_h` 分支，所以它的三块板几何是：
 
 ```text
-armor_num = 3
+x_i = cx - r * cos(yaw_i)
+y_i = cy - r * sin(yaw_i)
+z_i = cz + armor_z_offset(i)
+yaw_i = yaw + i * 2pi / 3
 ```
 
-装甲板平面位置：
+这里的关键点有两个：
+
+1. 三块板共用同一个旋转半径 `r`
+2. 三块板的高度差来自 `armor_z_offset(i)`，而不是状态里的 `h`
+
+更进一步，前哨还引入了：
 
 ```text
-ax = cx - r_i * cos(yaw_i)
-ay = cy - r_i * sin(yaw_i)
+local armor id
+vs
+physical armor id
 ```
 
-对 outpost：
+对应接口是：
 
-```text
-r_i = r
-z_0 = cz
-z_1 = cz + dz1
-z_2 = cz + dz2
-```
+- `physical_armor_id()`
+- `set_armor_id_offset()`
+- `armor_z_offset()`
 
-对普通四板目标：
+这样做的目的，是把：
 
-```text
-偶数板: r_i = r,     z_i = cz
-奇数板: r_i = r + l, z_i = cz + h
-```
+1. “当前几何顺序中的第几块板”
+2. “真实物理上高板/低板是哪一块”
 
-这说明项目对 outpost 的建模假设是：
-
-1. 三块装甲板在水平面上等角间隔 `120°`
-2. 三块板使用同一个旋转半径 `r`
-3. 三块板允许不同高度，但只显式建两个高度偏移量 `dz1/dz2`
+这两件事分开处理。
 
 ### 4.5 outpost 的姿态建模
 
-在观测模型里，装甲板的 pitch 会按目标类型切换：
+当前工程里，前哨与普通装甲板最重要的姿态差异发生在 `Solver::reproject_armor()`：
 
 ```text
 outpost      -> pitch = -15°
 普通装甲板   -> pitch = +15°
 ```
 
-代码位置：
+这不是 EKF 状态里单独估计的 pitch，而是重投影和 yaw 优化时的几何假设。
 
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:174-181`
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:276-299`
-- `src/tasks/auto_aim/armor_tracker/armor_tracker.cpp:294-310`
+它会直接影响：
 
-这一步非常关键，因为投影模型和 PnP 初始化都默认装甲板不是纯竖直，而是带固定 pitch 倾角。对于 outpost，这个倾角方向和普通装甲板相反。
+1. 重投影误差
+2. tracker 匹配质量
+3. 板位空间估计
+
+因此，当前工程里前哨并不是“普通小装甲板换个标签”这么简单，至少从重投影几何开始就已经分叉。
 
 ### 4.6 预测模型
 
-预测模型定义在 `Predict` 中，代码在：
+`Target::predict()` 中，前哨有两种工作模式。
 
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:47-91`
+#### 模式 A：固定中心旋转模型
 
-支持 3 种模型：
+当 `outpost_fixed_center_rotation_model=true` 时：
 
-- `CONSTANT_VELOCITY`
-- `CONSTANT_ROTATION`
-- `CONSTANT_VEL_ROT`
+1. `vx, vy, vz` 会被压回 `0`
+2. 中心默认不平移
+3. 只保留 `yaw += vyaw * dt`
+4. 过程噪声采用一组比普通目标更小的固定值
 
-真正给 outpost 使用的是：
+这等价于假设：
 
-```cpp
-MotionModel::CONSTANT_ROTATION
+```text
+前哨主要绕固定中心转，而不是像车体那样在平面上机动
 ```
 
-对应代码：
+#### 模式 B：普通常速度模型
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:227-235`
+如果关闭固定中心模型，就退回统一常速度 EKF 预测。
 
-其含义是：
+此外，前哨还有一个关键逻辑：
 
-1. 中心位置不按速度积分更新
-2. 线速度项会被直接清零
-3. `yaw` 按 `vyaw` 积分更新
+1. 当目标已经收敛；
+2. 且目标是前哨；
+3. 且 `|vyaw| > 2`
 
-也就是把 outpost 当作“中心近似固定，只绕中心旋转”的目标。
+就会把角速度锁到：
 
-这个假设对前哨站非常合理，也是当前项目里最像“专门算法”的一部分。
+```text
++outpost_spin_speed_lock 或 -outpost_spin_speed_lock
+```
+
+这可以抑制前哨角速度估计在稳定跟踪后继续漂动。
 
 ### 4.7 过程噪声
 
-`ArmorTarget::process_noise()` 在 `src/tasks/auto_aim/armor_tracker/armor_target.cpp:128-170`。
+当前工程里，前哨过程噪声不是旧项目里的一组 `qxyz_outpost / qyaw_output / q_outpost_dz` 风格参数，而是写在 `Target::predict()` 里的两套实现。
 
-outpost 使用专门的过程噪声参数：
+对前哨：
 
-- `qxyz_output`
-- `qyaw_output`
-- `q_outpost_dz`
+1. 如果走固定中心模型，过程噪声直接硬编码为一组很小的对角项；
+2. 如果走普通常速度模型，则使用：
+   `v1 = 10`
+   `v2 = 0.1`
 
-配置位置：
+对普通目标：
 
-- `config/omni.yaml:72-94`
-- `config/test.yaml:72-94`
-
-含义如下：
-
-1. `qxyz_output`
-   outpost 旋转中心位置噪声
-2. `qyaw_output`
-   outpost 角加速度噪声
-3. `q_outpost_dz`
-   两个高度偏移量 `dz1/dz2` 的过程噪声
-
-注意这里的命名里 `output` 实际上指的是 outpost，而不是输出量。
-
-当前配置：
-
-```yaml
-qxyz_output: [10.0, 10.0, 0.5]
-qyaw_output: 0.01
-q_outpost_dz: 0.5
+```text
+v1 = 100
+v2 = 400
 ```
 
-这组参数体现出设计者的意图：
+这说明当前工程的设计倾向非常明确：
 
-- 相信 outpost 旋转中心比较稳定
-- 强烈相信 outpost 角速度变化不大
-- 允许高度偏移量有一定自由度
+1. 相信前哨中心比普通车更稳定
+2. 相信前哨角速度变化远小于普通小陀螺目标
 
 ### 4.8 观测模型
 
-当前项目并没有用“yaw / pitch / distance”的低维观测，而是直接用 4 个角点的像素坐标作为 8 维观测：
+`Target::update_ypda()` 的观测量是：
 
 ```text
-z = [lt_x, lt_y, lb_x, lb_y, rb_x, rb_y, rt_x, rt_y]^T
+z = [yaw_los, pitch_los, distance, armor_yaw]
 ```
 
-代码位置：
+其中：
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:172-184`
-- `src/tasks/auto_aim/armor_tracker/motion_model_point.hpp:167-215`
+1. `yaw_los / pitch_los / distance` 来自 `armor.ypd_in_world`
+2. `armor_yaw` 来自 `armor.ypr_in_world[0]`
 
-观测生成过程：
+当前工程里观测噪声不是固定常数，而是经验相关项：
 
-1. 根据状态 `x` 生成指定 `id` 装甲板在 `odom` 中的 pose
-2. 变换到 `camera_cv`
-3. 使用相机内参、畸变系数做投影
-4. 得到 4 个角点像素位置
+```text
+R_dig = [
+  4e-3,
+  4e-3,
+  log(|delta_angle| + 1) + 1,
+  log(|distance| + 1) / 200 + 9e-2
+]
+```
 
-这种建模的优点是：
+这意味着：
 
-1. 比直接用中心点更充分利用了角点几何信息
-2. 更适合 outpost 这种姿态变化明显的目标
-3. 可以把固定 pitch 倾角和相机畸变一起纳入观测方程
+1. 前两项角度观测给固定噪声；
+2. 距离噪声会随板相位偏角变化；
+3. 装甲板 yaw 观测噪声会随距离变化。
+
+从工程上看，这是一种“轻量自适应”的经验建模，不是旧文档里的单独前哨量测噪声参数化。
 
 ### 4.9 匹配与门控
 
-匹配逻辑在 `ArmorTarget::match()`：
+这里是当前工程里前哨最专门化的部分。
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:275-354`
+普通目标的更新方式更简单：
 
-做法是：
+1. 先预测 `target_`
+2. 找到同名同类型候选
+3. `solver.solve()`
+4. 调 `target_.update(armor)`，由默认就近关联完成匹配
 
-1. 对每个观测装甲板 `j`
-2. 对每个假设装甲板 `id`
-3. 用当前 EKF 状态预测对应的 8 维角点观测 `z_pred`
-4. 计算残差 `nu = z_meas - z_pred`
-5. 用 `R` 计算 Mahalanobis 距离 `d2`
-6. 小于 `match_gate` 的保留
-7. 再做一次贪心分配
-
-当前观测噪声是固定对角阵：
+前哨则不会直接走这条路，而是先执行：
 
 ```text
-R = diag(r_uv, r_uv, ..., r_uv)
+select_best_outpost_match()
 ```
 
-代码位置：
+它会同时枚举：
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:117-127`
+1. 当前局部板号 `id`
+2. 物理板号偏移 `offset`
 
-当前配置：
+对每种组合计算综合代价，代价项包括：
 
-```yaml
-r_uv: 50.0
-match_gate: 1000.0
+1. 重投影误差
+2. 视线 yaw 误差
+3. pitch 误差
+4. 距离误差
+5. 装甲板 yaw 误差
+6. xy 位置误差
+7. z 位置误差
+8. 与上一帧 `id`、`offset` 的连续性惩罚
+
+然后再用 `accept_outpost_match()` 做门限筛选：
+
+```text
+reprojection_error < 90 px
+xy_error < 0.40 m
+z_error < 0.20 m
+score < 36
 ```
+
+只有通过筛选后，才会：
+
+1. `set_armor_id_offset(best_match.offset, target_.last_id)`
+2. `target_.update(*best_match.armor_it, best_match.id)`
+
+这一步把：
+
+1. 哪块局部板被看到
+2. 当前物理高低板映射关系
+
+放到了同一个匹配框架里统一求解。
 
 ### 4.10 ROI 预测
 
-`ArmorTarget::expanded_one_one()` 在：
+当前工程没有旧项目里那种“根据上一帧目标预测自适应 ROI”的单独前哨策略。
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:355-468`
+目前实际生效的是 YOLO 分支里的静态 ROI：
 
-它会把目标中心附近的一个 3D 正方体投影到图像上，得到下一帧检测 ROI。
+- `use_roi`
+- `roi.x`
+- `roi.y`
+- `roi.width`
+- `roi.height`
 
-这对 outpost 也生效，因为 outpost 的中心和半径来自同一个 EKF 状态。好处是：
+它由配置和运行时参数共同控制，属于检测加速手段，不是 tracker 驱动的目标预测 ROI。
 
-1. 跟踪稳定后可以缩小检测范围
-2. 降低误检
-3. 提升推理速度
+因此，这一版工程里前哨 ROI 的主要特点是：
+
+1. 可以配置
+2. 可以热更新
+3. 但不是按目标状态动态滑窗
 
 ## 5. 控制层解析
 
 ### 5.1 控制入口
 
-控制入口是：
+当前工程有两套自动瞄准控制入口。
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:600-836`
+#### 入口 A：`Aimer`
 
-执行顺序大致如下：
+主要在：
 
-1. 选一块当前较合适的装甲板
-2. 估计飞行时间
-3. 预测目标到子弹到达时刻
-4. 重新选板并计算目标控制点
-5. 在采样窗口内生成一串离散控制点
-6. 用五次多项式约束加速度，生成平滑轨迹
-7. 计算当前应发给云台的 yaw/pitch、速度、加速度
-8. 计算开火允许窗口 `fire_advice`
+- `src/standard.cpp`
+- `src/uav.cpp`
+- `src/sentry.cpp`
+
+这条链路以“单次求 yaw/pitch”为主，更接近传统火控。
+
+#### 入口 B：`Planner(MPC)`
+
+主要在：
+
+- `src/standard_mpc.cpp`
+- `src/auto_aim_debug_mpc.cpp`
+- `src/auto_debug.cpp`
+
+这条链路会：
+
+1. 构造未来参考轨迹
+2. 分别对 yaw / pitch 解 MPC
+3. 同时输出位置、速度、加速度和 `fire`
+
+对前哨来说，这一分支明显更完整。
 
 ### 5.2 弹道求解
 
-`BallisticTrajectory` 在 `src/tasks/base/ballistic_trajectory.hpp`。
+两套方案都基于 `tools::Trajectory` 做弹道解算，但用法不同。
 
-这里使用的是带阻力的一维近似模型：
+#### `Aimer`
 
-```text
-t = (exp(r * distance) - 1) / (r * v0 * cos(theta))
-y = v0 * sin(theta) * t - 0.5 * g * t^2
-```
+`Aimer::aim()` 的流程是：
 
-控制层分别会求：
+1. 按 `decision_speed` 选择高低速延迟；
+2. 预测目标到当前决策时刻；
+3. 用 `choose_aim_point()` 选板；
+4. 用 `tools::Trajectory` 计算飞行时间；
+5. 最多做 10 次“预测到命中时刻 -> 重选板 -> 重算飞行时间”的迭代；
+6. 输出最终 yaw / pitch。
 
-- `solve_pitch()`
-- `solve_flytime()`
+#### `Planner`
 
-这意味着 outpost 的控制不是纯视觉角度控制，而是已经包含了飞行时间补偿。
+`Planner::plan()` 的流程是：
+
+1. 先按 `delay_time` 预测到当前决策时刻；
+2. 用 `solve_hit_target()` 做“选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板”的固定点迭代；
+3. 以命中时刻目标为基准生成控制轨迹；
+4. 再解 MPC。
+
+当前实现里：
+
+1. `Aimer` 更像“单次求解 + 轻量迭代”
+2. `Planner` 更像“命中时刻求解 + 连续控制”
 
 ### 5.3 装甲板选择策略
 
-`select_armor()` 在：
+#### `Aimer::choose_aim_point()`
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:448-548`
+当前逻辑是：
 
-它首先计算每块板相对于目标中心朝向的相位偏差：
+1. 如果 `target.jumped == false`，直接打当前板；
+2. 非小陀螺时，只在 `60°` 可见角内选板，并尽量锁住 `lock_id_`；
+3. 小陀螺时，用 `comming_angle / leaving_angle` 选“正在进入窗口”的板；
+4. 如果窗口内没有合适候选，退化为 `fallback_to_closest()`。
+
+对前哨，`Aimer` 还有一个现状：
 
 ```text
-delta_i = normalize(armor_yaw_i - center_yaw)
+前哨被强制视为 spin gate 目标
+coming/leaving 角仍然写死为 70° / 30°
 ```
 
-然后按不同 FSM 模式选板。
+也就是说，`Aimer` 分支里的前哨窗口目前还是硬编码。
 
-但要注意，代码里明确把 outpost 排除在部分逻辑之外：
+#### `Planner::choose_aim_selection()`
 
-```cpp
-if (auto_aim_fsm == AIM_SINGLE_ARMOR
-    && target.target_number != ArmorClass::OUTPOST)
-```
+`Planner` 的选板逻辑和 `Aimer` 框架相似，但更完整：
 
-以及：
+1. 仍然区分“未 jump”和“已 jump”
+2. 仍然支持正常可见角选板和 spin gate 选板
+3. 前哨窗口来自：
+   `outpost_comming_angle`
+   `outpost_leaving_angle`
+4. 选板不是只看当前时刻，而是会进入命中时刻固定点迭代
 
-```cpp
-if (auto_aim_fsm == AIM_WHOLE_CAR_PAIR
-    && target.target_number != ArmorClass::OUTPOST)
-```
-
-这意味着：
-
-1. outpost 不走“单板锁定”专用逻辑
-2. outpost 不走“双板 pair”逻辑
-3. 大多数情况下会退化成“在所有板里选 `|delta_i|` 最小的那块”
-
-从效果上说，就是：当前 outpost 更像“选当前最正脸的一块板”，而不是“按未来过中线时刻选择将被击中的那块板”。
+因此，当前工程里前哨“未来命中板选择”真正落地的是 `Planner` 分支，而不是 `Aimer` 分支。
 
 ### 5.4 控制点生成
 
-`get_control_point()` 在：
+#### `Aimer`
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:549-575`
+`Aimer` 最终只输出一个命中点对应的：
 
-对选中的装甲板：
+- `yaw`
+- `pitch`
 
-1. 用 `(x, y, z)` 算水平偏航 `control_yaw`
-2. 用弹道模型解俯仰 `pitch`
-3. 记录 `aim_point`
-4. 保存装甲板法向与视线之间的夹角 `d_angle`
+没有显式轨迹，也没有前哨板级高度补偿接口。
 
-其中：
+#### `Planner`
+
+`Planner` 在求控制点时，会先通过：
 
 ```text
-d_angle = shortest_angular_distance(control_yaw, armor_yaw)
+resolve_aim_xyz()
 ```
 
-这个量后面会用于缩放开火窗口，因为越是侧着的装甲板，等效可打宽度越小。
+把选中的板中心位置取出来，再叠加：
+
+```text
+outpost_fire_z_compensation[physical_armor_id]
+```
+
+也就是说，当前前哨在 `Planner` 分支里可以做到：
+
+1. 选中不同物理板
+2. 对不同物理板加不同的额外击打高度补偿
+
+这是当前工程相对完整的一项前哨专用火控能力。
 
 ### 5.5 轨迹生成与限加速度
 
-`VeryAimer` 并不是只给一个目标角，而是会在前后一个采样窗口内生成控制轨迹：
+这一节主要对应 `Planner`。
 
-- `sample_total_time = 2.0`
-- `sample_horizon = 500`
+`Planner::get_trajectory()` 会：
 
-配置位置：
+1. 把目标从当前时刻回滚到轨迹起点；
+2. 逐步向前预测；
+3. 每一帧重新求 `yaw/pitch`；
+4. 生成未来 `HORIZON` 长度的参考轨迹；
+5. 如果切板造成的 `yaw_acc` 尖峰过大，就做一次轻量抑制。
 
-- `config/omni.yaml:106-136`
-- `config/test.yaml:106-136`
+随后：
 
-生成方法：
+1. yaw 和 pitch 分别进入 `TinyMPC`
+2. 最大角加速度由：
+   `max_yaw_acc`
+   `max_pitch_acc`
+   约束
 
-1. 在 `[-1s, +1s]` 附近采样多个时刻
-2. 每个时刻都预测目标状态
-3. 每个时刻都重新选板并求控制点
-4. 用五次多项式连接相邻点
-5. 如果某段角加速度过大，就自动扩展拼接区间
+因此，当前前哨控制不是简单的“算一个角度打过去”，而是已经包含：
 
-核心代码：
-
-- 轨迹段与限加速度：`src/tasks/auto_aim/armor_control/very_aimer.cpp:55-407`
-- 构建采样轨迹：`src/tasks/auto_aim/armor_control/very_aimer.cpp:638-749`
-
-这部分设计对于 outpost 的价值很大，因为 outpost 本质上是高速周期目标，单点命令容易抖动，轨迹式控制更稳。
+1. 飞行时间补偿
+2. 连续轨迹参考
+3. 控制输入限幅
 
 ### 5.6 开火门控
 
-开火逻辑在：
+这部分必须按入口区分。
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:775-833`
+#### `standard.cpp`
 
-思路是：
+当前 `standard.cpp` 里虽然创建了 `Shooter`，但没有真正调用 `shooter.shoot()`。
 
-1. 根据目标距离和装甲板宽高，计算可接受的 yaw / pitch 误差窗口
-2. 再乘以姿态因子
-   - `yaw_factor = cos(d_angle)`
-   - `pitch_factor = cos(15°)`
-3. 比较“控制轨迹当前角度”和“目标轨迹当前角度”的偏差
-4. 如果偏差在窗口内，则允许开火
+因此这条链路的现状是：
 
-这套逻辑对 outpost 同样适用，但因为 outpost 旋转快，最终效果高度依赖：
+1. `Aimer` 输出 `Command`
+2. 直接 `cboard.send(command)`
+3. 不存在当前入口内额外的前哨专用开火门
 
-1. 飞行时间估计是否准确
-2. 选板是否面向未来时刻而不是当前时刻
-3. 控制延迟是否建模准确
+#### `uav/sentry` 等分支
+
+这些入口会调用 `Shooter::shoot()`，其门控条件主要是：
+
+1. 当前命令不能突变太大
+2. 当前云台角要接近上一帧命令
+3. `aimer.debug_aim_point.valid == true`
+
+它是通用门控，不是前哨专用相位门。
+
+#### `Planner`
+
+当前 `Planner` 分支对前哨已经有更完整的开火门控：
+
+1. 先计算轨迹跟踪误差 `tracking_error`
+2. 普通目标只看 `tracking_error < fire_thresh`
+3. 前哨目标还必须同时满足：
+   - `hit_solution.converged == true`
+   - 选中板命中时刻的相位角落入更紧的击打窗口
+   - 如果目标已经 `jumped`，则必须是真正通过 `spin gate` 选中的板，而不是 fallback 板
+
+当前前哨击打窗口的推导规则是：
+
+```text
+fire_phase_limit =
+  clamp(outpost_leaving_angle * 0.5, 4°, 12°)
+  再限制不超过 outpost_leaving_angle 本身
+```
+
+这意味着当前工程已经显式区分：
+
+1. 控制参考连续性
+2. 实际是否允许开火
 
 ## 6. outpost 专用逻辑总结
 
-把所有 outpost 特化点汇总起来，当前项目对 outpost 的处理可以概括成：
-
 ### 6.1 感知层
 
-1. 网络类别中有 `OUTPOST`
-2. 数字分类器中有 `OUTPOST`
-3. 装甲板按小装甲板尺寸建模
+当前工程对前哨在感知层的特化主要是：
+
+1. 网络类别里有 `outpost`
+2. `outpost` 被定义为小装甲板
+3. 可以使用 YOLO + 传统角点二次矫正
+
+但没有：
+
+1. 独立前哨 detector
+2. 直接输出整体转轴或相位的识别器
 
 ### 6.2 几何层
 
-1. outpost 共有 3 块板
-2. 三块板角间隔固定为 `120°`
-3. 三块板共享基础半径 `r`
-4. 三块板允许不同高度：`cz / cz + dz1 / cz + dz2`
-5. 装甲板固定 pitch 为 `-15°`
+当前工程对前哨的几何特化包括：
+
+1. 3 板模型
+2. 同一半径 `r`
+3. 三板高度由 `outpost_armor_z_offsets` 给出
+4. 重投影时使用 `-15°` pitch 假设
+5. 通过 `physical armor id` 管理真实高低板
 
 ### 6.3 动力学层
 
-1. 使用 `CONSTANT_ROTATION`
-2. 线速度直接衰减为 0
-3. 只保留中心近似固定、相位持续变化
-4. 使用更小的 `qyaw_output`
+当前工程对前哨的动力学特化包括：
+
+1. 可选固定中心旋转模型
+2. 收敛后的角速度锁
+3. 单独更大的 `temp_lost` 容忍
+4. 专用 `id + offset` 联合匹配
 
 ### 6.4 控制层
 
-1. 复用通用弹道与轨迹控制
-2. 没有独立的 outpost 相位控制器
-3. 很多模式最终退化成最小 `|delta|` 选板
+当前工程对前哨的控制特化主要集中在 `Planner`：
+
+1. 前哨独立 `coming/leaving` 角窗口
+2. 前哨独立 `delay_time`
+3. 前哨板级 `z` 补偿
+4. 命中时刻固定点迭代
+5. 前哨专用开火相位门
+
+相对而言，`Aimer` 分支对前哨的支持仍然偏简化。
 
 ## 7. 当前实现中值得优先关注的问题
 
-下面这些点我建议优先处理，因为它们会直接影响 outpost 命中率。
+下面这些点是当前工程里仍然值得重点关注的风险，它们不一定都是“错误”，但都可能直接影响前哨验收结果。
 
-### 7.1 部分灯条观测逻辑实际上没有生效
+### 7.1 `Aimer` 与 `Planner` 的前哨策略并不一致
 
-在 `ArmorTarget::update()` 中先计算了 `MeasureType mt`：
+当前 `Aimer` 分支和 `Planner` 分支对前哨的支持程度不一样：
 
-- 只看到左灯条时想用 `L_LIGHT`
-- 只看到右灯条时想用 `R_LIGHT`
+1. `Aimer` 仍然使用硬编码 `70° / 30°`
+2. `Aimer` 没有板级 `z` 补偿
+3. `Aimer` 没有当前 `Planner` 这套更严格的前哨相位开火门
 
-代码位置：
+因此，如果实车主要用的是 `Planner`，就不能再沿用旧的 `Aimer` 经验去理解问题。
 
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:248-257`
+### 7.2 `standard.cpp` 入口当前并不代表完整前哨火控能力
 
-但后面真正更新时调用的是：
-
-```cpp
-auto measurement = get_measurement(armor);
-target_state.x = esekf.update(measurement);
-```
-
-而不是：
-
-```cpp
-get_measurement(armor, z_pred, mt)
-```
-
-对应代码：
-
-- `src/tasks/auto_aim/armor_tracker/armor_target.cpp:265-270`
+当前 `standard.cpp` 没有真正接入 `Shooter::shoot()`。
 
 这意味着：
 
-1. `L_LIGHT / R_LIGHT` 只是算了但没用
-2. 遮挡半板时并没有真正退化成部分观测更新
-3. outpost 在高速旋转、边缘出视野、灯条缺失时更容易丢失
+1. 这条入口更像“出瞄准角”
+2. 不是当前前哨击发逻辑最完整的验收入口
+3. 如果把这条入口和 `auto_aim_debug_mpc` 的表现混着看，很容易误判问题来源
 
-### 7.2 飞行时间“迭代预测”没有真正迭代
+### 7.3 `Planner` 的开火效果仍高度依赖 `outpost_delay_time`
 
-`VeryAimer::very_aim()` 中看起来想做飞行时间迭代：
+当前前哨在 `Planner` 分支里虽然已经有：
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:612-625`
+1. 命中时刻迭代
+2. 相位门
+3. convergence 门
 
-但循环里只计算了 `iter_fly_time`，没有回写给 `prev_fly_time`：
+但如果 `outpost_delay_time` 偏差较大，仍然会出现：
 
-```cpp
-double prev_fly_time = ...
-for (...) {
-    ...
-    double iter_fly_time = ...
-}
-const double predict_time = prev_fly_time + ...
-```
+1. 总体偏早
+2. 总体偏晚
+3. 相位门长期不过
 
-结果是：
+所以这仍然是实车验收中最敏感的参数之一。
 
-1. 预测时刻只用了第一次粗略飞行时间
-2. 没有形成“预测 -> 重选板 -> 重估飞行时间 -> 再预测”的闭环
-3. 对 outpost 这种高速旋转目标会更伤
+### 7.4 前哨匹配门限仍然是硬编码经验值
 
-### 7.3 `fire_advice` 存在角度单位混用风险
+`select_best_outpost_match()` 和 `accept_outpost_match()` 的门限当前写在代码里，不是运行时参数。
 
-代码中先把允许误差转成了角度制：
+这意味着：
 
-```cpp
-cmd.enable_yaw_diff = angles::to_degrees(enable_diff.first);
-cmd.enable_pitch_diff = angles::to_degrees(enable_diff.second);
-```
+1. 远距离
+2. 画面边缘
+3. 角点退化
 
-但紧接着又拿弧度结果去和它比较：
+这几种工况下，如果需要放宽或收紧门限，就必须改代码，而不能只靠网页调参。
 
-```cpp
-abs(shortest_angular_distance(rad, rad)) < cmd.enable_yaw_diff
-```
+### 7.5 `outpost_armor_z_offsets` 与 `outpost_fire_z_compensation` 必须配套看
 
-位置：
+这两个量解决的是不同问题：
 
-- `src/tasks/auto_aim/armor_control/very_aimer.cpp:803-815`
+1. `outpost_armor_z_offsets`
+   描述几何模型里三块板本身的真实高度关系
+2. `outpost_fire_z_compensation`
+   描述火控层额外补偿给某块物理板的击打高度修正
 
-这会导致：
+如果它们混用，现场就容易出现：
 
-1. 判断式左侧是弧度
-2. 右侧是角度数值
-3. 窗口被放大约 57.3 倍
+1. tracker 看起来稳定
+2. planner 选板也对
+3. 但实际总打高或打低
 
-虽然延迟校验分支里又用了弧度版本，但当前帧 `cmd.fire_advice` 本身还是有单位不一致问题。
+### 7.6 初始阶段仍然更相信“当前看到的这块板”
 
-### 7.4 outpost 没有专门的“未来命中板选择”策略
+当前无论是 `Aimer` 还是 `Planner`，在 `target.jumped == false` 时都更相信当前观测板。
 
-当前 outpost 选板大多基于“此刻最正对相机的板”，而不是“子弹到达时最接近准线的板”。
+这是合理的，但也意味着：
 
-对于 outpost，更合理的策略通常是：
+1. 前哨刚建链时，相位是“当前板优先”
+2. 如果初始化板本身就带较大观测误差，第一段参考可能仍然偏
 
-1. 用 `t_hit = fly_time + control_delay + prediction_delay`
-2. 预测每块板在 `t_hit` 时刻的相位
-3. 选未来最接近准线的板
-4. 若旋转很快，则直接进入“过中心开火”或“固定相位窗口开火”
+### 7.7 文档验收时要区分“算法问题”和“入口问题”
 
-当前代码里虽然有时间预测和轨迹规划，但 `select_armor()` 本身还不是基于 `t_hit` 的相位最优选择器。
+当前工程里前哨相关表现至少会同时受到三类因素影响：
 
-### 7.5 outpost 的高度偏移量是自由随机游走，缺少物理约束
+1. 跟踪是否稳
+2. 当前实际跑的是 `Aimer` 还是 `Planner`
+3. 当前入口有没有把开火门真正接进去
 
-当前模型里：
-
-```text
-z_0 = cz
-z_1 = cz + dz1
-z_2 = cz + dz2
-```
-
-并且 `dz1 / dz2` 只走随机游走噪声，没有额外约束。
-
-这会带来两个风险：
-
-1. 长时间跟踪后高度偏移可能漂移
-2. 三块板之间的几何关系不够“刚”
-
-如果你后续发现 outpost 俯仰抖动明显，这里很值得改。
-
-### 7.6 outpost 初始目标选择过于粗糙
-
-`init_target()` 只是取第一个“不是 NONE / PURPLE”的装甲板作为初始化目标：
-
-- `src/tasks/auto_aim/armor_tracker/armor_tracker.cpp:71-90`
-
-没有按以下因素做排序：
-
-1. 置信度
-2. 与上一 ROI 中心距离
-3. PnP 重投影误差
-4. 是否更像前哨站的角点结构
-
-这会让 outpost 初始相位和中心解算更容易跳。
-
-### 7.7 数字分类标签映射建议核对
-
-代码里的 `label_map` 只有 8 类：
-
-- `src/tasks/auto_aim/armor_detect/armor_detector.cpp:296-299`
-
-但 `model/label.txt` 有 9 行，包含 `negative`：
-
-- `model/label.txt:1-9`
-
-这不一定一定有错，但建议确认：
-
-1. `mlp.onnx` 的输出维度到底是 8 还是 9
-2. 若有 `negative` 类，当前代码是否会把它吞成 `UNKNOWN`
-3. outpost 和哨兵之间是否存在混淆
+因此，文档和实车验收时一定要先确认运行入口，再谈算法效果。
 
 ## 8. 面向 outpost 的优化建议
 
-下面给一版我认为更适合你当前工程结构的优化路线。
+### 8.1 第一优先级：先用 `Planner` 分支做前哨验收
 
-### 8.1 第一优先级：先修实现问题
+当前工程里最完整的前哨方案已经在：
 
-建议先修以下 4 个点：
+- `planner.cpp`
+- `auto_aim_debug_mpc.cpp`
+- `auto_debug.cpp`
 
-1. 让 `L_LIGHT / R_LIGHT` 观测真正参与 EKF 更新
-2. 修复飞行时间迭代不回写的问题
-3. 统一 `fire_advice` 的弧度/角度单位
-4. 核对数字分类标签映射
+所以如果目标是“先确认当前工程前哨算法是否合理”，最优先应该验这条链路。
 
-这四个点都属于“低成本高收益”，先修它们，outpost 效果通常会明显稳定。
+### 8.2 第二优先级：统一 `Aimer` 与 `Planner` 的前哨策略
 
-### 8.2 第二优先级：为 outpost 单独做选板和开火策略
+如果后续仍需要保留 `Aimer` 入口，建议至少补齐：
 
-建议新增一个 outpost 专用策略，而不是完全复用普通车。
+1. 前哨可配置窗口，而不是硬编码 `70/30`
+2. 前哨板级高度补偿
+3. 前哨开火相位门
 
-推荐思路：
+否则不同入口的表现会长期不一致。
 
-1. 保留现有 EKF，不必大改状态估计框架。
-2. 在 `VeryAimer` 里单独写 `select_outpost_armor(t_hit)`。
-3. 以未来击中时刻 `t_hit` 为准，选择最接近准线的板。
-4. 开火时不要只看当前角度误差，而要看“未来 `control_delay` 后”的误差是否仍然在窗内。
-5. 如果 outpost 转速很高，可以直接在中心模式下工作，并增加一个固定相位窗口。
+### 8.3 第三优先级：把前哨匹配门限做成运行时参数
 
-一个更适合 outpost 的简化思路是：
+建议优先考虑把下面几类量参数化：
 
-```text
-phi_i(t_hit) = yaw(t_hit) + i * 2pi / 3
-pick i = argmin |normalize(phi_i(t_hit) - yaw_los)|
-if |...| < fire_window:
-    shoot
-```
+1. `accept_outpost_match()` 的总分门限
+2. 重投影误差门限
+3. `xy/z` 误差门限
 
-这里的 `yaw_los` 是瞄准线对应的参考相位。
+这样前哨实车调试就不必每次改代码重编译。
 
-### 8.3 第三优先级：提高 outpost 状态模型的刚性
+### 8.4 第四优先级：把前哨验收重点集中到“相位、延迟、物理板号”
 
-如果你希望进一步提稳定性，可以考虑：
+当前工程里，前哨最值得关注的不是 detector，而是：
 
-1. 把 `dz1 / dz2` 改成固定标定值，或者强约束参数
-2. 给 outpost 单独的状态向量
-   比如只保留 `[cx, cy, cz, yaw, vyaw, r]`
-3. 如果 outpost 在场地中几乎静止，甚至可以把 `(cx, cy)` 做成极小随机游走
+1. `tracker` 是否把局部板号和物理板号映射对了
+2. `planner` 的命中时刻是否收敛
+3. `delay_time` 是否让板真正落入击打相位
 
-这样做的好处是：
+### 8.5 第五优先级：如果还要继续提升，再考虑自适应 ROI 和距离相关门限
 
-1. 参数更少
-2. 可观测性更强
-3. 俯仰抖动更小
-4. 更接近 outpost 的真实运动学
+当前项目没有目标驱动的动态 ROI，也没有前哨匹配的距离自适应门限。
 
-### 8.4 第四优先级：把观测噪声做成距离/角度相关
+如果前哨问题主要出现在：
 
-当前 `R = diag(r_uv)` 太简单了。
+1. 远距离
+2. 边缘角度
+3. 大视角切板
 
-更好的做法是把下列因素纳入 `R`：
-
-1. 图像尺度
-2. 装甲板长宽比
-3. 出视野程度
-4. `d_angle`
-5. PnP 重投影误差
-
-经验上，outpost 在边缘角度大时角点更容易飘，固定 `r_uv` 不够鲁棒。
-
-### 8.5 第五优先级：改进 ROI
-
-当前 ROI 是按整个目标外接正方形投影得到的。
-
-可以进一步优化为：
-
-1. 对 outpost 单独扩大切边余量
-2. 在高角速度时沿旋转方向增加前向余量
-3. 用 `vyaw * dt` 预测下一帧可见板区域
-
-这样能减少高速旋转时“板刚好切出 ROI”的问题。
+这两块会是后续继续提升的方向。
 
 ## 9. 建议的调参顺序
 
-如果你准备在自己项目里复用这套思路，我建议按下面顺序调：
+如果目的是做当前工程前哨验收，建议按下面顺序推进。
 
-1. 先确认识别：
-   outpost 是否能稳定分成 `OUTPOST`，角点是否平稳。
-2. 再确认观测：
-   `solvePnP` 和 8 维角点残差是否稳定，重投影误差是否可接受。
-3. 再调跟踪：
-   先调 `r_uv` 和 `match_gate`，再调 `qyaw_output`、`qxyz_output`、`q_outpost_dz`。
-4. 再调时延：
-   调 `prediction_delay`、`control_delay` 和弹速。
-5. 最后调开火：
-   调 `shooting_range_*`、`min_enable_*`，以及 outpost 专用相位窗口。
+1. 先确认入口
+   当前到底跑的是 `standard.cpp`、`standard_mpc.cpp`、`auto_aim_debug_mpc.cpp` 还是 `auto_debug.cpp`。
+2. 再看检测是否稳定
+   `outpost` 是否能稳定识别为 `ArmorName::outpost`，角点是否平稳。
+3. 再看 tracker
+   重点关注 `tracker_match_valid / tracker_match_score / tracker_reprojection_px`，确认 3 板匹配和物理板号映射是否稳定。
+4. 再看 planner 命中时刻求解
+   重点关注 `planner_hit_converged / planner_hit_iters / planner_selected_physical_armor`。
+5. 再调前哨延迟和相位
+   重点关注 `outpost_delay_time / planner_selected_delta_deg / planner_fire_phase_ready / planner_fire_phase_limit_deg`。
+6. 最后看板级高度补偿
+   如果相位已经对了但仍总打高或打低，再调 `outpost_fire_z_compensation`。
+
+从验收角度，当前建议的通过标准可以先定成：
+
+1. 前哨识别稳定，不频繁掉成别的类别；
+2. `tracker_match_valid` 大部分时间为真；
+3. `planner_hit_converged` 大部分时间为真；
+4. 空发不再呈现“固定每切一次板就空一枪”的规律性节奏；
+5. 若仍空枪，其原因能从相位、延迟、弹道、机械零偏中明确归类。
 
 ## 10. 最终评价
 
-这套实现的优点是：
+对当前 `sp_vision25` 来说：
 
-1. 对 outpost 已经有明确的三板旋转体建模
-2. 观测模型不是低维角度，而是完整四角点投影，信息利用比较充分
-3. 控制层不是简单 PID 指向，而是带弹道和轨迹平滑的预测控制风格
+1. 前哨识别层仍然是通用检测方案，特化重点不在 detector；
+2. 前哨跟踪层已经有比较明确的工程化建模：
+   `3` 板模型、固定中心预测、角速度锁、专用匹配、物理板号重映射；
+3. 前哨控制层里最完整的实现已经在 `Planner` 分支，不再是旧文档里那种“只会选当前最正脸板”的状态。
 
-它当前的主要短板也很明确：
+当前这套实现的整体评价是：
 
-1. outpost 专用控制策略还不够完整
-2. 有几处实现细节会直接影响命中率
-3. 选板逻辑更偏“当前最正”而不是“未来命中最优”
+1. 跟踪层设计已经比较像真正面向前哨的方案；
+2. `Planner` 分支的火控闭环已经具备前哨专用相位控制雏形；
+3. 但不同入口之间前哨能力仍不完全一致；
+4. 实车验收时必须优先确认入口，并用调试量去拆分问题来源。
 
-如果你下一步要做自己的项目优化，我最推荐的切入点是：
+## 11. 2026-04-22 前哨实车补充分析与代码修改记录
 
-1. 先修正观测更新和飞行时间迭代
-2. 再单独写 outpost 的相位式选板/开火逻辑
-3. 最后再收紧状态模型和噪声参数
+以下内容为基于近期排查追加的补充说明，不改动上文主结论，只记录本次前哨问题定位、代码修改和后续验收重点。
 
-这三步做完，通常就能把 outpost 的命中稳定性拉高一个层级。
+### 11.1 实车现象补充
+
+当前反馈现象可以概括为：
+
+1. 距离约 4 米、低弹频条件下，识别与跟踪本身相对稳定；
+2. `tracker` 可视化观测稳定，问题不像是检测抖动或频繁丢板；
+3. 实际更像是：
+   先命中当前装甲板
+   -> 紧接着空发一枪
+   -> 再命中下一块装甲板
+
+因此，本轮排查重点放在：
+
+1. `planner` 前哨选板
+2. 命中时刻固定点迭代
+3. 最终 `fire` 判定
+
+而不是先回头怀疑 detector。
+
+### 11.2 本次新增判断：为什么会出现“中一发、空一发”
+
+本次复查确认，造成这种节奏的核心风险是：
+
+1. `planner` 负责选“哪块板作为控制参考”；
+2. 但如果“控制参考连续性”和“真正允许开火”没有分开约束；
+3. 那么切板空窗期也可能被误当成可开火区间。
+
+对前哨来说，这种风险尤其明显，因为：
+
+1. 板切换频率高；
+2. `fallback_to_closest()` 对控制参考是有价值的；
+3. 但 fallback 目标并不一定已经进入稳定击打相位。
+
+### 11.3 本次确认并修复的算法问题
+
+这次不是简单调参数，而是确认并补上了几个算法层面的关键收口。
+
+#### 1. 前哨缺少“开火相位门”
+
+原先前哨虽然已经有：
+
+1. `outpost_comming_angle / outpost_leaving_angle`
+2. 选板窗口
+
+但最终开火若只看轨迹跟踪误差，就会把：
+
+1. 切板空窗期的参考板
+2. fallback 维持连续参考的板
+
+也误当成可开火目标。
+
+修复后：
+
+1. 前哨在开火前除了要满足 `tracking_error < fire_thresh`
+2. 还必须满足命中时刻的 `|delta_angle|` 落入更紧的击打窗口
+3. 这个窗口由 `outpost_leaving_angle` 推导：
+   `leaving_angle * 0.5`
+   并限制在 `4° ~ 12°`
+   同时不超过 `leaving_angle` 本身
+
+补充收口：
+
+1. 如果目标已经发生过 `jumped`
+2. 但当前命中时刻求解并没有通过 `spin gate` 选到真正进入窗口的板
+3. 而只是退化到 `fallback_to_closest`
+4. 那么系统现在仍然允许维持连续控制参考，但不再允许开火
+
+#### 2. 命中时刻迭代未收敛时，不能再允许前哨开火
+
+当前 `Planner` 里前哨会做：
+
+```text
+选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板
+```
+
+如果这一步本身都还没收敛，就说明：
+
+1. 命中时刻还在跳
+2. 命中板号还在跳
+
+这时允许开火风险很大。
+
+因此现在的收口是：
+
+1. 对前哨目标，只有 `hit_solution.converged == true` 时才允许开火；
+2. 若未收敛，系统仍可继续控制瞄准，但不放枪。
+
+#### 3. 轨迹规划起点优先继承命中时刻求解出的板号
+
+当前实现里，轨迹规划会优先使用：
+
+```text
+hit_solution.selection.armor_id
+```
+
+作为后续 `solve_aim_command()` 和 `get_trajectory()` 的初始板号。
+
+这样做的意义是：
+
+1. 命中时刻求解结果
+2. 后续 MPC 轨迹起点
+
+两者更一致，不容易出现“算的是这块板，轨迹却又从另一块板起步”的轻微偏差。
+
+### 11.4 本次实际修改的代码文件
+
+本次与前哨问题直接相关的修改主要在：
+
+1. `tasks/auto_aim/planner/planner.hpp`
+2. `tasks/auto_aim/planner/planner.cpp`
+3. `src/auto_aim_debug_mpc.cpp`
+4. `src/auto_debug.cpp`
+
+### 11.5 本次新增的调试量
+
+为了便于后续实车验证，本次已补充并确认以下调试量：
+
+1. `planner_selected_delta_deg`
+   当前被选中装甲板在命中时刻的相位角
+2. `planner_fire_tracking_error_deg`
+   当前 `fire` 判定所看到的轨迹跟踪误差
+3. `planner_fire_phase_limit_deg`
+   当前前哨击打相位门限
+4. `planner_fire_track_ready`
+   轨迹误差是否满足开火要求
+5. `planner_fire_phase_ready`
+   选中板是否进入相位开火窗口
+6. `planner_hit_converged`
+   命中时刻固定点迭代是否收敛
+7. `planner_selected_physical_armor`
+   当前被击打判定引用的是哪块物理板
+
+这些量已经接入：
+
+1. `auto_aim_debug_mpc`
+2. `auto_debug`
+
+的 plot / web state。
+
+### 11.6 预期效果
+
+本轮修改后的预期是：
+
+1. `planner` 仍然可以在切板间隙保持控制参考连续；
+2. 但不再把切板空窗期参考板直接当成可开火板；
+3. 低弹频条件下，原来那种“命中一发后紧跟一发空枪”的固定节奏应明显减少；
+4. 开火会更偏向“少打一发，但发出去的枪更像有效枪”。
+
+### 11.7 这次修改后仍需要继续观察的点
+
+本次修复的是算法逻辑漏洞，但不代表前哨所有问题都已经结束，后续仍建议重点观察：
+
+1. `outpost_delay_time`
+   如果实车总是统一偏早或统一偏晚，仍然需要继续测和调；
+2. `planner_selected_delta_deg`
+   如果它已经稳定进入小角度窗口但依旧空枪，则问题更可能转向弹道、零偏或机械时延；
+3. `planner_hit_converged`
+   如果它经常不收敛，说明命中时刻固定点求解本身还需要继续优化；
+4. `planner_spin_gate`
+   如果目标已经 `jumped`，但这个量经常为 `false`，说明切板窗口判定或角速度符号稳定性还不够好；
+5. `planner_fire_phase_ready`
+   如果它长期为 `false`，要结合 `planner_spin_gate` 一起看：
+   `spin_gate = 0` 更像 fallback 禁火在生效；
+   `spin_gate = 1` 但仍长期为 `false`，则更像相位门偏严或 `delay_time` 有偏差。
+
+### 11.8 当前状态说明
+
+本次先不做进一步实车回归，这里记录当前状态：
+
+1. 已完成代码修改；
+2. 已完成文档按当前项目代码重写；
+3. 已完成代码复查；
+4. 已完成本地编译；
+5. 尚未完成新的实车回归验证。
+
+从当前工程验收角度，建议下一步按下面顺序进行：
+
+1. 先在 `auto_aim_debug_mpc` 或 `auto_debug` 上车看：
+   `planner_selected_delta_deg`
+   `planner_fire_phase_ready`
+   `planner_hit_converged`
+   `planner_selected_physical_armor`
+2. 再看空发是否已经从“稳定每切板一次出现一枪”下降到“偶发”；
+3. 最后再决定是继续调 `outpost_delay_time`、`outpost_fire_z_compensation`，还是继续细化前哨专用选板逻辑。
