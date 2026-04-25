@@ -2,17 +2,19 @@ const DebugCharts = (() => {
   const chartMap = {
     gimbal_yaw: { label: "云台 Yaw", color: "#7de3ff", unit: "deg", group: "angles" },
     gimbal_pitch: { label: "云台 Pitch", color: "#ffcf70", unit: "deg", group: "angles" },
-    target_yaw: { label: "目标 Yaw", color: "#9df3bf", unit: "deg", group: "angles" },
+    target_yaw: { label: "目标 Yaw", color: "#ffd166", unit: "deg", group: "angles" },
     target_pitch: { label: "目标 Pitch", color: "#ff9db4", unit: "deg", group: "angles" },
     plan_yaw: { label: "规划 Yaw", color: "#38f0b8", unit: "deg", group: "angles" },
     plan_pitch: { label: "规划 Pitch", color: "#ff758f", unit: "deg", group: "angles" },
     cmd_yaw: { label: "控制 Yaw", color: "#52ffe0", unit: "deg", group: "angles" },
     cmd_pitch: { label: "控制 Pitch", color: "#ff8c94", unit: "deg", group: "angles" },
 
+    gimbal_yaw_vel: { label: "云台 Yaw 速度", color: "#5cb8ff", unit: "deg/s", group: "motion" },
+    gimbal_pitch_vel: { label: "云台 Pitch 速度", color: "#ffbd59", unit: "deg/s", group: "motion" },
     plan_yaw_vel: { label: "规划 Yaw 速度", color: "#78b7ff", unit: "deg/s", group: "motion" },
     plan_pitch_vel: { label: "规划 Pitch 速度", color: "#f7a34b", unit: "deg/s", group: "motion" },
     plan_yaw_acc: {
-      label: "规划 Yaw 加速度",
+      label: "plan_yaw_acc",
       color: "#45d6c2",
       unit: "deg/s^2",
       group: "motion",
@@ -133,6 +135,7 @@ const DebugCharts = (() => {
   let mainMaxPoints = 120;
   const rangeState = {};
   let active = false;
+  const lineDashPatterns = [[], [8, 5], [2, 4], [10, 4, 2, 4], [14, 4], [1, 4]];
 
   const fitCanvas = (canvas) => {
     const ratio = window.devicePixelRatio || 1;
@@ -147,6 +150,85 @@ const DebugCharts = (() => {
 
   const selectedKeys = () =>
     Array.from(document.querySelectorAll(".chart-metric:checked")).map((input) => input.dataset.key);
+
+  const metricDisplayLabel = (key) => {
+    const label = chartMap[key]?.label || key;
+    return label === key ? key : `${label} (${key})`;
+  };
+
+  const metricMetaText = (key) => {
+    const unit = chartMap[key]?.unit || "raw";
+    const label = chartMap[key]?.label || key;
+    return label === key ? unit : `${key} · ${unit}`;
+  };
+
+  const lineDashForSeries = (index, ratio) =>
+    lineDashPatterns[index % lineDashPatterns.length].map((value) => value * ratio);
+
+  const finiteValues = (values) =>
+    values.filter((value) => typeof value === "number" && Number.isFinite(value));
+
+  const seriesStats = (key) => {
+    const values = Array.isArray(latestData[key]) ? latestData[key] : [];
+    const finite = finiteValues(values);
+    return {
+      total: values.length,
+      points: finite.length,
+    };
+  };
+
+  const hasSeriesData = (key) => seriesStats(key).points > 0;
+
+  const updateMetricAvailability = () => {
+    document.querySelectorAll(".metric-chip").forEach((chip) => {
+      const input = chip.querySelector(".chart-metric");
+      const key = input?.dataset.key;
+      if (!key) return;
+
+      const stats = seriesStats(key);
+      const status = chip.querySelector(".metric-status");
+      chip.classList.toggle("is-unavailable", stats.points === 0);
+      chip.classList.toggle("is-live", stats.points > 0);
+      if (status) {
+        const suffix = stats.points > 0 ? `${stats.points}点` : "无数据";
+        status.textContent = `${metricMetaText(key)} · ${suffix}`;
+      }
+    });
+  };
+
+  const seriesSignature = (values, pointCount) => {
+    const start = Math.max(0, pointCount - values.length);
+    const parts = [];
+    for (let index = 0; index < pointCount; index += 1) {
+      if (index < start) {
+        parts.push("_");
+        continue;
+      }
+      const value = values[index - start];
+      parts.push(typeof value === "number" && Number.isFinite(value) ? value.toFixed(6) : "x");
+    }
+    return parts.join("|");
+  };
+
+  const overlapOffsets = (seriesList, pointCount, ratio) => {
+    const groups = new Map();
+    seriesList.forEach((series, index) => {
+      const finite = finiteValues(series.values);
+      if (!finite.length) return;
+      const signature = seriesSignature(series.values, pointCount);
+      if (!groups.has(signature)) groups.set(signature, []);
+      groups.get(signature).push(index);
+    });
+
+    const offsets = new Map();
+    groups.forEach((indexes) => {
+      if (indexes.length < 2) return;
+      indexes.forEach((seriesIndex, duplicateIndex) => {
+        offsets.set(seriesIndex, (duplicateIndex - (indexes.length - 1) / 2) * 5 * ratio);
+      });
+    });
+    return offsets;
+  };
 
   const sameKeySet = (left, right) => {
     if (left.length !== right.length) return false;
@@ -186,9 +268,13 @@ const DebugCharts = (() => {
     }
 
     const unitSummary = summarizeUnits(keys);
+    const missingKeys = keys.filter((key) => !hasSeriesData(key));
+    const missingSummary = missingKeys.length
+      ? ` 无数据: ${missingKeys.slice(0, 4).join(", ")}${missingKeys.length > 4 ? " ..." : ""}.`
+      : "";
     const advice =
       unitSummary.startsWith("主图混合单位") ? " 建议重点看下方单图，避免同轴误判。" : "";
-    node.textContent = `已选 ${keys.length} 条曲线，${unitSummary}.${advice}`;
+    node.textContent = `已选 ${keys.length} 条曲线，${unitSummary}.${missingSummary}${advice}`;
     node.classList.remove("is-empty");
   };
 
@@ -254,8 +340,8 @@ const DebugCharts = (() => {
               defaultKeys.includes(key) ? "checked" : ""
             } />
             <div>
-              <strong>${item.label}</strong>
-              <span>${item.unit || "raw"}</span>
+              <strong>${metricDisplayLabel(key)}</strong>
+              <span class="metric-status" data-key="${key}">${metricMetaText(key)} · 未加载</span>
             </div>
           `;
           cluster.appendChild(chip);
@@ -279,6 +365,7 @@ const DebugCharts = (() => {
 
     updateSelectionSummary(selectedKeys());
     updatePresetState(selectedKeys());
+    updateMetricAvailability();
   };
 
   const seriesSlice = (key) => {
@@ -342,25 +429,30 @@ const DebugCharts = (() => {
     }
 
     const pointCount = Math.max(...seriesList.map((series) => series.values.length));
-    const mapX = (index) =>
-      pad.left + (pointCount <= 1 ? 0 : (index / (pointCount - 1)) * plotWidth);
+    const visualOffsets = overlapOffsets(seriesList, pointCount, ratio);
+    const mapX = (index, valueCount) => {
+      const alignedIndex = index + Math.max(0, pointCount - valueCount);
+      return pad.left + (pointCount <= 1 ? 0 : (alignedIndex / (pointCount - 1)) * plotWidth);
+    };
     const mapY = (value) =>
       pad.top + plotHeight - ((value - minValue) / (maxValue - minValue)) * plotHeight;
 
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    seriesList.forEach((series) => {
+    seriesList.forEach((series, seriesIndex) => {
       ctx.strokeStyle = series.color;
       ctx.lineWidth = 2.2 * ratio;
+      ctx.setLineDash(lineDashForSeries(seriesIndex, ratio));
+      ctx.lineDashOffset = -seriesIndex * 4 * ratio;
       ctx.beginPath();
       let first = true;
-      series.values.forEach((value, index) => {
+      series.values.forEach((value, valueIndex) => {
         if (typeof value !== "number" || !Number.isFinite(value)) {
           first = true;
           return;
         }
-        const x = mapX(index);
-        const y = mapY(value);
+        const x = mapX(valueIndex, series.values.length);
+        const y = mapY(value) + (visualOffsets.get(seriesIndex) || 0);
         if (first) {
           ctx.moveTo(x, y);
           first = false;
@@ -370,6 +462,8 @@ const DebugCharts = (() => {
       });
       ctx.stroke();
     });
+    ctx.setLineDash([]);
+    ctx.lineDashOffset = 0;
 
     ctx.fillStyle = "#d8f3ff";
     ctx.font = `${11 * ratio}px Segoe UI`;
@@ -400,11 +494,11 @@ const DebugCharts = (() => {
       .map((key) => ({
         key,
         color: chartMap[key]?.color || "#7de3ff",
-        label: chartMap[key]?.label || key,
+        label: metricDisplayLabel(key),
         unit: chartMap[key]?.unit || "",
         values: seriesSlice(key),
       }))
-      .filter((series) => series.values.length);
+      .filter((series) => finiteValues(series.values).length);
 
     drawChart(canvas, seriesList);
 
@@ -413,12 +507,20 @@ const DebugCharts = (() => {
     let legendX = 60 * ratio;
     const legendY = 18 * ratio;
     ctx.font = `${11 * ratio}px Segoe UI`;
-    seriesList.forEach((series) => {
-      ctx.fillStyle = series.color;
-      ctx.fillRect(legendX, legendY - 8 * ratio, 12 * ratio, 12 * ratio);
+    seriesList.forEach((series, index) => {
+      ctx.strokeStyle = series.color;
+      ctx.lineWidth = 2.2 * ratio;
+      ctx.setLineDash(lineDashForSeries(index, ratio));
+      ctx.lineDashOffset = -index * 4 * ratio;
+      ctx.beginPath();
+      ctx.moveTo(legendX, legendY - 1 * ratio);
+      ctx.lineTo(legendX + 16 * ratio, legendY - 1 * ratio);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
       ctx.fillStyle = "#d8f3ff";
-      ctx.fillText(series.label, legendX + 18 * ratio, legendY + 2 * ratio);
-      legendX += 24 * ratio + ctx.measureText(series.label).width;
+      ctx.fillText(series.label, legendX + 22 * ratio, legendY + 2 * ratio);
+      legendX += 28 * ratio + ctx.measureText(series.label).width;
     });
   };
 
@@ -442,7 +544,7 @@ const DebugCharts = (() => {
       box.className = "chart-box";
       box.innerHTML = `
         <div class="chart-box-head">
-          <h4>${meta.label}</h4>
+          <h4>${metricDisplayLabel(key)}</h4>
           <span class="chart-unit-chip">${meta.unit || "raw"}</span>
         </div>
         <div class="range-controls">
@@ -459,7 +561,7 @@ const DebugCharts = (() => {
 
       const canvas = document.createElement("canvas");
       canvas.className = "child-chart";
-      canvas.style.height = "240px";
+      canvas.style.height = "160px";
       box.appendChild(canvas);
       container.appendChild(box);
 
@@ -502,6 +604,7 @@ const DebugCharts = (() => {
 
   function renderAll() {
     const keys = selectedKeys();
+    updateMetricAvailability();
     updateSelectionSummary(keys);
     updatePresetState(keys);
     renderMainChart(keys);
