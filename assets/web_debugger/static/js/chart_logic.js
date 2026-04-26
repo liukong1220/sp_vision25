@@ -14,7 +14,7 @@ const DebugCharts = (() => {
     plan_yaw_vel: { label: "规划 Yaw 速度", color: "#78b7ff", unit: "deg/s", group: "motion" },
     plan_pitch_vel: { label: "规划 Pitch 速度", color: "#f7a34b", unit: "deg/s", group: "motion" },
     plan_yaw_acc: {
-      label: "plan_yaw_acc",
+      label: "规划 Yaw 加速度",
       color: "#45d6c2",
       unit: "deg/s^2",
       group: "motion",
