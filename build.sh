@@ -33,9 +33,9 @@ MEM_TOTAL_GB="$(( MEM_TOTAL_KB / 1024 / 1024 ))"
 
 # 内存较小时进一步限制并行度，让脚本更稳。
 if (( MEM_TOTAL_KB < 8 * 1024 * 1024 )); then
-  BUILD_JOBS=1
-elif (( MEM_TOTAL_KB < 16 * 1024 * 1024 )) && (( BUILD_JOBS > 4 )); then
   BUILD_JOBS=4
+elif (( MEM_TOTAL_KB < 16 * 1024 * 1024 )) && (( BUILD_JOBS > 4 )); then
+  BUILD_JOBS=8
 fi
 
 echo "[build] 项目目录: ${PROJECT_DIR}"
