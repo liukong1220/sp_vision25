@@ -32,6 +32,8 @@ struct LiveOverlayOptions
 {
   double display_scale = 1.0;
   double latency_ms = 0.0;
+  double fps = 0.0;
+  double camera_fps = 0.0;
   std::string target_name = "none";
   std::string armor_type = "none";
   int planner_armor_id = -1;

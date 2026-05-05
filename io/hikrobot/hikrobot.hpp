@@ -1,6 +1,7 @@
 #ifndef IO__HIKROBOT_HPP
 #define IO__HIKROBOT_HPP
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <opencv2/opencv.hpp>
@@ -19,6 +20,7 @@ public:
   HikRobot(double exposure_ms, double gain, const std::string & vid_pid);
   ~HikRobot() override;
   void read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp) override;
+  double camera_fps() const override;
 
 private:
   struct CameraData
@@ -40,6 +42,12 @@ private:
   tools::ThreadSafeQueue<CameraData> queue_;
 
   int vid_, pid_;
+
+  static constexpr int kFpsWindowSize = 30;
+  std::array<std::chrono::steady_clock::time_point, kFpsWindowSize> fps_timestamps_;
+  int fps_idx_ = 0;
+  int fps_count_ = 0;
+  std::atomic<double> camera_fps_{0.0};
 
   void capture_start();
   void capture_stop();

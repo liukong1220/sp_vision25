@@ -51,6 +51,11 @@ void HikRobot::read(cv::Mat & img, std::chrono::steady_clock::time_point & times
   timestamp = data.timestamp;
 }
 
+double HikRobot::camera_fps() const
+{
+  return camera_fps_.load(std::memory_order_relaxed);
+}
+
 void HikRobot::capture_start()
 {
   capturing_ = false;
@@ -142,6 +147,20 @@ void HikRobot::capture_start()
       img = dst_image;
 
       queue_.push({img, timestamp});
+
+      fps_timestamps_[fps_idx_] = timestamp;
+      fps_idx_ = (fps_idx_ + 1) % kFpsWindowSize;
+      if (fps_count_ < kFpsWindowSize) {
+        ++fps_count_;
+      } else {
+        const auto oldest = fps_timestamps_[fps_idx_];
+        const double elapsed_s =
+          std::chrono::duration<double>(timestamp - oldest).count();
+        if (elapsed_s > 0.0) {
+          camera_fps_.store(
+            (kFpsWindowSize - 1) / elapsed_s, std::memory_order_relaxed);
+        }
+      }
 
       ret = MV_CC_FreeImageBuffer(handle_, &raw);
       if (ret != MV_OK) {

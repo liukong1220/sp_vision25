@@ -1,5 +1,7 @@
 #include <fmt/core.h>
+#include <fmt/format.h>
 
+#include <array>
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
@@ -62,9 +64,29 @@ int main(int argc, char * argv[])
 
   std::chrono::steady_clock::time_point timestamp;
   io::Command last_command;
+  constexpr int kFpsWindowSize = 30;
+  std::array<double, kFpsWindowSize> fps_history {};
+  int fps_history_idx = 0;
+  int fps_sample_count = 0;
+  auto last_loop_time = std::chrono::steady_clock::now();
 
   while (!exiter.exit()) {
     camera.read(img, timestamp);
+    const double camera_fps = camera.camera_fps();
+    const auto loop_now = std::chrono::steady_clock::now();
+    const double loop_dt = tools::delta_time(loop_now, last_loop_time);
+    last_loop_time = loop_now;
+    if (loop_dt > 0.0) {
+      fps_history[fps_history_idx] = 1.0 / loop_dt;
+      fps_history_idx = (fps_history_idx + 1) % kFpsWindowSize;
+      if (fps_sample_count < kFpsWindowSize) ++fps_sample_count;
+    }
+    double smoothed_fps = 0.0;
+    if (fps_sample_count > 0) {
+      double sum = 0.0;
+      for (int i = 0; i < fps_sample_count; ++i) sum += fps_history[i];
+      smoothed_fps = sum / fps_sample_count;
+    }
     Eigen::Quaterniond q = cboard.imu_at(timestamp - 1ms);
     // recorder.record(img, q, timestamp);
 
@@ -104,7 +126,9 @@ int main(int argc, char * argv[])
     ros2.publish(decider.build_vision_target_state(command, target_info));
 
     /// debug
-    tools::draw_text(img, fmt::format("[{}]", tracker.state()), {10, 30}, {255, 255, 255});
+    tools::draw_text(
+      img, fmt::format("[{}]  FPS: {:.1f}  cam: {:.1f}", tracker.state(), smoothed_fps, camera_fps),
+      {10, 30}, {255, 255, 255});
 
     nlohmann::json data;
 
@@ -185,6 +209,8 @@ int main(int argc, char * argv[])
     }
 
     data["bullet_speed"] = cboard.bullet_speed;
+    data["fps"] = smoothed_fps;
+    data["camera_fps"] = camera_fps;
 
     plotter.plot(data);
 
