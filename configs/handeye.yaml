@@ -39,7 +39,7 @@ outpost_max_temp_lost_count: 75
 #####-----aimer参数-----
 yaw_offset: -1.5
 pitch_offset: 0.8
-comming_angle: 70
+coming_angle: 70
 leaving_angle: 35
 decision_speed: 4
 high_speed_delay_time: -0.37  # 略微减少高速延迟，进一步提高响应速度 

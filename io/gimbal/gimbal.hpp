@@ -119,6 +119,13 @@ private:
   std::string config_path_;
   // 当前已经成功打开的串口名，仅用于日志和重连切口判断
   std::string current_com_port_;
+  // 帧率统计状态：
+  // 之前这些量放在 gimbal.cpp 文件作用域中，多个 Gimbal 实例会共享同一份状态。
+  // 现在收回为类成员，避免多实例时出现状态串扰。
+  std::chrono::steady_clock::time_point frame_start_time_ = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point last_fps_update_ = std::chrono::steady_clock::now();
+  int frame_count_ = 0;
+  double fps_ = 0.0;
 
   GimbalToVision rx_data_;  // 接收数据缓冲区
   VisionToGimbal tx_data_;  // 发送数据缓冲区

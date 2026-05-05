@@ -80,7 +80,7 @@ YOLO
 
 前哨在 `Planner` 里已经支持：
 
-1. `outpost_comming_angle`
+1. `outpost_coming_angle`
 2. `outpost_leaving_angle`
 3. `outpost_delay_time`
 4. `outpost_fire_z_compensation`

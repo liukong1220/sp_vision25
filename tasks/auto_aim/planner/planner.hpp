@@ -67,6 +67,7 @@ public:
   bool debug_fire_phase_ready = false;
   std::vector<double> debug_delta_angle_list;
   Planner(const std::string & config_path);
+  ~Planner();
 
   Plan plan(Target target, double bullet_speed);
   Plan plan(std::optional<Target> target, double bullet_speed);
@@ -79,6 +80,9 @@ private:
   double pitch_offset_;
   double fire_thresh_;
   double low_speed_delay_time_, high_speed_delay_time_, decision_speed_;
+  double bullet_speed_min_;
+  double bullet_speed_max_;
+  double bullet_speed_fallback_;
   double coming_angle_, leaving_angle_;
   double outpost_coming_angle_, outpost_leaving_angle_;
   double outpost_delay_time_;

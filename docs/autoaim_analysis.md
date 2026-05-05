@@ -493,7 +493,7 @@ flowchart TD
 1. 非小陀螺：
    只在可见角内选板，并尽量锁住同一块板
 2. 小陀螺：
-   用 `comming_angle / leaving_angle` 决定哪块板正在进入射击窗口
+   用 `coming_angle/ leaving_angle` 决定哪块板正在进入射击窗口
 
 如果入口接了 `Shooter`，它会在最后再增加一层门控：
 
@@ -682,7 +682,7 @@ Aimer 分支的前哨站窗口目前仍然是代码内固定值
 
 在 `tasks/auto_aim/planner/planner.cpp` 里，前哨站支持更完整的专用参数：
 
-- `outpost_comming_angle`
+- `outpost_coming_angle`
 - `outpost_leaving_angle`
 - `outpost_delay_time`
 - `outpost_fire_z_compensation`
@@ -747,7 +747,7 @@ flowchart TD
 | 角速度模型 | 常速度 + 大过程噪声 | 可选固定中心 + 小过程噪声 + 转速锁 |
 | 匹配方式 | 默认近邻 + 角度误差 | 专用 `id + offset` 联合匹配 |
 | 物理板重映射 | 无 | 有 |
-| Aimer 窗口 | 配置 `comming/leaving` | 强制 `70/30` |
+| Aimer 窗口 | 配置 `coming/leaving` | 强制 `70/30` |
 | Planner 窗口 | 通用参数 | 有前哨站专用参数与相位开火门 |
 | 高度补偿 | 通常靠 `pitch_offset` | 可单独对某块物理板加 `z` 补偿 |
 

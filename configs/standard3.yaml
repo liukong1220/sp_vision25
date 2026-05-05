@@ -40,7 +40,7 @@ outpost_radius: 0.2765
 outpost_armor_z_offsets: [0.0, -0.102, 0.102]
 outpost_fixed_center_rotation_model: true
 outpost_spin_speed_lock: 2.51
-outpost_comming_angle: 60
+outpost_coming_angle: 60
 #决定“提前多早开始认定下一块板是应打板”，主要管选板提前量和轨迹连续性。
 outpost_leaving_angle: 18
 #决定“板进入正面附近后还能保留多久”，同时还间接决定最终 fire 相位窗口大小
@@ -50,7 +50,7 @@ outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 #####-----aimer参数----
 yaw_offset: -2.59
 pitch_offset: 1.47
-comming_angle: 55
+coming_angle: 55
 leaving_angle: 20
 decision_speed: 8
 high_speed_delay_time: 0.056  # 略微减少高速延迟，进一步提高响应速度 
@@ -95,7 +95,7 @@ send_canid: 0xff
 can_interface: "can0"
 
 #####-----gimbal参数-----
-com_port: "/dev/ttyACM1"
+com_port: "/dev/ttyACM0"
 gimbal_state_unit: "deg"
 # yaw_kp: 0  # 进一步增加yaw轴比例增益，提高响应速度
 # yaw_kd: 0  # 进一步增加yaw轴微分增益，减少剩余震荡
@@ -104,6 +104,9 @@ gimbal_state_unit: "deg"
 
 #####-----planner-----#####
 fire_thresh: 0.0027  # 当前设置为0.0035弧度（约0.2度）
+bullet_speed_min: 10.0
+bullet_speed_max: 25.0
+bullet_speed_fallback: 22.0
 
 max_yaw_acc: 90  # 当前设置为60度/秒² serial: SerialException device reports readiness to write but returned no data
 Q_yaw: [3e6, 0.3]  # 当前位置权重为4e6，速度权重为0

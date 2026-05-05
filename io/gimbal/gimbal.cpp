@@ -8,12 +8,6 @@
 
 namespace io
 {
-  // 帧率计算相关变量
-  auto frame_start_time = std::chrono::steady_clock::now();
-  int frame_count = 0;
-  double fps = 0.0;
-  auto last_fps_update = std::chrono::steady_clock::now();
-
 // 构造函数：从配置文件初始化云台串口连接并启动读取线程
 Gimbal::Gimbal(const std::string & config_path)
 : config_path_(tools::resolve_config_path_string(config_path))
@@ -255,7 +249,7 @@ void Gimbal::read_thread()
   uint8_t sync_buffer[1];
 
   while (!quit_) {
-    frame_start_time = std::chrono::steady_clock::now();
+    frame_start_time_ = std::chrono::steady_clock::now();
 
     if (!serial_.isOpen()) {
       reconnect();
@@ -316,15 +310,15 @@ void Gimbal::read_thread()
     state_.bullet_speed = rx_data_.bullet_speed;
     state_.bullet_count = rx_data_.bullet_count;
 
-    frame_count++;
+    frame_count_++;
     auto current_time = std::chrono::steady_clock::now();
     auto time_diff =
-      std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_update).count();
+      std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_update_).count();
     if (time_diff > 0) {
-      fps = frame_count * 1000.0 / time_diff;
+      fps_ = frame_count_ * 1000.0 / time_diff;
       std::fflush(stdout);
-      frame_count = 0;
-      last_fps_update = current_time;
+      frame_count_ = 0;
+      last_fps_update_ = current_time;
     }
 
     switch (rx_data_.mode) {

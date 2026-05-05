@@ -234,11 +234,14 @@ Planner::Planner(const std::string & config_path)
 : config_path_(tools::resolve_config_path_string(config_path)), yaw_solver_(nullptr), pitch_solver_(nullptr)
 {
   auto yaml = tools::load(config_path_);
+  // 零偏补偿：
+  // 用于修正整套控制链中的常值系统误差
   yaw_offset_ = tools::read<double>(yaml, "yaw_offset") / 57.3;
   pitch_offset_ = tools::read<double>(yaml, "pitch_offset") / 57.3;
-  coming_angle_ = tools::read<double>(yaml, "comming_angle") / 57.3;
+  // 普通目标与前哨目标的切板窗口
+  coming_angle_ = tools::read<double>(yaml, "coming_angle") / 57.3;
   leaving_angle_ = tools::read<double>(yaml, "leaving_angle") / 57.3;
-  outpost_coming_angle_ = tools::read_or<double>(yaml, "outpost_comming_angle", 70.0) / 57.3;
+  outpost_coming_angle_ = tools::read_or<double>(yaml, "outpost_coming_angle", 70.0) / 57.3;
   outpost_leaving_angle_ = tools::read_or<double>(yaml, "outpost_leaving_angle", 30.0) / 57.3;
   outpost_delay_time_ = tools::read_or<double>(yaml, "outpost_delay_time", 0.0);
   outpost_fire_z_compensation_ =
@@ -249,6 +252,11 @@ Planner::Planner(const std::string & config_path)
       outpost_fire_z_compensation_.size());
     outpost_fire_z_compensation_ = {0.0, 0.0, 0.0};
   }
+  // Planner 内部对子弹速度做边界检查：
+  // 当串口上传的速度异常时，使用配置中的 fallback 值继续规划，而不是硬编码 22m/s。
+  bullet_speed_min_ = tools::read_or<double>(yaml, "bullet_speed_min", 10.0);
+  bullet_speed_max_ = tools::read_or<double>(yaml, "bullet_speed_max", 25.0);
+  bullet_speed_fallback_ = tools::read_or<double>(yaml, "bullet_speed_fallback", 22.0);
   fire_thresh_ = tools::read<double>(yaml, "fire_thresh");
   decision_speed_ = tools::read<double>(yaml, "decision_speed");
   high_speed_delay_time_ = tools::read<double>(yaml, "high_speed_delay_time");
@@ -257,6 +265,26 @@ Planner::Planner(const std::string & config_path)
   setup_yaw_solver();
   setup_pitch_solver();
   runtime_params_version_ = tools::runtime_params::version(config_path_);
+}
+
+Planner::~Planner()
+{
+  // TinyMPC 的 setup 使用了堆内存分配，这里必须显式释放。
+  // 当前项目中的 Planner 通常只构造一次，但补上析构可以避免：
+  // 1. 后续重建 Planner 时发生泄漏
+  // 2. debug / test 程序中频繁创建销毁时累计泄漏
+  auto cleanup_solver = [](TinySolver *& solver) {
+    if (solver == nullptr) return;
+    delete solver->solution;
+    delete solver->settings;
+    delete solver->cache;
+    delete solver->work;
+    delete solver;
+    solver = nullptr;
+  };
+
+  cleanup_solver(yaw_solver_);
+  cleanup_solver(pitch_solver_);
 }
 
 Plan Planner::plan(Target target, double bullet_speed)
@@ -271,8 +299,10 @@ Plan Planner::plan(Target target, double bullet_speed)
   debug_fire_phase_ready = false;
 
   // 0. Check bullet speed
-  if (bullet_speed < 10 || bullet_speed > 25) {
-    bullet_speed = 22;
+  // 串口测速可能在启动阶段、切模式阶段或掉线恢复阶段给出异常值。
+  // 这里不再使用硬编码 22m/s，而是改为配置化回退，便于不同兵种和枪口复用。
+  if (bullet_speed < bullet_speed_min_ || bullet_speed > bullet_speed_max_) {
+    bullet_speed = bullet_speed_fallback_;
   }
 
   // 1. 对命中时刻做固定点迭代：
@@ -298,7 +328,8 @@ Plan Planner::plan(Target target, double bullet_speed)
   Trajectory traj;
   AimSelection selection;
   try {
-    int planning_lock_id = hit_solution.selection.armor_id >= 0 ? hit_solution.selection.armor_id : lock_id_;
+    int planning_lock_id =
+      hit_solution.selection.armor_id >= 0 ? hit_solution.selection.armor_id : lock_id_;
     const auto yaw_pitch =
       solve_aim_command(target, bullet_speed, planning_lock_id, &selection);
     update_debug_selection(target, selection);
@@ -346,7 +377,8 @@ Plan Planner::plan(Target target, double bullet_speed)
   auto shoot_offset_ = 2;
   const double tracking_error =
     std::hypot(
-      traj(0, HALF_HORIZON + shoot_offset_) - yaw_solver_->work->x(0, HALF_HORIZON + shoot_offset_),
+      traj(0, HALF_HORIZON + shoot_offset_) -
+        yaw_solver_->work->x(0, HALF_HORIZON + shoot_offset_),
       traj(2, HALF_HORIZON + shoot_offset_) -
         pitch_solver_->work->x(0, HALF_HORIZON + shoot_offset_));
   debug_fire_tracking_error = tracking_error;
@@ -401,10 +433,10 @@ void Planner::refresh_runtime_params_if_needed()
 
   yaw_offset_ = tools::runtime_params::get_double(config_path_, "yaw_offset") / 57.3;
   pitch_offset_ = tools::runtime_params::get_double(config_path_, "pitch_offset") / 57.3;
-  coming_angle_ = tools::runtime_params::get_double(config_path_, "comming_angle") / 57.3;
+  coming_angle_ = tools::runtime_params::get_double(config_path_, "coming_angle") / 57.3;
   leaving_angle_ = tools::runtime_params::get_double(config_path_, "leaving_angle") / 57.3;
   outpost_coming_angle_ =
-    tools::runtime_params::get_double(config_path_, "outpost_comming_angle") / 57.3;
+    tools::runtime_params::get_double(config_path_, "outpost_coming_angle") / 57.3;
   outpost_leaving_angle_ =
     tools::runtime_params::get_double(config_path_, "outpost_leaving_angle") / 57.3;
   outpost_delay_time_ = tools::runtime_params::get_double(config_path_, "outpost_delay_time");
@@ -416,6 +448,9 @@ void Planner::refresh_runtime_params_if_needed()
       outpost_fire_z_compensation_.size());
     outpost_fire_z_compensation_ = {0.0, 0.0, 0.0};
   }
+  bullet_speed_min_ = tools::runtime_params::get_double(config_path_, "bullet_speed_min");
+  bullet_speed_max_ = tools::runtime_params::get_double(config_path_, "bullet_speed_max");
+  bullet_speed_fallback_ = tools::runtime_params::get_double(config_path_, "bullet_speed_fallback");
   fire_thresh_ = tools::runtime_params::get_double(config_path_, "fire_thresh");
   decision_speed_ = tools::runtime_params::get_double(config_path_, "decision_speed");
   high_speed_delay_time_ = tools::runtime_params::get_double(config_path_, "high_speed_delay_time");

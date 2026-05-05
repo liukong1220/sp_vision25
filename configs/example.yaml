@@ -60,7 +60,7 @@ max_temp_lost_count: 15
 #####-----aimer参数-----#####
 yaw_offset: -2.5 # degree -2.5
 pitch_offset: 3 # degree 2
-comming_angle: 60 # degree
+coming_angle: 60 # degree
 leaving_angle: 20 # degree
 
 #####-----shooter参数-----#####
