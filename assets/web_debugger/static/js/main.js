@@ -925,6 +925,7 @@
           : "none",
     );
     setText("status-latency", formatNumber(latencyMs, 1, " ms"));
+    setText("status-camera-fps", formatNumber(getByPath(frame, "camera_fps"), 1, " fps"));
     setText("status-turn", getByPath(planner, "turn_direction", "STEADY"));
     setText(
       "status-armor",
@@ -1047,6 +1048,10 @@
               : "--",
         },
         {
+          label: "相机帧率",
+          value: formatNumber(getByPath(frame, "camera_fps"), 1, " fps"),
+        },
+        {
           label: "回放时间",
           value: getByPath(frame, "playback_t_s") !== undefined ? formatNumber(frame.playback_t_s, 3, " s") : "--",
         },
@@ -1151,6 +1156,7 @@
       { label: "回放时间", value: formatNumber(getByPath(frame, "playback_t_s"), 3, " s") },
       { label: "原始时间", value: formatNumber(getByPath(frame, "raw_t_s"), 3, " s") },
       { label: "链路延迟", value: formatNumber(latencyMs, 2, " ms") },
+      { label: "相机帧率", value: formatNumber(getByPath(frame, "camera_fps"), 1, " fps") },
       { label: "目标存在", value: formatBool(hasTarget, "YES", "NO") },
       { label: "图层阶段", value: getByPath(overlay, "stage", "--") },
     ]);

@@ -43,4 +43,9 @@ void Camera::read(cv::Mat & img, std::chrono::steady_clock::time_point & timesta
   camera_->read(img, timestamp);
 }
 
+double Camera::camera_fps() const
+{
+  return camera_->camera_fps();
+}
+
 }  // namespace io

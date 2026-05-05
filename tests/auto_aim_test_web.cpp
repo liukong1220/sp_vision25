@@ -2,6 +2,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -533,6 +534,11 @@ int main(int argc, char * argv[])
   auto last_web_frame_time = std::chrono::steady_clock::now() - web_frame_interval;
   auto last_web_state_time = std::chrono::steady_clock::now() - web_state_interval;
   double first_t = -1.0;
+  constexpr int kFpsWindowSize = 30;
+  std::array<double, kFpsWindowSize> fps_history {};
+  int fps_history_idx = 0;
+  int fps_sample_count = 0;
+  auto last_frame_time = std::chrono::steady_clock::now();
 
   video.set(cv::CAP_PROP_POS_FRAMES, start_index);
   if (has_timestamp_file) {
@@ -567,6 +573,19 @@ int main(int argc, char * argv[])
     if (img.empty()) break;
 
     const auto frame_start = std::chrono::steady_clock::now();
+    const double frame_dt = tools::delta_time(frame_start, last_frame_time);
+    last_frame_time = frame_start;
+    if (frame_dt > 0.0) {
+      fps_history[fps_history_idx] = 1.0 / frame_dt;
+      fps_history_idx = (fps_history_idx + 1) % kFpsWindowSize;
+      if (fps_sample_count < kFpsWindowSize) ++fps_sample_count;
+    }
+    double smoothed_fps = 0.0;
+    if (fps_sample_count > 0) {
+      double sum = 0.0;
+      for (int i = 0; i < fps_sample_count; ++i) sum += fps_history[i];
+      smoothed_fps = sum / fps_sample_count;
+    }
     auto timestamp =
       playback_start + std::chrono::microseconds(static_cast<int64_t>(relative_t * 1e6));
     const Eigen::Quaterniond gimbal_q(qw, qx, qy, qz);
@@ -914,6 +933,7 @@ int main(int argc, char * argv[])
         tools::debug_visualization::LiveOverlayOptions visual_options;
         visual_options.display_scale = display_scale;
         visual_options.latency_ms = processing_ms;
+        visual_options.fps = smoothed_fps;
         visual_options.target_name =
           current_target.has_value() ? armor_name_to_string(current_target->name) : "none";
         visual_options.armor_type =

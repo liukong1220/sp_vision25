@@ -1,6 +1,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -541,11 +542,17 @@ int main(int argc, char * argv[])
   auto last_web_state_time = std::chrono::steady_clock::now() - web_state_interval;
   const auto t0 = std::chrono::steady_clock::now();
   uint16_t last_bullet_count = 0;
+  constexpr int kFpsWindowSize = 30;
+  std::array<double, kFpsWindowSize> fps_history {};
+  int fps_history_idx = 0;
+  int fps_sample_count = 0;
+  auto last_loop_time = std::chrono::steady_clock::now();
   const auto invalid_target_point =
     Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 
   while (!exiter.exit()) {
     camera.read(img, t);
+    const double camera_fps = camera.camera_fps();
     const auto q = gimbal.q(t);
     const auto serial_mode = gimbal.mode();
     const auto gs = gimbal.state();
@@ -571,6 +578,19 @@ int main(int argc, char * argv[])
     }
 
     const auto loop_now = std::chrono::steady_clock::now();
+    const double loop_dt = tools::delta_time(loop_now, last_loop_time);
+    last_loop_time = loop_now;
+    if (loop_dt > 0.0) {
+      fps_history[fps_history_idx] = 1.0 / loop_dt;
+      fps_history_idx = (fps_history_idx + 1) % kFpsWindowSize;
+      if (fps_sample_count < kFpsWindowSize) ++fps_sample_count;
+    }
+    double smoothed_fps = 0.0;
+    if (fps_sample_count > 0) {
+      double sum = 0.0;
+      for (int i = 0; i < fps_sample_count; ++i) sum += fps_history[i];
+      smoothed_fps = sum / fps_sample_count;
+    }
     const double latency_ms = tools::delta_time(loop_now, t) * 1000.0;
     const bool fired = gs.bullet_count > last_bullet_count;
     last_bullet_count = gs.bullet_count;
@@ -797,6 +817,7 @@ int main(int argc, char * argv[])
       web_state["frame"]["bullet_speed_mps"] = raw_bullet_speed;
       web_state["frame"]["bullet_speed_effective_mps"] = effective_speed;
       web_state["frame"]["bullet_speed_fallback"] = speed_fallback;
+      web_state["frame"]["camera_fps"] = camera_fps;
       web_state["overlay"]["controls"] =
         overlay_config.is_object() ? overlay_config : nlohmann::json::object();
 
@@ -1016,6 +1037,8 @@ int main(int argc, char * argv[])
         tools::debug_visualization::LiveOverlayOptions visual_options;
         visual_options.display_scale = display_scale;
         visual_options.latency_ms = latency_ms;
+        visual_options.fps = smoothed_fps;
+        visual_options.camera_fps = camera_fps;
         visual_options.target_name =
           current_target.has_value() ? armor_name_to_string(current_target->name) : "none";
         visual_options.armor_type =

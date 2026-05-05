@@ -702,7 +702,7 @@ void draw_live_status(
     display_img, fmt::format("stage: {}", live_overlay_stage_to_string(stage)),
     {24, 36}, 0.50, stage_color(stage), 2);
   draw_outlined_text(
-    display_img, fmt::format("latency: {:.2f} ms", options.latency_ms),
+    display_img, fmt::format("latency: {:.2f} ms  FPS: {:.1f}  cam: {:.1f}", options.latency_ms, options.fps, options.camera_fps),
     {24, 60}, 0.48, cv::Scalar(220, 245, 255), 1);
   draw_outlined_text(
     display_img, fmt::format("delay: {:.1f} ms", options.planner_delay_ms),
