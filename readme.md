@@ -10,10 +10,7 @@
 
 
 ## 标定文档
-- 详细流程、参数回填映射、验收清单见：[docs/标定流程与参数回填清单.md](docs/标定流程与参数回填清单.md)。
-
-## 文档导航
-- 推荐先看：[docs/文档导航.md](docs/文档导航.md)。
+- 详细流程、参数回填映射、验收清单见：[docs/calibration_checklist.md](docs/calibration_checklist.md)。
 
 ## 1 功能介绍
 自瞄的定义和意义。我们对自瞄的定义为“针对移动装甲板目标的自动瞄准和自动火控软件”。当操作手切换成自瞄模式后，自瞄会接管云台的控制权，通过对敌方运动轨迹的预测和弹道解算，控制云台进行追踪；同时，自瞄还会接管发射机构的控制权，判断开火时机。自瞄的意义在于提高我方作战能力，实现短击杀时间、高命中率的作战效果。 
@@ -114,6 +111,29 @@ IMU型号：使用C板内置BMI088作为IMU\
         ```
         chmod +x autostart.sh
         ```
+
+5. 看门狗启动脚本（推荐）
+    1. 调试场景：
+        使用 `debug_mpc_watchdog.sh`
+        适合 `auto_aim_debug_mpc`、`auto_debug`、`sentry_debug`
+        特点：会等待 WebDebugger 就绪并自动打开浏览器
+        ```bash
+        ./debug_mpc_watchdog.sh
+        ./debug_mpc_watchdog.sh auto_debug configs/standard3.yaml
+        ./debug_mpc_watchdog.sh sentry_debug configs/sentry.yaml
+        ```
+    2. 比赛场景：
+        使用 `run_with_watchdog.sh`
+        适合 `standard_mpc`、`sentry`、`standard`
+        特点：不带浏览器和网页调试逻辑，额外开销更小
+        ```bash
+        ./run_with_watchdog.sh
+        ./run_with_watchdog.sh standard_mpc configs/standard3.yaml
+        ./run_with_watchdog.sh sentry configs/sentry.yaml
+        ```
+    3. 使用建议：
+        串口短时断开时，当前项目优先依赖程序内部重连；
+        watchdog 主要负责“程序退出后自动重启”，不是代替串口内部重连。
 
 5. USB2CAN设置（可选）
     1. 创建`.rules`文件:
