@@ -167,10 +167,10 @@ sequenceDiagram
 | 外参内参参数 | `solver.cpp` | 全部自瞄链 | 空间解算正确性 |
 | `enemy_color` / `min_detect_count` / `max_temp_lost_count` | `tracker.cpp` | 全部自瞄链 | 状态机收敛与丢失逻辑 |
 | `outpost_radius` / `outpost_*` 跟踪参数 | `tracker.cpp` | 前哨 | 3 板几何与旋转预测 |
-| `yaw_offset` / `pitch_offset` / `comming_angle` / `leaving_angle` / `decision_speed` / `*delay*` | `aimer.cpp` | 传统链 | 选板与提前量 |
+| `yaw_offset` / `pitch_offset` / `coming_angle` / `leaving_angle` / `decision_speed` / `*delay*` | `aimer.cpp` | 传统链 | 选板与提前量 |
 | `first_tolerance` / `second_tolerance` / `judge_distance` / `auto_fire` | `shooter.cpp` | 真正走 `Shooter` 的入口 | 传统开火判定 |
 | `fire_thresh` / `max_*_acc` / `Q_*` / `R_*` | `planner.cpp` | MPC 链 | 跟踪紧度、平滑度、开火条件 |
-| `outpost_comming_angle` / `outpost_leaving_angle` / `outpost_delay_time` / `outpost_fire_z_compensation` | `planner.cpp` | 前哨 MPC | 前哨选板、提前量、相位门、击打高度 |
+| `outpost_coming_angle` / `outpost_leaving_angle` / `outpost_delay_time` / `outpost_fire_z_compensation` | `planner.cpp` | 前哨 MPC | 前哨选板、提前量、相位门、击打高度 |
 
 ## 5. 检测层参数
 
@@ -622,21 +622,21 @@ ROI 本质上是在“先验搜索范围”和“全局发现能力”之间做�
 1. 它修的是“常值偏差”。
 2. 如果偏差随距离或目标类型变化，不要只靠 offset 硬补。
 
-### 8.2 `comming_angle` / `leaving_angle`
+### 8.2 `coming_angle` / `leaving_angle`
 
 - 算法意义：普通小陀螺的选板窗口
 - 为什么需要：小陀螺时不能只打最近板，要打“正在进入可射击窗口”的板
 
-`comming_angle` 更像“提前多早开始考虑下一块板”。
+`coming_angle` 更像“提前多早开始考虑下一块板”。
 
 `leaving_angle` 更像“进入正面后允许保留多久”。
 
-调大 `comming_angle`：
+调大 `comingangle：
 
 1. 更早切向下一块板
 2. 可能显得“总是抢前”
 
-调小 `comming_angle`：
+调小 `comingangle：
 
 1. 选板更保守
 2. 可能显得“总在追板尾”
@@ -889,7 +889,7 @@ R 决定“愿意付出多大动作代价去跟上”
 
 这是当前项目里最需要教学化说明的一组参数，因为它们不是普通自瞄的通用经验值，而是直接绑在前哨 3 板模型上的。
 
-### 11.1 `outpost_comming_angle`
+### 11.1 `outpost_coming_angle`
 
 - 算法意义：前哨进入窗口角
 - 为什么需要：前哨不是打“当前最近板”，而是优先打“正在进入可射击窗口的板”
@@ -1027,7 +1027,7 @@ clamp(outpost_leaving_angle * 0.5, 4°, 12°)
 2. `outpost_armor_z_offsets`
 3. `outpost_spin_speed_lock`
 4. `outpost_delay_time`
-5. `outpost_comming_angle / outpost_leaving_angle`
+5. `outpost_coming_angle / outpost_leaving_angle`
 6. `outpost_fire_z_compensation`
 7. `fire_thresh`
 
@@ -1314,7 +1314,7 @@ YAML 参数不是“经验魔法数字”，而是把检测、跟踪、选板、
 
 这通常对应：
 
-1. `outpost_comming_angle`
+1. `outpost_coming_angle`
 2. `outpost_leaving_angle`
 3. `outpost_delay_time`
 
@@ -1454,7 +1454,7 @@ YAML 参数不是“经验魔法数字”，而是把检测、跟踪、选板、
 
 重点参数：
 
-1. `outpost_comming_angle`
+1. `outpost_coming_angle`
 2. `outpost_leaving_angle`
 
 重点看：

@@ -40,7 +40,7 @@ outpost_radius: 0.2665
 outpost_armor_z_offsets: [0.0, -0.102, 0.102]
 outpost_fixed_center_rotation_model: true
 outpost_spin_speed_lock: 2.63
-outpost_comming_angle: 100
+outpost_coming_angle: 100
 outpost_leaving_angle: 120
 outpost_delay_time: 0.125
 outpost_fire_z_compensation: [0.0, -0.012, 0.0]
@@ -48,7 +48,7 @@ outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 #####-----aimer参数----
 yaw_offset: -0.15
 pitch_offset: 2.4
-comming_angle: 55
+coming_angle: 55
 leaving_angle: 20
 decision_speed: 8
 high_speed_delay_time: 0.056  # 略微减少高速延迟，进一步提高响应速度 

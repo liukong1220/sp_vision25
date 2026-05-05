@@ -196,7 +196,7 @@ std::vector<ParamSpec> build_specs()
       3, json::array({0.0, -0.102, 0.102}),
     },
     {
-      "outpost_comming_angle", "planner", "规划/MPC", "前哨站进入窗口角",
+      "outpost_coming_angle", "planner", "规划/MPC", "前哨站进入窗口角",
       "前哨站选板进入击打窗口角度，0 表示沿用通用窗口。", "deg", ParamType::kDouble,
       0, 70.0,
     },
@@ -239,7 +239,7 @@ std::vector<ParamSpec> build_specs()
       "枪口/相机在 pitch 方向的补偿偏置。", "deg", ParamType::kDouble,
     },
     {
-      "comming_angle", "planner", "规划/MPC", "进入窗口角",
+      "coming_angle", "planner", "规划/MPC", "进入窗口角",
       "小陀螺切板时允许进入击打窗口的角度。", "deg", ParamType::kDouble,
     },
     {
@@ -334,8 +334,8 @@ double ui_step_for(const ParamSpec & spec)
   if (spec.key == "decision_speed") return 0.05;
   if (spec.key == "yaw_offset" || spec.key == "pitch_offset") return 0.05;
   if (
-    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
-    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
+    spec.key == "coming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
   {
     return 0.1;
   }
@@ -377,8 +377,8 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
     spec.key == "outpost_delay_time" ||
     spec.key == "low_speed_delay_time" || spec.key == "fire_thresh" ||
     spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc" ||
-    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
-    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
+    spec.key == "coming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
   {
     return 0.0;
   }
@@ -391,8 +391,8 @@ std::optional<double> ui_max_for(const ParamSpec & spec)
   if (spec.key == "threshold") return 255.0;
   if (spec.key == "max_angle_error" || spec.key == "max_rectangular_error") return 90.0;
   if (
-    spec.key == "comming_angle" || spec.key == "leaving_angle" ||
-    spec.key == "outpost_comming_angle" || spec.key == "outpost_leaving_angle")
+    spec.key == "coming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
   {
     return 180.0;
   }

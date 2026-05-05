@@ -579,7 +579,7 @@ score < 36
 
 1. 如果 `target.jumped == false`，直接打当前板；
 2. 非小陀螺时，只在 `60°` 可见角内选板，并尽量锁住 `lock_id_`；
-3. 小陀螺时，用 `comming_angle / leaving_angle` 选“正在进入窗口”的板；
+3. 小陀螺时，用 `comingle/leaving_angle` 选“正在进入窗口”的板；
 4. 如果窗口内没有合适候选，退化为 `fallback_to_closest()`。
 
 对前哨，`Aimer` 还有一个现状：
@@ -598,7 +598,7 @@ coming/leaving 角仍然写死为 70° / 30°
 1. 仍然区分“未 jump”和“已 jump”
 2. 仍然支持正常可见角选板和 spin gate 选板
 3. 前哨窗口来自：
-   `outpost_comming_angle`
+   `outpost_coming_angle`
    `outpost_leaving_angle`
 4. 选板不是只看当前时刻，而是会进入命中时刻固定点迭代
 
@@ -982,7 +982,7 @@ fire_phase_limit =
 
 原先前哨虽然已经有：
 
-1. `outpost_comming_angle / outpost_leaving_angle`
+1. `outpost_coming_angle / outpost_leaving_angle`
 2. 选板窗口
 
 但最终开火若只看轨迹跟踪误差，就会把：

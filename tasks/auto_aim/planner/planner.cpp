@@ -239,9 +239,9 @@ Planner::Planner(const std::string & config_path)
   yaw_offset_ = tools::read<double>(yaml, "yaw_offset") / 57.3;
   pitch_offset_ = tools::read<double>(yaml, "pitch_offset") / 57.3;
   // 普通目标与前哨目标的切板窗口
-  coming_angle_ = tools::read<double>(yaml, "comming_angle") / 57.3;
+  coming_angle_ = tools::read<double>(yaml, "coming_angle") / 57.3;
   leaving_angle_ = tools::read<double>(yaml, "leaving_angle") / 57.3;
-  outpost_coming_angle_ = tools::read_or<double>(yaml, "outpost_comming_angle", 70.0) / 57.3;
+  outpost_coming_angle_ = tools::read_or<double>(yaml, "outpost_coming_angle", 70.0) / 57.3;
   outpost_leaving_angle_ = tools::read_or<double>(yaml, "outpost_leaving_angle", 30.0) / 57.3;
   outpost_delay_time_ = tools::read_or<double>(yaml, "outpost_delay_time", 0.0);
   outpost_fire_z_compensation_ =
@@ -433,10 +433,10 @@ void Planner::refresh_runtime_params_if_needed()
 
   yaw_offset_ = tools::runtime_params::get_double(config_path_, "yaw_offset") / 57.3;
   pitch_offset_ = tools::runtime_params::get_double(config_path_, "pitch_offset") / 57.3;
-  coming_angle_ = tools::runtime_params::get_double(config_path_, "comming_angle") / 57.3;
+  coming_angle_ = tools::runtime_params::get_double(config_path_, "coming_angle") / 57.3;
   leaving_angle_ = tools::runtime_params::get_double(config_path_, "leaving_angle") / 57.3;
   outpost_coming_angle_ =
-    tools::runtime_params::get_double(config_path_, "outpost_comming_angle") / 57.3;
+    tools::runtime_params::get_double(config_path_, "outpost_coming_angle") / 57.3;
   outpost_leaving_angle_ =
     tools::runtime_params::get_double(config_path_, "outpost_leaving_angle") / 57.3;
   outpost_delay_time_ = tools::runtime_params::get_double(config_path_, "outpost_delay_time");

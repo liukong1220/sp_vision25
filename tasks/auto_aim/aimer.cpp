@@ -18,7 +18,7 @@ Aimer::Aimer(const std::string & config_path)
   auto yaml = tools::load(config_path);
   yaw_offset_ = yaml["yaw_offset"].as<double>() / 57.3;        // degree to rad
   pitch_offset_ = yaml["pitch_offset"].as<double>() / 57.3;    // degree to rad
-  comming_angle_ = yaml["comming_angle"].as<double>() / 57.3;  // degree to rad
+  coming_angle_ = yaml["coming_angle"].as<double>() / 57.3;  // degree to rad
   leaving_angle_ = yaml["leaving_angle"].as<double>() / 57.3;  // degree to rad
   high_speed_delay_time_ = yaml["high_speed_delay_time"].as<double>();
   low_speed_delay_time_ = yaml["low_speed_delay_time"].as<double>();
@@ -223,7 +223,7 @@ AimPoint Aimer::choose_aim_point(const Target & target)
     coming_angle = 70 / 57.3;
     leaving_angle = 30 / 57.3;
   } else {
-    coming_angle = comming_angle_;
+    coming_angle = coming_angle_;
     leaving_angle = leaving_angle_;
   }
 
