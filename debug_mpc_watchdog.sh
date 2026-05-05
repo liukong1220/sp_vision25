@@ -1,13 +1,30 @@
 #!/usr/bin/env bash
-# 文件名: run_auto_aim_with_restart.sh
-# 功能: 每次在新终端中运行 auto_aim_debug_mpc，退出后自动重启，并自动打开浏览器
-# 修正: 确保工作目录为项目根目录，避免相对路径错误
+# 文件名: debug_mpc_watchdog.sh
+# 功能:
+# 1. 在新终端中启动一个“可视化调试型”程序（默认 auto_aim_debug_mpc）
+# 2. 程序退出后自动重启
+# 3. 若程序启用了 WebDebugger，则自动等待网页服务就绪并打开浏览器
+#
+# 适用场景:
+# - auto_aim_debug_mpc
+# - auto_debug
+# - sentry_debug
+# - 其他带网页 / 可视化调试能力的 debug 程序
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_PATH="${ROOT_DIR}/build/auto_aim_debug_mpc"
-CONFIG_PATH="${1:-${ROOT_DIR}/configs/standard3.yaml}"
+
+# 默认主程序为 auto_aim_debug_mpc，也允许通过第一个参数覆盖
+BIN_NAME="${1:-auto_debug}"
+BIN_PATH="${ROOT_DIR}/build/${BIN_NAME}"
+
+# 第二个参数为配置文件路径；未提供时按常见 debug 程序选择默认配置
+DEFAULT_CONFIG="${ROOT_DIR}/configs/standard3.yaml"
+if [[ "${BIN_NAME}" == "sentry_debug" ]]; then
+  DEFAULT_CONFIG="${ROOT_DIR}/configs/sentry.yaml"
+fi
+CONFIG_PATH="${2:-${DEFAULT_CONFIG}}"
 
 RESTART_DELAY="${RESTART_DELAY:-2}"
 WEB_READY_TIMEOUT="${WEB_READY_TIMEOUT:-10}"
@@ -32,25 +49,25 @@ resolve_web_settings() {
 wait_for_web() {
     local url="http://127.0.0.1:${WEB_PORT}/healthz"
     local deadline=$((SECONDS + WEB_READY_TIMEOUT))
-    echo "[自启动] 等待 Web 服务就绪 (${url}) ..."
+    echo "[调试看门狗] 等待 Web 服务就绪 (${url}) ..."
     while [[ ${SECONDS} -lt ${deadline} ]]; do
         if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 1 "${url}" >/dev/null 2>&1; then
-            echo "[自启动] Web 服务已就绪"
+            echo "[调试看门狗] Web 服务已就绪"
             return 0
         fi
         if command -v wget >/dev/null 2>&1 && wget -q -T 1 -O - "${url}" >/dev/null 2>&1; then
-            echo "[自启动] Web 服务已就绪"
+            echo "[调试看门狗] Web 服务已就绪"
             return 0
         fi
         sleep 1
     done
-    echo "[自启动] 警告: Web 服务未就绪，仍尝试打开浏览器"
+    echo "[调试看门狗] 警告: Web 服务未就绪，仍尝试打开浏览器"
     return 1
 }
 
 open_browser() {
     local url="http://127.0.0.1:${WEB_PORT}/"
-    echo "[自启动] 打开浏览器: ${url}"
+    echo "[调试看门狗] 打开浏览器: ${url}"
     if command -v firefox >/dev/null 2>&1; then
         nohup firefox "${url}" >/dev/null 2>&1 &
     elif command -v xdg-open >/dev/null 2>&1; then
@@ -58,14 +75,13 @@ open_browser() {
     elif command -v python3 >/dev/null 2>&1; then
         nohup python3 -m webbrowser "${url}" >/dev/null 2>&1 &
     else
-        echo "[自启动] 无法自动打开浏览器，请手动访问: ${url}"
+        echo "[调试看门狗] 无法自动打开浏览器，请手动访问: ${url}"
     fi
 }
 
-# 在新终端中启动程序，并返回程序的 PID（通过 pgrep 获取）
+# 在新终端中启动程序，并返回程序 PID
 start_program_in_terminal() {
-    local title="auto_aim_debug_mpc"
-    # 关键修正：先 cd 到项目根目录，再运行程序，确保相对路径 assets/ 能被正确找到
+    local title="${BIN_NAME}"
     local inner_cmd="cd \"${ROOT_DIR}\" && \"${BIN_PATH}\" \"${CONFIG_PATH}\"; echo '程序已退出，窗口将关闭'; sleep 2"
 
     if command -v gnome-terminal >/dev/null 2>&1; then
@@ -77,13 +93,13 @@ start_program_in_terminal() {
     elif command -v xterm >/dev/null 2>&1; then
         xterm -T "${title}" -e bash -c "${inner_cmd}" &
     else
-        echo "[自启动] 错误: 找不到可用的终端模拟器"
+        echo "[调试看门狗] 错误: 找不到可用的终端模拟器"
         exit 1
     fi
 
-    # 等待程序启动，然后获取其 PID
     sleep 2
-    local pid=$(pgrep -f "${BIN_PATH}" | head -1 || true)
+    local pid
+    pid=$(pgrep -f "${BIN_PATH}" | head -1 || true)
     echo "${pid}"
 }
 
@@ -94,13 +110,12 @@ is_truthy() {
     esac
 }
 
-# 主循环
 main() {
     [[ ! -x "${BIN_PATH}" ]] && { echo "错误: ${BIN_PATH} 不可执行"; exit 1; }
     resolve_web_settings
 
     echo "=========================================="
-    echo "自启动脚本已启动 (按 Ctrl+C 彻底退出)"
+    echo "调试看门狗已启动 (按 Ctrl+C 彻底退出)"
     echo "程序: ${BIN_PATH}"
     echo "配置: ${CONFIG_PATH}"
     echo "Web: http://${WEB_HOST}:${WEB_PORT}/"
@@ -111,11 +126,12 @@ main() {
     local browser_opened=0
 
     while true; do
-        echo "[$(date '+%H:%M:%S')] 启动程序..."
+        echo "[$(date '+%H:%M:%S')] 启动调试程序..."
 
-        local prog_pid=$(start_program_in_terminal)
+        local prog_pid
+        prog_pid=$(start_program_in_terminal)
         if [[ -z "${prog_pid}" ]]; then
-            echo "[自启动] 警告: 无法获取程序 PID，可能启动失败，等待后重试"
+            echo "[调试看门狗] 警告: 无法获取程序 PID，可能启动失败，等待后重试"
             sleep "${RESTART_DELAY}"
             continue
         fi
@@ -126,7 +142,6 @@ main() {
             browser_opened=1
         fi
 
-        # 等待程序退出
         while kill -0 "${prog_pid}" 2>/dev/null; do
             sleep 1
         done

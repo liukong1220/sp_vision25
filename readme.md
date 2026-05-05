@@ -112,6 +112,29 @@ IMU型号：使用C板内置BMI088作为IMU\
         chmod +x autostart.sh
         ```
 
+5. 看门狗启动脚本（推荐）
+    1. 调试场景：
+        使用 `debug_mpc_watchdog.sh`
+        适合 `auto_aim_debug_mpc`、`auto_debug`、`sentry_debug`
+        特点：会等待 WebDebugger 就绪并自动打开浏览器
+        ```bash
+        ./debug_mpc_watchdog.sh
+        ./debug_mpc_watchdog.sh auto_debug configs/standard3.yaml
+        ./debug_mpc_watchdog.sh sentry_debug configs/sentry.yaml
+        ```
+    2. 比赛场景：
+        使用 `run_with_watchdog.sh`
+        适合 `standard_mpc`、`sentry`、`standard`
+        特点：不带浏览器和网页调试逻辑，额外开销更小
+        ```bash
+        ./run_with_watchdog.sh
+        ./run_with_watchdog.sh standard_mpc configs/standard3.yaml
+        ./run_with_watchdog.sh sentry configs/sentry.yaml
+        ```
+    3. 使用建议：
+        串口短时断开时，当前项目优先依赖程序内部重连；
+        watchdog 主要负责“程序退出后自动重启”，不是代替串口内部重连。
+
 5. USB2CAN设置（可选）
     1. 创建`.rules`文件:
         ```
