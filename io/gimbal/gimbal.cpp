@@ -3,11 +3,12 @@
 #include "tools/crc.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace io
 {
-    // 帧率计算相关变量
+  // 帧率计算相关变量
   auto frame_start_time = std::chrono::steady_clock::now();
   int frame_count = 0;
   double fps = 0.0;
@@ -15,40 +16,20 @@ namespace io
 
 // 构造函数：从配置文件初始化云台串口连接并启动读取线程
 Gimbal::Gimbal(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path))
 {
-  // 加载YAML配置文件
-  auto yaml = tools::load(config_path);
-  // 从配置文件中读取串口端口号
-  auto com_port = tools::read<std::string>(yaml, "com_port");
+  current_com_port_ = resolve_desired_port();
 
-  try {
-    // 设置串口端口并打开连接
-    serial_.setPort(com_port);
-    serial_.open();
-  } catch (const std::exception & e) {
-    // 串口打开失败时记录错误并退出程序
-    tools::logger()->error("[Gimbal] Failed to open serial: {}", e.what());
-    exit(1);
-  }
-
-  // 启动数据读取线程，执行read_thread函数
+  open_serial(current_com_port_);
   thread_ = std::thread(&Gimbal::read_thread, this);
-
-  // 等待并弹出第一个四元数数据，确保连接正常
-  queue_.pop();
-  // 记录成功接收第一个四元数的日志
-  tools::logger()->info("[Gimbal] First q received.");
 }
 
 // 析构函数：安全关闭云台连接和线程
 Gimbal::~Gimbal()
 {
-  // 设置退出标志，通知线程停止
   quit_ = true;
-  // 等待读取线程结束（如果可连接）
+  close_serial();
   if (thread_.joinable()) thread_.join();
-  // 关闭串口连接
-  serial_.close();
 }
 
 // 获取当前云台工作模式（线程安全）
@@ -87,27 +68,56 @@ std::string Gimbal::str(GimbalMode mode) const
 // 根据时间点获取插值后的四元数姿态
 Eigen::Quaterniond Gimbal::q(std::chrono::steady_clock::time_point t)
 {
-  while (true) {
-    // 从队列中获取最早的四元数数据和时间点
-    auto [q_a, t_a] = queue_.pop();
-    // 查看队列前端的最新四元数数据和时间点
-    auto [q_b, t_b] = queue_.front();
-    // 计算两个数据点之间的时间间隔
-    auto t_ab = tools::delta_time(t_a, t_b);
-    // 计算目标时间与最早数据点的时间间隔
-    auto t_ac = tools::delta_time(t_a, t);
-    // 计算插值比例系数
-    auto k = t_ac / t_ab;
-    // 使用球面线性插值计算目标时刻的四元数，并进行标准化
-    Eigen::Quaterniond q_c = q_a.slerp(k, q_b).normalized();
-    // 如果目标时间早于最早数据点，直接返回插值结果
-    if (t < t_a) return q_c;
-    // 如果目标时间不在当前两个数据点之间，继续循环获取新数据
-    if (!(t_a < t && t <= t_b)) continue;
+  constexpr auto kWaitTimeout = std::chrono::milliseconds(100);
 
-    // 返回插值后的四元数
-    return q_c;
+  while (!quit_) {
+    {
+      std::lock_guard<std::mutex> lock(sample_mutex_);
+      if (prev_sample_.has_value() && latest_sample_.has_value()) {
+        const auto & [q_a, t_a] = *prev_sample_;
+        const auto & [q_b, t_b] = *latest_sample_;
+        if (t_a < t && t <= t_b) {
+          const auto t_ab = tools::delta_time(t_a, t_b);
+          if (std::abs(t_ab) > 1e-6) {
+            const auto t_ac = tools::delta_time(t_a, t);
+            const double k = std::clamp(t_ac / t_ab, 0.0, 1.0);
+            last_returned_q_ = q_a.slerp(k, q_b).normalized();
+            return last_returned_q_;
+          }
+          last_returned_q_ = q_b.normalized();
+          return last_returned_q_;
+        }
+
+        if (t <= t_a) {
+          last_returned_q_ = q_a.normalized();
+          return last_returned_q_;
+        }
+      }
+
+      if (latest_sample_.has_value()) {
+        last_returned_q_ = std::get<0>(*latest_sample_).normalized();
+      }
+    }
+
+    auto sample = queue_.pop_for(kWaitTimeout);
+    if (!sample) {
+      std::lock_guard<std::mutex> lock(sample_mutex_);
+      if (latest_sample_.has_value()) return last_returned_q_;
+      continue;
+    }
+
+    std::lock_guard<std::mutex> lock(sample_mutex_);
+    if (!latest_sample_.has_value()) {
+      latest_sample_ = *sample;
+      last_returned_q_ = std::get<0>(*sample).normalized();
+      return last_returned_q_;
+    }
+    prev_sample_ = latest_sample_;
+    latest_sample_ = *sample;
   }
+
+  std::lock_guard<std::mutex> lock(sample_mutex_);
+  return last_returned_q_;
 }
 
 // 向云台发送控制指令
@@ -181,177 +191,186 @@ void Gimbal::send(
 bool Gimbal::read(uint8_t * buffer, size_t size)
 {
   try {
-    // 尝试从串口读取指定大小的数据到缓冲区
-    // 如果实际读取的字节数等于请求的字节数，则返回true，否则返回false
+    if (!serial_.isOpen()) return false;
     return serial_.read(buffer, size) == size;
   } catch (const std::exception & e) {
-    // 捕获串口读取过程中可能出现的异常
-    // 记录警告日志，显示具体的错误信息
     tools::logger()->warn("[Gimbal] Failed to read serial: {}", e.what());
-    // 发生异常时返回false表示读取失败
     return false;
   }
 }
 
+std::string Gimbal::resolve_desired_port() const
+{
+  if (tools::runtime_params::is_registered(config_path_)) {
+    return tools::runtime_params::get_string(config_path_, "com_port");
+  }
+
+  const auto yaml = tools::load(config_path_);
+  return tools::read<std::string>(yaml, "com_port");
+}
+
+bool Gimbal::open_serial(const std::string & port)
+{
+  try {
+    serial::Timeout timeout = serial::Timeout::simpleTimeout(20);
+    serial_.setPort(port);
+    serial_.setBaudrate(921600);
+    serial_.setFlowcontrol(serial::flowcontrol_none);
+    serial_.setParity(serial::parity_none);
+    serial_.setStopbits(serial::stopbits_one);
+    serial_.setBytesize(serial::eightbits);
+    serial_.setTimeout(timeout);
+    serial_.open();
+    current_com_port_ = port;
+    tools::logger()->info("[Gimbal] Serial opened on {}", current_com_port_);
+    return true;
+  } catch (const std::exception & e) {
+    tools::logger()->warn("[Gimbal] Failed to open serial {}: {}", port, e.what());
+    return false;
+  }
+}
+
+void Gimbal::close_serial()
+{
+  try {
+    if (serial_.isOpen()) serial_.close();
+  } catch (const std::exception & e) {
+    tools::logger()->warn("[Gimbal] Failed to close serial: {}", e.what());
+  }
+}
+
+void Gimbal::reset_sample_cache()
+{
+  std::lock_guard<std::mutex> lock(sample_mutex_);
+  prev_sample_.reset();
+  latest_sample_.reset();
+  last_returned_q_ = Eigen::Quaterniond::Identity();
+  queue_.clear();
+}
+
 void Gimbal::read_thread()
 {
-  // 记录读取线程启动日志
   tools::logger()->info("[Gimbal] read_thread started.");
-  // 错误计数器，用于跟踪连续读取失败的次数
   int error_count = 0;
-  // 缓冲区用于帧同步
   uint8_t sync_buffer[1];
 
-  // 主循环：持续读取云台数据直到收到退出信号
   while (!quit_) {
-    // 记录帧开始时间
     frame_start_time = std::chrono::steady_clock::now();
-    // 如果错误计数超过阈值（5000次），执行重连操作
+
+    if (!serial_.isOpen()) {
+      reconnect();
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+
     if (error_count > 5000) {
       error_count = 0;
       tools::logger()->warn("[Gimbal] Too many errors, attempting to reconnect...");
-      // 调用重连函数尝试重新建立串口连接
       reconnect();
       continue;
     }
 
-    // 帧同步：逐个字节读取直到找到正确的帧头
     bool frame_synced = false;
     while (!frame_synced && !quit_) {
-      // 读取单个字节进行帧同步
       if (!read(sync_buffer, 1)) {
         error_count++;
+        if (!serial_.isOpen()) break;
         continue;
       }
-      
-      // 检查是否为正确的帧头
+
       if (sync_buffer[0] == 0x5A) {
         frame_synced = true;
-        rx_data_.head = 0x5A;  // 设置正确的帧头
+        rx_data_.head = 0x5A;
       } else {
-        // 记录无效帧头用于调试
         tools::logger()->debug("[Gimbal] Sync byte: 0x{:02X}", sync_buffer[0]);
       }
     }
-    
-    if (quit_) break;
 
-    // 记录当前时间戳，用于后续数据同步
+    if (quit_) break;
+    if (!serial_.isOpen()) continue;
+
     auto t = std::chrono::steady_clock::now();
 
-    // 读取数据帧的剩余部分（除了头部之外的数据）
     if (!read(
           reinterpret_cast<uint8_t *>(&rx_data_) + sizeof(rx_data_.head),
           sizeof(rx_data_) - sizeof(rx_data_.head))) {
-      tools::logger()->warn("[Gimbal] Failed to read remaining {} bytes of data frame", sizeof(rx_data_) - sizeof(rx_data_.head));
       error_count++;
       continue;
     }
 
-    // 验证数据帧的CRC校验和是否正确
     if (!tools::check_crc16(reinterpret_cast<uint8_t *>(&rx_data_), sizeof(rx_data_))) {
       tools::logger()->warn("[Gimbal] CRC16 check failed. Frame discarded.");
       error_count++;
       continue;
     }
 
-    // 数据验证通过，重置错误计数器
     error_count = 0;
-    
-    // 从接收数据中提取四元数姿态信息
     Eigen::Quaterniond q(rx_data_.q[0], rx_data_.q[1], rx_data_.q[2], rx_data_.q[3]);
-    // 将四元数和时间戳推入队列，供其他线程使用
     queue_.push({q, t});
 
-    // 获取互斥锁以安全地更新云台状态
     std::lock_guard<std::mutex> lock(mutex_);
+    state_.yaw = rx_data_.yaw;
+    state_.yaw_vel = rx_data_.yaw_vel;
+    state_.pitch = rx_data_.pitch;
+    state_.pitch_vel = rx_data_.pitch_vel;
+    state_.bullet_speed = rx_data_.bullet_speed;
+    state_.bullet_count = rx_data_.bullet_count;
 
-    // 更新云台状态信息
-    state_.yaw = rx_data_.yaw;           // 偏航角
-    state_.yaw_vel = rx_data_.yaw_vel;   // 偏航角速度
-    state_.pitch = rx_data_.pitch;       // 俯仰角
-    state_.pitch_vel = rx_data_.pitch_vel; // 俯仰角速度
-    state_.bullet_speed = rx_data_.bullet_speed; // 子弹速度
-    state_.bullet_count = rx_data_.bullet_count; // 子弹计数
-
-    // 使用临时变量输出
-    // tools::logger()->info("yaw: {:.2f}°, pitch: {:.2f}°\n yaw_vel: {:.2f}°m/s pitch_vel: {:.2f}°m/s\n bullet_speed: {:.2f}m/s bullet_count: {}", 
-    //   state_.yaw, state_.pitch, state_.yaw_vel, state_.pitch_vel, state_.bullet_speed, state_.bullet_count);
-          // 帧率计算
     frame_count++;
     auto current_time = std::chrono::steady_clock::now();
-    auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_update).count();
-    
-    // 每秒更新一次帧率并在终端显示
-    
+    auto time_diff =
+      std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_update).count();
+    if (time_diff > 0) {
       fps = frame_count * 1000.0 / time_diff;
-      // 在终端显示帧率（使用fmt库格式化输出）
-      //tools::logger()->info("\nFPS: {:.1f}", fps);
-      std::fflush(stdout);  // 确保立即输出
+      std::fflush(stdout);
       frame_count = 0;
       last_fps_update = current_time;
-    
+    }
 
-      
-    // 根据接收到的模式值设置云台工作模式
     switch (rx_data_.mode) {
       case 0:
-        mode_ = GimbalMode::IDLE;        // 空闲模式
+        mode_ = GimbalMode::IDLE;
         break;
       case 1:
-        mode_ = GimbalMode::AUTO_AIM;    // 自动瞄准模式
+        mode_ = GimbalMode::AUTO_AIM;
         break;
       case 2:
-        mode_ = GimbalMode::SMALL_BUFF;  // 小能量机关模式
+        mode_ = GimbalMode::SMALL_BUFF;
         break;
       case 3:
-        mode_ = GimbalMode::BIG_BUFF;    // 大能量机关模式
+        mode_ = GimbalMode::BIG_BUFF;
         break;
       default:
-        mode_ = GimbalMode::IDLE;        // 默认设为空闲模式
+        mode_ = GimbalMode::IDLE;
         tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
         break;
     }
   }
 
-  // 记录读取线程停止日志
   tools::logger()->info("[Gimbal] read_thread stopped.");
 }
 
 void Gimbal::reconnect()
 {
-  // 设置最大重连尝试次数
   int max_retry_count = 10;
-  
-  // 循环尝试重连，直到达到最大尝试次数或收到退出信号
+
   for (int i = 0; i < max_retry_count && !quit_; ++i) {
-    // 记录当前重连尝试的日志信息
-    tools::logger()->warn("[Gimbal] Reconnecting serial, attempt {}/{}...", i + 1, max_retry_count);
-    
-    // 尝试关闭串口连接
-    try {
-      serial_.close();
-      // 等待1秒，给硬件设备足够的时间重置
-      std::this_thread::sleep_for(std::chrono::seconds(1));
-    } catch (...) {
-      // 忽略关闭串口时可能出现的任何异常
+    const auto desired_port = resolve_desired_port();
+    if (desired_port != current_com_port_) {
+      tools::logger()->warn(
+        "[Gimbal] Detected com_port change: {} -> {}", current_com_port_, desired_port);
     }
 
-    // 尝试重新打开串口连接
-    try {
-      serial_.open();  // 尝试重新打开串口
-      // 清空数据队列，避免使用旧的缓存数据
-      queue_.clear();
-      // 记录成功重连的日志信息
-      tools::logger()->info("[Gimbal] Reconnected serial successfully.");
-      // 重连成功，跳出循环
-      break;
-    } catch (const std::exception & e) {
-      // 捕获并记录重连失败的具体错误信息
-      tools::logger()->warn("[Gimbal] Reconnect failed: {}", e.what());
-      // 等待1秒后继续下一次重连尝试
-      std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
+    close_serial();
+    reset_sample_cache();
+
+    tools::logger()->warn(
+      "[Gimbal] Reconnecting serial on {} (attempt {}/{})...",
+      desired_port, i + 1, max_retry_count);
+
+    if (open_serial(desired_port)) return;
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 }
 

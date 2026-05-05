@@ -5,6 +5,7 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <queue>
 
 namespace tools
@@ -62,11 +63,37 @@ public:
     return std::move(value);
   }
 
+  template <typename Rep, typename Period>
+  std::optional<T> pop_for(const std::chrono::duration<Rep, Period> & timeout)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    if (!not_empty_condition_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
+      return std::nullopt;
+    }
+
+    T value = std::move(queue_.front());
+    queue_.pop();
+    return value;
+  }
+
   T front()
   {
     std::unique_lock<std::mutex> lock(mutex_);
 
     not_empty_condition_.wait(lock, [this] { return !queue_.empty(); });
+
+    return queue_.front();
+  }
+
+  template <typename Rep, typename Period>
+  std::optional<T> front_for(const std::chrono::duration<Rep, Period> & timeout)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    if (!not_empty_condition_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
+      return std::nullopt;
+    }
 
     return queue_.front();
   }
