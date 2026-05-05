@@ -36,13 +36,15 @@ min_detect_count: 3
 max_temp_lost_count: 15
 
 outpost_max_temp_lost_count: 75
-outpost_radius: 0.2665
+outpost_radius: 0.2765
 outpost_armor_z_offsets: [0.0, -0.102, 0.102]
 outpost_fixed_center_rotation_model: true
-outpost_spin_speed_lock: 2.63
-outpost_coming_angle: 100
-outpost_leaving_angle: 120
-outpost_delay_time: 0.125
+outpost_spin_speed_lock: 2.51
+outpost_coming_angle: 60
+#决定“提前多早开始认定下一块板是应打板”，主要管选板提前量和轨迹连续性。
+outpost_leaving_angle: 18
+#决定“板进入正面附近后还能保留多久”，同时还间接决定最终 fire 相位窗口大小
+outpost_delay_time: 0.078
 outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 
 #####-----aimer参数----
@@ -83,6 +85,7 @@ distort_coeffs: [-0.071611772992372258, 0.11840473738064419, -0.0006993282473657
 # 相机同理想情况的偏角: yaw-0.91 pitch-0.02 roll0.22 degree
 R_camera2gimbal: [0.015942160097545122, -0.00041943671940238703, 0.99987282771573627, -0.9998652948205573, 0.0038976198828972741, 0.015943675004475393, -0.0039038115764127961, -0.99999231628652352, -0.00035724373893120109]
 t_camera2gimbal: [0.043800814867209902, -0.00092419421675686174, 0.025975290143292605]
+
 
 
 #####-----cboard参数-----#####

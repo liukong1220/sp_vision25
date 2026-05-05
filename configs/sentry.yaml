@@ -41,7 +41,9 @@ outpost_armor_z_offsets: [0.0, -0.102, 0.102]
 outpost_fixed_center_rotation_model: true
 outpost_spin_speed_lock: 2.51
 outpost_coming_angle: 60
+#决定“提前多早开始认定下一块板是应打板”，主要管选板提前量和轨迹连续性。
 outpost_leaving_angle: 18
+#决定“板进入正面附近后还能保留多久”，同时还间接决定最终 fire 相位窗口大小
 outpost_delay_time: 0.078
 outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 
