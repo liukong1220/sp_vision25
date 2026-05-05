@@ -115,6 +115,9 @@ gimbal_state_unit: "deg"
 
 #####-----planner-----#####
 fire_thresh: 0.0027  # 当前设置为0.0035弧度（约0.2度）
+bullet_speed_min: 10.0
+bullet_speed_max: 25.0
+bullet_speed_fallback: 22.0
 
 max_yaw_acc: 90  # 当前设置为60度/秒² serial: SerialException device reports readiness to write but returned no data
 Q_yaw: [3e6, 0.3]  # 当前位置权重为4e6，速度权重为0

@@ -216,6 +216,21 @@ std::vector<ParamSpec> build_specs()
       3, json::array({0.0, 0.0, 0.0}),
     },
     {
+      "bullet_speed_min", "planner", "规划/MPC", "子弹速度最小有效值",
+      "低于该值时认为串口测速异常，Planner 将使用回退速度。", "m/s", ParamType::kDouble,
+      0, 10.0,
+    },
+    {
+      "bullet_speed_max", "planner", "规划/MPC", "子弹速度最大有效值",
+      "高于该值时认为串口测速异常，Planner 将使用回退速度。", "m/s", ParamType::kDouble,
+      0, 25.0,
+    },
+    {
+      "bullet_speed_fallback", "planner", "规划/MPC", "子弹速度回退值",
+      "测速异常时 Planner 使用的默认子弹速度。", "m/s", ParamType::kDouble,
+      0, 22.0,
+    },
+    {
       "yaw_offset", "planner", "规划/MPC", "Yaw 零偏",
       "枪口/相机在 yaw 方向的补偿偏置。", "deg", ParamType::kDouble,
     },
@@ -309,6 +324,12 @@ double ui_step_for(const ParamSpec & spec)
   {
     return 0.001;
   }
+  if (
+    spec.key == "bullet_speed_min" || spec.key == "bullet_speed_max" ||
+    spec.key == "bullet_speed_fallback")
+  {
+    return 0.1;
+  }
   if (spec.key == "outpost_spin_speed_lock") return 0.01;
   if (spec.key == "decision_speed") return 0.05;
   if (spec.key == "yaw_offset" || spec.key == "pitch_offset") return 0.05;
@@ -350,6 +371,8 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
     spec.key == "max_armor_ratio" || spec.key == "max_side_ratio" ||
     spec.key == "max_angle_error" || spec.key == "max_rectangular_error" ||
     spec.key == "outpost_radius" || spec.key == "outpost_spin_speed_lock" ||
+    spec.key == "bullet_speed_min" || spec.key == "bullet_speed_max" ||
+    spec.key == "bullet_speed_fallback" ||
     spec.key == "decision_speed" || spec.key == "high_speed_delay_time" ||
     spec.key == "outpost_delay_time" ||
     spec.key == "low_speed_delay_time" || spec.key == "fire_thresh" ||
