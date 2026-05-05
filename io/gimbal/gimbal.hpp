@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -101,25 +102,54 @@ public:
   void send(io::VisionToGimbal VisionToGimbal);
 
 private:
+  // 时间戳四元数样本类型：
+  // 用于在读取线程和姿态查询线程之间传递“某时刻的云台姿态”
+  using TimedQuaternion = std::tuple<Eigen::Quaterniond, std::chrono::steady_clock::time_point>;
+
   serial::Serial serial_;  // 串口通信对象
 
   std::thread thread_;     // 数据读取线程
   std::atomic<bool> quit_ = false; // 线程退出标志
   mutable std::mutex mutex_; // 线程安全互斥锁
+  // sample_mutex_ 保护最近两帧姿态样本缓存，避免 q() 和 read_thread() 并发访问时出现竞争
+  mutable std::mutex sample_mutex_;
+
+  // 配置文件路径：
+  // 用于在运行时参数会话中查询最新 com_port，实现“改参数后重连切口”
+  std::string config_path_;
+  // 当前已经成功打开的串口名，仅用于日志和重连切口判断
+  std::string current_com_port_;
 
   GimbalToVision rx_data_;  // 接收数据缓冲区
   VisionToGimbal tx_data_;  // 发送数据缓冲区
 
   GimbalMode mode_ = GimbalMode::IDLE; // 当前云台模式
   GimbalState state_;                  // 当前云台状态
-  
+  // 上一次成功返回给调用方的姿态：
+  // 当短时间内没有新串口数据时，q() 会回退到最后一个有效姿态，而不是永久阻塞
+  Eigen::Quaterniond last_returned_q_ = Eigen::Quaterniond::Identity();
+  // 最近两帧有效姿态样本：
+  // prev_sample_ / latest_sample_ 共同构成插值区间，用于按时间戳插值得到更接近目标时刻的姿态
+  std::optional<TimedQuaternion> prev_sample_;
+  std::optional<TimedQuaternion> latest_sample_;
+
   // 线程安全队列，存储四元数和时间戳对，容量为1000
-  tools::ThreadSafeQueue<std::tuple<Eigen::Quaterniond, std::chrono::steady_clock::time_point>>
+  tools::ThreadSafeQueue<TimedQuaternion>
     queue_{1000};
 
   // 从串口读取指定大小的数据到缓冲区
   bool read(uint8_t * buffer, size_t size);
-  
+  // 获取当前“应该连接哪个串口”：
+  // 若运行时参数会话已启用，则优先读热更新后的 com_port；否则退回 YAML 基线值
+  std::string resolve_desired_port() const;
+  // 打开指定串口并配置串口参数、读写超时
+  bool open_serial(const std::string & port);
+  // 安全关闭串口，供析构和重连共用
+  void close_serial();
+  // 清空姿态缓存和队列：
+  // 每次切口重连后都要丢弃旧串口残留样本，避免新旧设备数据混用
+  void reset_sample_cache();
+
   // 数据读取线程函数
   void read_thread();
   

@@ -156,6 +156,14 @@ std::vector<ParamSpec> build_specs()
       0, nullptr, {"red", "blue"},
     },
     {
+      "com_port", "gimbal", "云台串口", "串口设备名",
+      "云台串口设备路径，重连时会按当前值尝试重新打开。", "", ParamType::kStringEnum,
+      0, nullptr,
+      {
+        "/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyACM3",
+      },
+    },
+    {
       "min_detect_count", "tracker", "跟踪", "最小确认帧数",
       "进入 tracking 前需要连续观测的次数。", "frame", ParamType::kInt,
     },
