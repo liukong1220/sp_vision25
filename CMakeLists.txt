@@ -212,7 +212,7 @@ if(ament_cmake_FOUND)
     )
 
     install(
-      FILES readme.md run_auto_aim_debug_mpc_watchdog.sh
+      FILES readme.md run_with_watchdog.sh debug_mpc_watchdog.sh
       DESTINATION share/${PROJECT_NAME}
     )
 
