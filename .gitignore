@@ -3,6 +3,7 @@
 build/
 Camera/
 logs/
+tmp/
 assets/img_with_q/
 records/
 records_auto_buff_big/
