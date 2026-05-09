@@ -5,7 +5,9 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include "../auto_aim/planner/planner.hpp"
@@ -33,6 +35,8 @@ public:
   double t_gap = 0;  ///
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   SmallTarget target_;
   double yaw_offset_;
   double pitch_offset_;
@@ -51,6 +55,7 @@ private:
 
   std::chrono::steady_clock::time_point last_fire_t_;
 
+  void refresh_runtime_params_if_needed();
   bool get_send_angle(
     auto_buff::Target & target, const double predict_time, const double bullet_speed,
     const bool to_now, double & yaw, double & pitch);

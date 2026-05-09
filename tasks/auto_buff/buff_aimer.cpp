@@ -2,26 +2,45 @@
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/trajectory.hpp"
 #include "tools/yaml.hpp"
 
 namespace auto_buff
 {
 Aimer::Aimer(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path))
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
   yaw_offset_ = yaml["yaw_offset"].as<double>() / 57.3;      // degree to rad
   pitch_offset_ = yaml["pitch_offset"].as<double>() / 57.3;  // degree to rad
   fire_gap_time_ = yaml["fire_gap_time"].as<double>();
   predict_time_ = yaml["predict_time"].as<double>();
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 
   last_fire_t_ = std::chrono::steady_clock::now();
+}
+
+void Aimer::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  yaw_offset_ = tools::runtime_params::get_double(config_path_, "yaw_offset") / 57.3;
+  pitch_offset_ = tools::runtime_params::get_double(config_path_, "pitch_offset") / 57.3;
+  fire_gap_time_ = tools::runtime_params::get_double(config_path_, "fire_gap_time");
+  predict_time_ = tools::runtime_params::get_double(config_path_, "predict_time");
+
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[BuffAimer] runtime params updated to v{}", current_version);
 }
 
 io::Command Aimer::aim(
   auto_buff::Target & target, std::chrono::steady_clock::time_point & timestamp,
   double bullet_speed, bool to_now)
 {
+  refresh_runtime_params_if_needed();
   io::Command command = {false, false, 0, 0};
   if (target.is_unsolve()) return command;
 
@@ -71,6 +90,7 @@ auto_aim::Plan Aimer::mpc_aim(
   auto_buff::Target & target, std::chrono::steady_clock::time_point & timestamp, io::GimbalState gs,
   bool to_now)
 {
+  refresh_runtime_params_if_needed();
   auto_aim::Plan plan = {false, false, 0, 0, 0, 0, 0, 0, 0, 0};
   if (target.is_unsolve()) return plan;
 
