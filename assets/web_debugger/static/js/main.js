@@ -296,6 +296,7 @@
 
     if (item.type === "boolean") return !!control.checked;
     if (item.type === "enum") return control.value;
+    if (item.type === "string") return String(control.value ?? "");
 
     if (item.type === "integer") {
       const value = Number(control.value);
@@ -513,6 +514,12 @@
           control.rows = 2;
           control.value = formatParamValue(item.value, item.display_precision);
           control.placeholder = "例如: 3e6, 0.3";
+          controlWrap.appendChild(control);
+        } else if (item.type === "string") {
+          actions.classList.add("is-scalar");
+          control = document.createElement("input");
+          control.type = "text";
+          control.value = item.value ?? "";
           controlWrap.appendChild(control);
         } else {
           actions.classList.add("is-scalar");

@@ -38,6 +38,7 @@ enum class ParamType
   kInt,
   kBool,
   kDoubleArray,
+  kString,
   kStringEnum,
 };
 
@@ -290,6 +291,106 @@ std::vector<ParamSpec> build_specs()
       "Pitch MPC 控制权重。", "", ParamType::kDoubleArray,
       1,
     },
+    {
+      "first_tolerance", "shooter", "射击判定", "近距离容差",
+      "近距离射击容差，单位度。", "deg", ParamType::kDouble,
+    },
+    {
+      "second_tolerance", "shooter", "射击判定", "远距离容差",
+      "远距离射击容差，单位度。", "deg", ParamType::kDouble,
+    },
+    {
+      "judge_distance", "shooter", "射击判定", "距离分界",
+      "切换近远距离容差的距离阈值。", "m", ParamType::kDouble,
+    },
+    {
+      "auto_fire", "shooter", "射击判定", "自动开火",
+      "是否允许链路自动触发射击。", "", ParamType::kBool,
+      0, true,
+    },
+    {
+      "fire_gap_time", "buff", "BUFF参数", "Buff 最小击发间隔",
+      "两次 Buff 击发之间的最小时间间隔。", "s", ParamType::kDouble,
+    },
+    {
+      "predict_time", "buff", "BUFF参数", "Buff 预测提前量",
+      "Buff 预测时间补偿。", "s", ParamType::kDouble,
+    },
+    {
+      "R_gimbal2imubody", "calibration", "标定/外参", "云台到IMU旋转",
+      "云台坐标系到IMU机体系的旋转矩阵，按行展开。", "", ParamType::kDoubleArray,
+      9,
+    },
+    {
+      "camera_matrix", "calibration", "标定/外参", "相机内参矩阵",
+      "相机内参矩阵，按行展开。", "", ParamType::kDoubleArray,
+      9,
+    },
+    {
+      "distort_coeffs", "calibration", "标定/外参", "畸变系数",
+      "相机畸变系数。", "", ParamType::kDoubleArray,
+      5,
+    },
+    {
+      "R_camera2gimbal", "calibration", "标定/外参", "相机到云台旋转",
+      "相机坐标系到云台坐标系的旋转矩阵，按行展开。", "", ParamType::kDoubleArray,
+      9,
+    },
+    {
+      "t_camera2gimbal", "calibration", "标定/外参", "相机到云台平移",
+      "相机坐标系到云台坐标系的平移向量。", "m", ParamType::kDoubleArray,
+      3,
+    },
+    {
+      "gimbal_state_unit", "debug", "调试显示", "云台状态单位",
+      "网页与本地可视化解释串口姿态字段时采用的单位。", "", ParamType::kStringEnum,
+      0, nullptr, {"auto", "deg", "rad"},
+    },
+    {
+      "show_local", "debug", "调试显示", "本地窗口",
+      "是否启用本地 OpenCV 调试窗口。", "", ParamType::kBool,
+      0, false,
+    },
+    {
+      "web_fps", "debug", "调试显示", "网页刷新帧率",
+      "网页主图和弹道图的推流帧率。", "fps", ParamType::kDouble,
+      0, 30.0,
+    },
+    {
+      "web_scale", "debug", "调试显示", "显示缩放",
+      "调试输出图像的显示缩放系数。", "", ParamType::kDouble,
+      0, 0.8,
+    },
+    {
+      "web_jpeg_quality", "debug", "调试显示", "JPEG质量",
+      "网页图像压缩质量。", "", ParamType::kInt,
+      0, 55,
+    },
+    {
+      "web_client_ttl_ms", "debug", "调试显示", "网页保活时间",
+      "最近访问后继续保持渲染的时间窗口。", "ms", ParamType::kInt,
+      0, 1000,
+    },
+    {
+      "record_raw_video", "debug_record", "调试录制", "录制原始图像",
+      "是否录制原始相机画面。", "", ParamType::kBool,
+      0, false,
+    },
+    {
+      "record_debug_video", "debug_record", "调试录制", "录制调试画面",
+      "是否录制带调试叠加的输出画面。", "", ParamType::kBool,
+      0, false,
+    },
+    {
+      "record_debug_fps", "debug_record", "调试录制", "录制帧率",
+      "调试录制输出帧率。", "fps", ParamType::kDouble,
+      0, 30.0,
+    },
+    {
+      "record_debug_dir", "debug_record", "调试录制", "录制目录",
+      "调试录制输出目录。", "", ParamType::kString,
+      0, "records",
+    },
   };
 }
 
@@ -319,10 +420,26 @@ double ui_step_for(const ParamSpec & spec)
   if (spec.key == "threshold") return 1.0;
   if (spec.key == "fire_thresh") return 0.0001;
   if (
+    spec.key == "fire_gap_time" || spec.key == "predict_time" ||
+    spec.key == "record_debug_fps")
+  {
+    return 0.001;
+  }
+  if (
     spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
     spec.key == "outpost_delay_time" || spec.key == "outpost_radius")
   {
     return 0.001;
+  }
+  if (spec.key == "web_fps") return 1.0;
+  if (spec.key == "web_scale") return 0.05;
+  if (spec.key == "web_jpeg_quality" || spec.key == "web_client_ttl_ms") return 1.0;
+  if (
+    spec.key == "R_gimbal2imubody" || spec.key == "camera_matrix" ||
+    spec.key == "distort_coeffs" || spec.key == "R_camera2gimbal" ||
+    spec.key == "t_camera2gimbal")
+  {
+    return 0.000001;
   }
   if (
     spec.key == "bullet_speed_min" || spec.key == "bullet_speed_max" ||
@@ -359,6 +476,7 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
   {
     return spec.key == "roi.width" || spec.key == "roi.height" ? -1.0 : 0.0;
   }
+  if (spec.key == "web_client_ttl_ms" || spec.key == "web_jpeg_quality") return 0.0;
   if (
     spec.key == "min_detect_count" || spec.key == "max_temp_lost_count" ||
     spec.key == "outpost_max_temp_lost_count")
@@ -376,8 +494,12 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
     spec.key == "decision_speed" || spec.key == "high_speed_delay_time" ||
     spec.key == "outpost_delay_time" ||
     spec.key == "low_speed_delay_time" || spec.key == "fire_thresh" ||
+    spec.key == "fire_gap_time" || spec.key == "predict_time" ||
+    spec.key == "judge_distance" || spec.key == "record_debug_fps" ||
+    spec.key == "web_fps" || spec.key == "web_scale" ||
     spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc" ||
     spec.key == "coming_angle" || spec.key == "leaving_angle" ||
+    spec.key == "first_tolerance" || spec.key == "second_tolerance" ||
     spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
   {
     return 0.0;
@@ -389,7 +511,12 @@ std::optional<double> ui_max_for(const ParamSpec & spec)
 {
   if (spec.key == "min_confidence") return 1.0;
   if (spec.key == "threshold") return 255.0;
+  if (spec.key == "web_fps") return 60.0;
+  if (spec.key == "web_scale") return 1.0;
+  if (spec.key == "web_jpeg_quality") return 95.0;
+  if (spec.key == "web_client_ttl_ms") return 10000.0;
   if (spec.key == "max_angle_error" || spec.key == "max_rectangular_error") return 90.0;
+  if (spec.key == "first_tolerance" || spec.key == "second_tolerance") return 45.0;
   if (
     spec.key == "coming_angle" || spec.key == "leaving_angle" ||
     spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
@@ -406,9 +533,19 @@ int ui_precision_for(const ParamSpec & spec)
   if (spec.key == "threshold") return 0;
   if (spec.key == "min_confidence") return 2;
   if (spec.key == "fire_thresh") return 4;
+  if (spec.key == "web_scale") return 2;
+  if (spec.key == "web_fps" || spec.key == "record_debug_fps") return 1;
+  if (
+    spec.key == "R_gimbal2imubody" || spec.key == "camera_matrix" ||
+    spec.key == "distort_coeffs" || spec.key == "R_camera2gimbal" ||
+    spec.key == "t_camera2gimbal")
+  {
+    return 6;
+  }
   if (
     spec.key == "high_speed_delay_time" || spec.key == "low_speed_delay_time" ||
-    spec.key == "outpost_delay_time" || spec.key == "outpost_radius")
+    spec.key == "outpost_delay_time" || spec.key == "outpost_radius" ||
+    spec.key == "fire_gap_time" || spec.key == "predict_time")
   {
     return 3;
   }
@@ -518,6 +655,8 @@ json read_value_from_text(
       if (lowered == "false") return false;
       throw std::runtime_error(spec.key + " expects true/false");
     }
+    case ParamType::kString:
+      return strip_quotes(raw_value);
     case ParamType::kStringEnum:
       return strip_quotes(raw_value);
     case ParamType::kDoubleArray: {
@@ -563,6 +702,11 @@ json normalize_value(const json & incoming, const ParamSpec & spec)
         throw std::runtime_error(spec.key + " expects a boolean");
       }
       return incoming.get<bool>();
+    case ParamType::kString:
+      if (!incoming.is_string()) {
+        throw std::runtime_error(spec.key + " expects a string");
+      }
+      return incoming.get<std::string>();
     case ParamType::kStringEnum: {
       if (!incoming.is_string()) {
         throw std::runtime_error(spec.key + " expects a string");
@@ -795,6 +939,7 @@ json build_response_locked(const SessionState & session)
         spec.type == ParamType::kInt ? "integer" :
         spec.type == ParamType::kBool ? "boolean" :
         spec.type == ParamType::kDoubleArray ? "number_array" :
+        spec.type == ParamType::kString ? "string" :
         "enum"},
       {"unit", spec.unit},
       {"value", session.effective_values.at(spec.key)},

@@ -5,7 +5,9 @@
 
 #include <Eigen/Dense>  // 必须在opencv2/core/eigen.hpp上面
 #include <opencv2/core/eigen.hpp>
+#include <cstdint>
 #include <optional>
+#include <string>
 
 #include "buff_type.hpp"
 #include "tools/math_tools.hpp"
@@ -32,6 +34,8 @@ public:
     const Eigen::Vector3d & xyz_in_world, double yaw, double row) const;
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   Eigen::Matrix3d R_gimbal2imubody_;
@@ -59,6 +63,7 @@ private:
 
   // 函数：生成绕x轴旋转的旋转矩阵
   cv::Matx33f rotation_matrix(double angle) const;
+  void refresh_runtime_params_if_needed();
 
   // 函数：旋转点并填充到 OBJECT_POINTS 中
   void compute_rotated_points(std::vector<std::vector<cv::Point3f>> & object_points);

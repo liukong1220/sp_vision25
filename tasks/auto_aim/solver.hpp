@@ -5,6 +5,9 @@
 #include <Eigen/Geometry>
 #include <opencv2/core/eigen.hpp>
 
+#include <cstdint>
+#include <string>
+
 #include "armor.hpp"
 
 namespace auto_aim
@@ -28,6 +31,8 @@ public:
   std::vector<cv::Point2f> world2pixel(const std::vector<cv::Point3f> & worldPoints) const;
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   Eigen::Matrix3d R_gimbal2imubody_;
@@ -35,6 +40,7 @@ private:
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;
 
+  void refresh_runtime_params_if_needed();
   void optimize_yaw(Armor & armor) const;
 
   double armor_reprojection_error(const Armor & armor, double yaw, const double & inclined) const;

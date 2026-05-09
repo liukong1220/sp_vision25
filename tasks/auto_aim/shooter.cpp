@@ -2,23 +2,41 @@
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace auto_aim
 {
-Shooter::Shooter(const std::string & config_path) : last_command_{false, false, 0, 0}
+Shooter::Shooter(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path)), last_command_{false, false, 0, 0}
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
   first_tolerance_ = yaml["first_tolerance"].as<double>() / 57.3;    // degree to rad
   second_tolerance_ = yaml["second_tolerance"].as<double>() / 57.3;  // degree to rad
   judge_distance_ = yaml["judge_distance"].as<double>();
   auto_fire_ = yaml["auto_fire"].as<bool>();
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
+}
+
+void Shooter::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  first_tolerance_ = tools::runtime_params::get_double(config_path_, "first_tolerance") / 57.3;
+  second_tolerance_ = tools::runtime_params::get_double(config_path_, "second_tolerance") / 57.3;
+  judge_distance_ = tools::runtime_params::get_double(config_path_, "judge_distance");
+  auto_fire_ = tools::runtime_params::get_bool(config_path_, "auto_fire");
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[Shooter] runtime params updated to v{}", current_version);
 }
 
 bool Shooter::shoot(
   const io::Command & command, const auto_aim::Aimer & aimer,
   const std::list<auto_aim::Target> & targets, const Eigen::Vector3d & gimbal_pos)
 {
+  refresh_runtime_params_if_needed();
   if (!command.control || targets.empty() || !auto_fire_) return false;
 
   auto target_x = targets.front().ekf_x()[0];

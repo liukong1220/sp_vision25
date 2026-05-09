@@ -34,6 +34,7 @@
 #include "tools/path.hpp"
 #include "tools/plotter.hpp"
 #include "tools/recorder.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/web_debugger.hpp"
 #include "tools/yaml.hpp"
 
@@ -430,9 +431,20 @@ int main(int argc, char * argv[])
   const auto yaml = tools::load(config_path);
   const double yaw_offset = tools::read<double>(yaml, "yaw_offset") / 57.3;
   const double pitch_offset = tools::read<double>(yaml, "pitch_offset") / 57.3;
-  const auto gimbal_state_unit_mode = parse_gimbal_state_unit_mode(
+  const bool has_cli_gimbal_state_unit = has_cli_option(argc, argv, "gimbal-state-unit");
+  const bool has_cli_show_local = has_cli_option(argc, argv, "show-local");
+  const bool has_cli_web_fps = has_cli_option(argc, argv, "web-fps");
+  const bool has_cli_web_scale = has_cli_option(argc, argv, "web-scale");
+  const bool has_cli_web_jpeg_quality = has_cli_option(argc, argv, "web-jpeg-quality");
+  const bool has_cli_web_client_ttl_ms = has_cli_option(argc, argv, "web-client-ttl-ms");
+  const bool has_cli_record_raw_video = has_cli_option(argc, argv, "record-raw-video");
+  const bool has_cli_record_debug_video = has_cli_option(argc, argv, "record-debug-video");
+  const bool has_cli_record_debug_fps = has_cli_option(argc, argv, "record-debug-fps");
+  const bool has_cli_record_debug_dir = has_cli_option(argc, argv, "record-debug-dir");
+
+  auto gimbal_state_unit_mode = parse_gimbal_state_unit_mode(
     tools::read_or<std::string>(yaml, "gimbal_state_unit", "auto"));
-  const bool show_local = has_cli_option(argc, argv, "show-local") ?
+  bool show_local = has_cli_show_local ?
     cli.get<bool>("show-local") : tools::read_or<bool>(yaml, "show_local", false);
   const bool disable_web = has_cli_option(argc, argv, "disable-web") ?
     cli.get<bool>("disable-web") : tools::read_or<bool>(yaml, "disable_web", false);
@@ -442,34 +454,34 @@ int main(int argc, char * argv[])
     has_cli_option(argc, argv, "web-port") ?
       cli.get<int>("web-port") : tools::read_or<int>(yaml, "web_port", 8090),
     1, 65535));
-  const double web_fps = std::clamp(
-    has_cli_option(argc, argv, "web-fps") ?
+  double web_fps = std::clamp(
+    has_cli_web_fps ?
       cli.get<double>("web-fps") : tools::read_or<double>(yaml, "web_fps", 8.0),
     1.0, 60.0);
-  const double display_scale = std::clamp(
-    has_cli_option(argc, argv, "web-scale") ?
+  double display_scale = std::clamp(
+    has_cli_web_scale ?
       cli.get<double>("web-scale") : tools::read_or<double>(yaml, "web_scale", 0.7),
     0.25, 1.0);
-  const int web_jpeg_quality = std::clamp(
-    has_cli_option(argc, argv, "web-jpeg-quality") ?
+  int web_jpeg_quality = std::clamp(
+    has_cli_web_jpeg_quality ?
       cli.get<int>("web-jpeg-quality") : tools::read_or<int>(yaml, "web_jpeg_quality", 70),
     30, 95);
-  const auto web_client_ttl = std::chrono::milliseconds(std::max(
+  auto web_client_ttl = std::chrono::milliseconds(std::max(
     250,
-    has_cli_option(argc, argv, "web-client-ttl-ms") ?
+    has_cli_web_client_ttl_ms ?
       cli.get<int>("web-client-ttl-ms") : tools::read_or<int>(yaml, "web_client_ttl_ms", 2000)));
-  const bool record_raw_video = has_cli_option(argc, argv, "record-raw-video") ?
+  bool record_raw_video = has_cli_record_raw_video ?
     cli.get<bool>("record-raw-video") : tools::read_or<bool>(yaml, "record_raw_video", false);
-  const bool record_debug_video = has_cli_option(argc, argv, "record-debug-video") ?
+  bool record_debug_video = has_cli_record_debug_video ?
     cli.get<bool>("record-debug-video") : tools::read_or<bool>(yaml, "record_debug_video", false);
-  const double record_debug_fps = std::clamp(
-    has_cli_option(argc, argv, "record-debug-fps") ?
+  double record_debug_fps = std::clamp(
+    has_cli_record_debug_fps ?
       cli.get<double>("record-debug-fps") : tools::read_or<double>(yaml, "record_debug_fps", 30.0),
     1.0, 120.0);
-  const std::string record_debug_dir = has_cli_option(argc, argv, "record-debug-dir") ?
+  std::string record_debug_dir = has_cli_record_debug_dir ?
     cli.get<std::string>("record-debug-dir") :
     tools::read_or<std::string>(yaml, "record_debug_dir", "records");
-  const auto web_frame_interval =
+  auto web_frame_interval =
     std::chrono::milliseconds(static_cast<int>(1000.0 / web_fps));
   const auto web_state_interval = 80ms;
 
@@ -516,6 +528,81 @@ int main(int argc, char * argv[])
       "Debug recording enabled: fps={} dir={}", record_debug_fps, record_debug_dir);
   }
 
+  uint64_t runtime_debug_version = tools::runtime_params::version(config_path);
+  const auto refresh_runtime_debug_settings = [&]() {
+    if (!tools::runtime_params::is_registered(config_path)) return;
+
+    const bool prev_show_local = show_local;
+    const bool prev_record_raw_video = record_raw_video;
+    const bool prev_record_debug_video = record_debug_video;
+    const double prev_record_debug_fps = record_debug_fps;
+    const std::string prev_record_debug_dir = record_debug_dir;
+
+    if (!has_cli_gimbal_state_unit) {
+      gimbal_state_unit_mode = parse_gimbal_state_unit_mode(
+        tools::runtime_params::get_string(config_path, "gimbal_state_unit"));
+    }
+    if (!has_cli_show_local) {
+      show_local = tools::runtime_params::get_bool(config_path, "show_local");
+    }
+    if (!has_cli_web_fps) {
+      web_fps = std::clamp(tools::runtime_params::get_double(config_path, "web_fps"), 1.0, 60.0);
+      web_frame_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / web_fps));
+    }
+    if (!has_cli_web_scale) {
+      display_scale =
+        std::clamp(tools::runtime_params::get_double(config_path, "web_scale"), 0.25, 1.0);
+    }
+    if (!has_cli_web_jpeg_quality) {
+      web_jpeg_quality =
+        std::clamp(tools::runtime_params::get_int(config_path, "web_jpeg_quality"), 30, 95);
+    }
+    if (!has_cli_web_client_ttl_ms) {
+      web_client_ttl = std::chrono::milliseconds(std::max(
+        250, tools::runtime_params::get_int(config_path, "web_client_ttl_ms")));
+    }
+    if (!has_cli_record_raw_video) {
+      record_raw_video = tools::runtime_params::get_bool(config_path, "record_raw_video");
+    }
+    if (!has_cli_record_debug_video) {
+      record_debug_video = tools::runtime_params::get_bool(config_path, "record_debug_video");
+    }
+    if (!has_cli_record_debug_fps) {
+      record_debug_fps =
+        std::clamp(tools::runtime_params::get_double(config_path, "record_debug_fps"), 1.0, 120.0);
+    }
+    if (!has_cli_record_debug_dir) {
+      record_debug_dir = tools::runtime_params::get_string(config_path, "record_debug_dir");
+    }
+
+    if (prev_show_local && !show_local) {
+      cv::destroyAllWindows();
+    } else if (!prev_show_local && show_local) {
+      tools::logger()->info("Local OpenCV debug windows enabled by runtime params.");
+    }
+
+    const bool recorder_config_changed =
+      prev_record_raw_video != record_raw_video ||
+      prev_record_debug_video != record_debug_video ||
+      std::abs(prev_record_debug_fps - record_debug_fps) > 1e-6 ||
+      prev_record_debug_dir != record_debug_dir;
+    if (recorder_config_changed) {
+      raw_recorder.reset();
+      debug_recorder.reset();
+      if (record_raw_video) {
+        raw_recorder = std::make_unique<tools::Recorder>(
+          record_debug_fps, record_debug_dir, "sentry_debug_raw");
+      }
+      if (record_debug_video) {
+        debug_recorder = std::make_unique<tools::Recorder>(
+          record_debug_fps, record_debug_dir, "sentry_debug_debug");
+      }
+      tools::logger()->info(
+        "[sentry_debug] recorder runtime config: raw={} debug={} fps={} dir={}",
+        record_raw_video, record_debug_video, record_debug_fps, record_debug_dir);
+    }
+  };
+
   io::ROS2 ros2(config_path);
   io::Gimbal gimbal(config_path);
   io::Camera camera(config_path);
@@ -551,6 +638,12 @@ int main(int argc, char * argv[])
     Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 
   while (!exiter.exit()) {
+    const uint64_t current_runtime_debug_version = tools::runtime_params::version(config_path);
+    if (current_runtime_debug_version != 0 && current_runtime_debug_version != runtime_debug_version) {
+      refresh_runtime_debug_settings();
+      runtime_debug_version = current_runtime_debug_version;
+    }
+
     camera.read(img, t);
     const double camera_fps = camera.camera_fps();
     const auto q = gimbal.q(t);

@@ -1,8 +1,62 @@
 #include "buff_solver.hpp"
 
+#include "tools/logger.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 namespace auto_buff
 {
+namespace
+{
+void load_buff_solver_calibration(
+  const std::string & config_path, Eigen::Matrix3d & R_gimbal2imubody,
+  Eigen::Matrix3d & R_camera2gimbal, Eigen::Vector3d & t_camera2gimbal, cv::Mat & camera_matrix,
+  cv::Mat & distort_coeffs)
+{
+  if (tools::runtime_params::is_registered(config_path)) {
+    const auto R_gimbal2imubody_data =
+      tools::runtime_params::get_number_array(config_path, "R_gimbal2imubody");
+    const auto R_camera2gimbal_data =
+      tools::runtime_params::get_number_array(config_path, "R_camera2gimbal");
+    const auto t_camera2gimbal_data =
+      tools::runtime_params::get_number_array(config_path, "t_camera2gimbal");
+    const auto camera_matrix_data =
+      tools::runtime_params::get_number_array(config_path, "camera_matrix");
+    const auto distort_coeffs_data =
+      tools::runtime_params::get_number_array(config_path, "distort_coeffs");
+
+    R_gimbal2imubody =
+      Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_gimbal2imubody_data.data());
+    R_camera2gimbal =
+      Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_camera2gimbal_data.data());
+    t_camera2gimbal = Eigen::Matrix<double, 3, 1>(t_camera2gimbal_data.data());
+
+    const Eigen::Matrix<double, 3, 3, Eigen::RowMajor> camera_matrix_eigen(camera_matrix_data.data());
+    const Eigen::Matrix<double, 1, 5> distort_coeffs_eigen(distort_coeffs_data.data());
+    cv::eigen2cv(camera_matrix_eigen, camera_matrix);
+    cv::eigen2cv(distort_coeffs_eigen, distort_coeffs);
+    return;
+  }
+
+  auto yaml = tools::load(config_path);
+
+  auto R_gimbal2imubody_data = yaml["R_gimbal2imubody"].as<std::vector<double>>();
+  auto R_camera2gimbal_data = yaml["R_camera2gimbal"].as<std::vector<double>>();
+  auto t_camera2gimbal_data = yaml["t_camera2gimbal"].as<std::vector<double>>();
+  R_gimbal2imubody =
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_gimbal2imubody_data.data());
+  R_camera2gimbal = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_camera2gimbal_data.data());
+  t_camera2gimbal = Eigen::Matrix<double, 3, 1>(t_camera2gimbal_data.data());
+
+  auto camera_matrix_data = yaml["camera_matrix"].as<std::vector<double>>();
+  auto distort_coeffs_data = yaml["distort_coeffs"].as<std::vector<double>>();
+  const Eigen::Matrix<double, 3, 3, Eigen::RowMajor> camera_matrix_eigen(camera_matrix_data.data());
+  const Eigen::Matrix<double, 1, 5> distort_coeffs_eigen(distort_coeffs_data.data());
+  cv::eigen2cv(camera_matrix_eigen, camera_matrix);
+  cv::eigen2cv(distort_coeffs_eigen, distort_coeffs);
+}
+}  // namespace
+
 cv::Matx33f Solver::rotation_matrix(double angle) const
 {
   return cv::Matx33f(
@@ -25,25 +79,28 @@ void Solver::compute_rotated_points(std::vector<std::vector<cv::Point3f>> & obje
   }
 }
 
-Solver::Solver(const std::string & config_path) : R_gimbal2world_(Eigen::Matrix3d::Identity())
+Solver::Solver(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path)),
+  R_gimbal2world_(Eigen::Matrix3d::Identity())
 {
-  auto yaml = tools::load(config_path);
-
-  auto R_gimbal2imubody_data = yaml["R_gimbal2imubody"].as<std::vector<double>>();
-  auto R_camera2gimbal_data = yaml["R_camera2gimbal"].as<std::vector<double>>();
-  auto t_camera2gimbal_data = yaml["t_camera2gimbal"].as<std::vector<double>>();
-  R_gimbal2imubody_ = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_gimbal2imubody_data.data());
-  R_camera2gimbal_ = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>(R_camera2gimbal_data.data());
-  t_camera2gimbal_ = Eigen::Matrix<double, 3, 1>(t_camera2gimbal_data.data());
-
-  auto camera_matrix_data = yaml["camera_matrix"].as<std::vector<double>>();
-  auto distort_coeffs_data = yaml["distort_coeffs"].as<std::vector<double>>();
-  Eigen::Matrix<double, 3, 3, Eigen::RowMajor> camera_matrix(camera_matrix_data.data());
-  Eigen::Matrix<double, 1, 5> distort_coeffs(distort_coeffs_data.data());
-  cv::eigen2cv(camera_matrix, camera_matrix_);
-  cv::eigen2cv(distort_coeffs, distort_coeffs_);
+  load_buff_solver_calibration(
+    config_path_, R_gimbal2imubody_, R_camera2gimbal_, t_camera2gimbal_, camera_matrix_,
+    distort_coeffs_);
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 
   // compute_rotated_points(OBJECT_POINTS);
+}
+
+void Solver::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  load_buff_solver_calibration(
+    config_path_, R_gimbal2imubody_, R_camera2gimbal_, t_camera2gimbal_, camera_matrix_,
+    distort_coeffs_);
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[BuffSolver] runtime params updated to v{}", current_version);
 }
 
 Eigen::Matrix3d Solver::R_gimbal2world() const { return R_gimbal2world_; }
@@ -56,6 +113,7 @@ void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
 
 void Solver::solve(std::optional<PowerRune> & ps) const
 {
+  const_cast<Solver *>(this)->refresh_runtime_params_if_needed();
   if (!ps.has_value()) return;
   PowerRune & p = ps.value();
   // std::vector<cv::Point2f> image_points;
@@ -114,6 +172,7 @@ void Solver::solve(std::optional<PowerRune> & ps) const
 // 调试用
 cv::Point2f Solver::point_buff2pixel(cv::Point3f x)
 {
+  refresh_runtime_params_if_needed();
   // buff坐标系(单位:m)到像素坐标系
   std::vector<cv::Point3d> world_points;
   std::vector<cv::Point2d> image_points;
@@ -126,6 +185,7 @@ cv::Point2f Solver::point_buff2pixel(cv::Point3f x)
 std::vector<cv::Point2f> Solver::reproject_buff(
   const Eigen::Vector3d & xyz_in_world, double yaw, double row) const
 {
+  const_cast<Solver *>(this)->refresh_runtime_params_if_needed();
   auto R_buff2world = tools::rotation_matrix(Eigen::Vector3d(yaw, 0.0, row));
   // clang-format on
 
