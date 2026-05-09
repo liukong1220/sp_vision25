@@ -4,6 +4,7 @@ set -euo pipefail
 # 获取脚本所在目录，并切换到项目根目录，避免从别的路径执行时找不到 CMakeLists.txt。
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_DIR}"
+WORKSPACE_ROOT="$(cd "${PROJECT_DIR}/../.." && pwd)"
 
 # 构建目录默认使用 build，也允许通过外部环境变量覆盖。
 BUILD_DIR="${BUILD_DIR:-build}"
@@ -14,6 +15,33 @@ BUILD_TYPE="${BUILD_TYPE:-Release}"
 if [[ ! -f "CMakeLists.txt" ]]; then
   echo "[build] 错误：当前目录未找到 CMakeLists.txt"
   exit 1
+fi
+
+source_compat() {
+  local script_path="$1"
+  set +u
+  # shellcheck disable=SC1090
+  source "${script_path}"
+  set -u
+}
+
+# 优先补齐当前工作区 overlay，确保能找到 `sp_msgs` 这类同工作区接口包。
+if [[ -z "${COLCON_PREFIX_PATH:-}" && -f "${WORKSPACE_ROOT}/install/setup.bash" ]]; then
+  source_compat "${WORKSPACE_ROOT}/install/setup.bash"
+  echo "[build] 已自动加载工作区环境: ${WORKSPACE_ROOT}/install/setup.bash"
+fi
+
+# 再补齐基础 ROS2 环境，避免从普通终端直接执行脚本时漏掉 `source /opt/ros/<distro>/setup.bash`。
+if [[ -z "${AMENT_PREFIX_PATH:-}" ]]; then
+  if [[ -f "/opt/ros/humble/setup.bash" ]]; then
+    source_compat /opt/ros/humble/setup.bash
+    echo "[build] 已自动加载 ROS2 环境: /opt/ros/humble/setup.bash"
+  elif [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+    source_compat "/opt/ros/${ROS_DISTRO}/setup.bash"
+    echo "[build] 已自动加载 ROS2 环境: /opt/ros/${ROS_DISTRO}/setup.bash"
+  else
+    echo "[build] 未检测到可自动加载的 ROS2 环境，将按无 ROS 模式继续配置"
+  fi
 fi
 
 # 检查处理器核心数，用于给 cmake --build 自动分配并行编译任务数。

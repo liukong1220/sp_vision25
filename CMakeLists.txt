@@ -31,6 +31,23 @@ find_package(fastcdr QUIET CONFIG)
 find_package(rmw QUIET)
 find_package(sp_msgs QUIET)
 
+set(SP_VISION_HAS_ROS2 OFF)
+if(
+  ament_cmake_FOUND AND
+  rclcpp_FOUND AND
+  std_msgs_FOUND AND
+  geometry_msgs_FOUND AND
+  tf2_FOUND AND
+  tf2_ros_FOUND AND
+  tf2_geometry_msgs_FOUND AND
+  rosidl_typesupport_cpp_FOUND AND
+  fastrtps_cmake_module_FOUND AND
+  fastcdr_FOUND AND
+  rmw_FOUND AND
+  sp_msgs_FOUND)
+  set(SP_VISION_HAS_ROS2 ON)
+endif()
+
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR})
@@ -165,7 +182,7 @@ list(APPEND SP_VISION_RUNTIME_TARGETS
 )
 
 # 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
-if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND AND tf2_FOUND AND tf2_ros_FOUND AND tf2_geometry_msgs_FOUND AND rosidl_typesupport_cpp_FOUND AND fastrtps_cmake_module_FOUND AND fastcdr_FOUND AND rmw_FOUND AND sp_msgs_FOUND)
+if(SP_VISION_HAS_ROS2)
     # 编译 sentry 和 publish_test
     add_executable(sentry src/sentry.cpp)
     add_executable(sentry_bp src/sentry_bp.cpp)

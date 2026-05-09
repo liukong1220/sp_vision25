@@ -95,7 +95,7 @@ send_canid: 0xff
 can_interface: "can0"
 
 #####-----gimbal参数-----
-com_port: "/dev/ttyACM0"
+com_port: "/dev/ttyACM1"
 gimbal_state_unit: "deg"
 # yaw_kp: 0  # 进一步增加yaw轴比例增益，提高响应速度
 # yaw_kd: 0  # 进一步增加yaw轴微分增益，减少剩余震荡
