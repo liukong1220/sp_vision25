@@ -61,8 +61,8 @@ int main(int argc, char * argv[])
 
   std::atomic<bool> quit = false;
 
-  std::atomic<io::GimbalMode> mode{io::GimbalMode::IDLE};
-  auto last_mode{io::GimbalMode::IDLE};
+  std::atomic<io::GimbalMode> mode{io::GimbalMode::AUTO_AIM};
+  auto last_mode{io::GimbalMode::AUTO_AIM};
 
   auto plan_thread = std::thread([&]() {
     auto t0 = std::chrono::steady_clock::now();

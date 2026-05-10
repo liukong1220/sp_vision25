@@ -335,7 +335,7 @@ void Gimbal::read_thread()
         mode_ = GimbalMode::BIG_BUFF;
         break;
       default:
-        mode_ = GimbalMode::IDLE;
+        mode_ = GimbalMode::AUTO_AIM;
         tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
         break;
     }

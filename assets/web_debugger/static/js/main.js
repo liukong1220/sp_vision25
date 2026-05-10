@@ -186,7 +186,7 @@
         getByPath(payload, "current_label", fallback.label),
       ),
       source: getByPath(payload, "source", "web"),
-      serial_mode_key: getByPath(payload, "serial_mode_key", "idle"),
+      serial_mode_key: getByPath(payload, "serial_mode_key", ""),
       serial_mode_label: getByPath(payload, "serial_mode_label", "--"),
     };
   };
