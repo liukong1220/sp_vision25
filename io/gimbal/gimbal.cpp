@@ -55,7 +55,7 @@ std::string Gimbal::str(GimbalMode mode) const
     case GimbalMode::BIG_BUFF:
       return "BIG_BUFF";    // 大能量机关模式
     default:
-      return "AUTO_AIM";     // 无效模式
+      return "INVALID";     // 无效模式
   }
 }
 

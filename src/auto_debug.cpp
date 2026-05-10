@@ -141,7 +141,7 @@ const char * gimbal_mode_key(io::GimbalMode mode)
       return "big_buff";
     case io::GimbalMode::IDLE:
     default:
-      return "auto_aim";
+      return "idle";
   }
 }
 
