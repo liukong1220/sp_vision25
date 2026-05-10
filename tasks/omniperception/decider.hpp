@@ -2,6 +2,7 @@
 #define OMNIPERCEPTION__DECIDER_HPP
 
 #include <Eigen/Dense>  // 必须在opencv2/core/eigen.hpp上面
+#include <cstdint>
 #include <iostream>
 #include <list>
 #include <unordered_map>
@@ -66,6 +67,8 @@ public:
     std::list<auto_aim::Armor> & armors, const std::vector<int8_t> & auto_aim_target);
 
 private:
+  std::string config_path_;
+  uint64_t runtime_params_version_ = 0;
   int img_width_;
   int img_height_;
   double fov_h_, new_fov_h_;
@@ -76,6 +79,8 @@ private:
   auto_aim::Color enemy_color_;
   auto_aim::YOLO detector_;
   std::vector<auto_aim::ArmorName> invincible_armor_;  //无敌状态机器人编号,英雄为1，哨兵为6
+
+  void refresh_runtime_params_if_needed();
 
   // 定义ArmorName到ArmorPriority的映射类型
   using PriorityMap = std::unordered_map<auto_aim::ArmorName, auto_aim::ArmorPriority>;

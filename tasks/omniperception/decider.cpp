@@ -6,13 +6,18 @@
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
+#include "tools/path.hpp"
+#include "tools/runtime_params.hpp"
 #include "tools/yaml.hpp"
 
 namespace omniperception
 {
-Decider::Decider(const std::string & config_path) : detector_(config_path), count_(0)
+Decider::Decider(const std::string & config_path)
+: config_path_(tools::resolve_config_path_string(config_path)),
+  detector_(config_path),
+  count_(0)
 {
-  auto yaml = tools::load(config_path);
+  auto yaml = tools::load(config_path_);
   img_width_ = yaml["image_width"].as<double>();
   img_height_ = yaml["image_height"].as<double>();
   fov_h_ = yaml["fov_h"].as<double>();
@@ -22,6 +27,7 @@ Decider::Decider(const std::string & config_path) : detector_(config_path), coun
   enemy_color_ =
     (yaml["enemy_color"].as<std::string>() == "red") ? auto_aim::Color::red : auto_aim::Color::blue;
   mode_ = yaml["mode"].as<double>();
+  runtime_params_version_ = tools::runtime_params::version(config_path_);
 }
 
 io::Command Decider::decide(
@@ -131,6 +137,7 @@ Eigen::Vector2d Decider::delta_angle(
 
 bool Decider::armor_filter(std::list<auto_aim::Armor> & armors)
 {
+  refresh_runtime_params_if_needed();
   if (armors.empty()) return true;
   // 过滤非敌方装甲板
   armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
@@ -150,6 +157,18 @@ bool Decider::armor_filter(std::list<auto_aim::Armor> & armors)
   });
 
   return armors.empty();
+}
+
+void Decider::refresh_runtime_params_if_needed()
+{
+  const auto current_version = tools::runtime_params::version(config_path_);
+  if (current_version == 0 || current_version == runtime_params_version_) return;
+
+  enemy_color_ =
+    (tools::runtime_params::get_string(config_path_, "enemy_color") == "red") ?
+    auto_aim::Color::red : auto_aim::Color::blue;
+  runtime_params_version_ = current_version;
+  tools::logger()->info("[Decider] runtime params updated to v{}", current_version);
 }
 
 void Decider::set_priority(std::list<auto_aim::Armor> & armors)

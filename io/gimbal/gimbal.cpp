@@ -55,7 +55,7 @@ std::string Gimbal::str(GimbalMode mode) const
     case GimbalMode::BIG_BUFF:
       return "BIG_BUFF";    // 大能量机关模式
     default:
-      return "INVALID";     // 无效模式
+      return "AUTO_AIM";     // 无效模式
   }
 }
 
@@ -335,7 +335,7 @@ void Gimbal::read_thread()
         mode_ = GimbalMode::BIG_BUFF;
         break;
       default:
-        mode_ = GimbalMode::IDLE;
+        mode_ = GimbalMode::AUTO_AIM;
         tools::logger()->warn("[Gimbal] Invalid mode: {}", rx_data_.mode);
         break;
     }

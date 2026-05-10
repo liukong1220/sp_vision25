@@ -130,7 +130,7 @@ private:
   GimbalToVision rx_data_;  // 接收数据缓冲区
   VisionToGimbal tx_data_;  // 发送数据缓冲区
 
-  GimbalMode mode_ = GimbalMode::IDLE; // 当前云台模式
+  GimbalMode mode_ = GimbalMode::AUTO_AIM; // 当前云台模式
   GimbalState state_;                  // 当前云台状态
   // 上一次成功返回给调用方的姿态：
   // 当短时间内没有新串口数据时，q() 会回退到最后一个有效姿态，而不是永久阻塞
