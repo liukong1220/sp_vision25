@@ -110,7 +110,7 @@ DebugMode debug_mode_from_gimbal_mode(io::GimbalMode mode)
     case io::GimbalMode::AUTO_AIM:
     case io::GimbalMode::IDLE:
     default:
-      return DebugMode::IDLE;
+      return DebugMode::AutoAim;
   }
 }
 
