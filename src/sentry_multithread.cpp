@@ -118,7 +118,7 @@ int main(int argc, char * argv[])
     /// ROS2通信
     // 多线程入口同样走统一封装，避免单线程 / 多线程版本的导航建议点不一致。
     const auto target_info = decider.get_target_info(armors, targets);
-    ros2.publish(decider.build_vision_target_state(command, target_info));
+    ros2.publish(decider.build_vision_target_state(command, target_info, timestamp));
   }
 
   return 0;

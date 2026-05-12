@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <string>
 
 namespace io
@@ -27,6 +28,8 @@ struct VisionTargetState
   Eigen::Vector3d target_position_map = Eigen::Vector3d::Zero();
   bool has_target_position_map = false;
   std::string target_position_map_frame;
+  bool has_observation_time = false;
+  std::chrono::steady_clock::time_point observation_time{};
 };
 
 }  // namespace io

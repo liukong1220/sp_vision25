@@ -161,7 +161,14 @@ mode: 1
 # 3. 决定是否额外发布 RViz 调试点。
 vision_fusion:
   map_frame: map
-  gimbal_frame: gimbal_yaw
+  # `target_position_gimbal` 使用的是手眼标定得到的 camera->gimbal 外参，
+  # 其参考系应与标定时的相机光学坐标系严格对应，而不是直接假设等于 `gimbal_pitch`。
+  mount_frame: gimbal_pitch
+  camera_frame: front_industrial_camera_optical_frame
+  gimbal_frame: front_vision_calib_gimbal
+  publish_calib_tf: true
   pose_timeout_s: 0.2
+  transform_timeout_s: 0.02
+  transform_time_backoff_s: 0.01
   nav_hold_min_confidence: 0.6
   publish_target_point_map: true

@@ -100,7 +100,7 @@ int main(int argc, char * argv[])
     // 统一由 Decider 组装视觉融合结果，
     // 避免多个入口各自拷贝一份字段语义和有效位判定逻辑。
     const auto target_info = decider.get_target_info(armors, targets);
-    ros2.publish(decider.build_vision_target_state(command, target_info));
+    ros2.publish(decider.build_vision_target_state(command, target_info, timestamp));
   }
   return 0;
 }

@@ -59,7 +59,8 @@ public:
   // 把自瞄命令和目标摘要统一整理成对外发布的融合消息，
   // 让 sentry / sentry_debug / sentry_multithread 这些入口共用同一套字段语义。
   io::VisionTargetState build_vision_target_state(
-    const io::Command & command, const VisionTargetInfo & target_info) const;
+    const io::Command & command, const VisionTargetInfo & target_info,
+    std::chrono::steady_clock::time_point observation_time) const;
 
   void get_invincible_armor(const std::vector<int8_t> & invincible_enemy_ids);
 

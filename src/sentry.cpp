@@ -108,7 +108,8 @@ int main(int argc, char * argv[])
     }
 
     const auto target_info = decider.get_target_info(armors, targets);
-    auto vision_target_state = decider.build_vision_target_state(command, target_info);
+    auto vision_target_state =
+      decider.build_vision_target_state(command, target_info, timestamp);
     if (!target_info.valid) {
       vision_target_state.target_position_gimbal = invalid_target_point;
     }

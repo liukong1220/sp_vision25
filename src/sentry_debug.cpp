@@ -786,7 +786,8 @@ int main(int argc, char * argv[])
       io::Command command{
         current_plan.control, current_plan.fire, current_plan.yaw, current_plan.pitch};
       const auto target_info = decider.get_target_info(armors, targets);
-      auto vision_target_state = decider.build_vision_target_state(command, target_info);
+      auto vision_target_state =
+        decider.build_vision_target_state(command, target_info, t);
       if (!target_info.valid) {
         vision_target_state.target_position_gimbal = invalid_target_point;
       }

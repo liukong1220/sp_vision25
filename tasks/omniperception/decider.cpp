@@ -232,7 +232,8 @@ VisionTargetInfo Decider::get_target_info(
 }
 
 io::VisionTargetState Decider::build_vision_target_state(
-  const io::Command & command, const VisionTargetInfo & target_info) const
+  const io::Command & command, const VisionTargetInfo & target_info,
+  std::chrono::steady_clock::time_point observation_time) const
 {
   io::VisionTargetState state;
   state.tracking = command.control;
@@ -242,6 +243,8 @@ io::VisionTargetState Decider::build_vision_target_state(
   state.confidence = target_info.confidence;
   state.target_yaw = command.yaw;
   state.target_pitch = command.pitch;
+  state.has_observation_time = true;
+  state.observation_time = observation_time;
 
   if (!target_info.valid) {
     return state;
