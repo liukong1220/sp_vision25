@@ -57,9 +57,6 @@ int main(int argc, char * argv[])
   cv::Mat img;
 
   std::chrono::steady_clock::time_point timestamp;
-  const auto invalid_target_point =
-    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
-
   while (!exiter.exit()) {
     camera.read(img, timestamp);
     const auto q = gimbal.q(timestamp);
@@ -107,12 +104,9 @@ int main(int argc, char * argv[])
         plan.pitch_acc);
     }
 
-    const auto target_info = decider.get_target_info(armors, targets);
-    auto vision_target_state =
-      decider.build_vision_target_state(command, target_info, timestamp);
-    if (!target_info.valid) {
-      vision_target_state.target_position_gimbal = invalid_target_point;
-    }
+    const auto target_info =
+      decider.get_target_info(armors, targets, solver.R_gimbal2world());
+    auto vision_target_state = decider.build_vision_target_state(command, target_info, timestamp);
     ros2.publish(vision_target_state);
   }
 

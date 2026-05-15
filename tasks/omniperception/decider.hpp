@@ -54,7 +54,8 @@ public:
   void sort(std::vector<DetectionResult> & detection_queue);
 
   VisionTargetInfo get_target_info(
-    const std::list<auto_aim::Armor> & armors, const std::list<auto_aim::Target> & targets);
+    const std::list<auto_aim::Armor> & armors, const std::list<auto_aim::Target> & targets,
+    const Eigen::Matrix3d & R_gimbal2world);
 
   // 把自瞄命令和目标摘要统一整理成对外发布的融合消息，
   // 让 sentry / sentry_debug / sentry_multithread 这些入口共用同一套字段语义。

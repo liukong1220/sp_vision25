@@ -44,6 +44,7 @@ public:
 
   Eigen::VectorXd ekf_x() const;
   const tools::ExtendedKalmanFilter & ekf() const;
+  Eigen::Vector3d center_xyz_in_world() const;
   std::vector<Eigen::Vector4d> armor_xyza_list() const;
   double armor_z_offset(int id) const;
   int physical_armor_id(int id) const;

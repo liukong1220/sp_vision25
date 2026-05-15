@@ -16,12 +16,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 默认主程序为 auto_aim_debug_mpc，也允许通过第一个参数覆盖
-BIN_NAME="${1:-auto_aim_debug_mpc}"
+BIN_NAME="${1:-auto_debug}"
 BIN_PATH="${ROOT_DIR}/build/${BIN_NAME}"
 
 # 第二个参数为配置文件路径；未提供时按常见 debug 程序选择默认配置
-DEFAULT_CONFIG="${ROOT_DIR}/configs/standard3.yaml"
-if [[ "${BIN_NAME}" == "sentry_debug" ]]; then
+DEFAULT_CONFIG="${ROOT_DIR}/configs/sentry.yaml"
+if [[ "${BIN_NAME}" == "auto_debug" ]]; then
   DEFAULT_CONFIG="${ROOT_DIR}/configs/sentry.yaml"
 fi
 CONFIG_PATH="${2:-${DEFAULT_CONFIG}}"

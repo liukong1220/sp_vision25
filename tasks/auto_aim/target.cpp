@@ -291,6 +291,14 @@ Eigen::VectorXd Target::ekf_x() const { return ekf_.x; }
 
 const tools::ExtendedKalmanFilter & Target::ekf() const { return ekf_; }
 
+Eigen::Vector3d Target::center_xyz_in_world() const
+{
+  if (ekf_.x.size() < 5) {
+    return Eigen::Vector3d::Zero();
+  }
+  return {ekf_.x[0], ekf_.x[2], ekf_.x[4]};
+}
+
 int Target::normalize_armor_id(int id) const
 {
   if (armor_num_ <= 0) return 0;

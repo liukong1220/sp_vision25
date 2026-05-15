@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <opencv2/opencv.hpp>
 
 #include "tools/logger.hpp"
@@ -207,28 +208,38 @@ void Decider::sort(std::vector<DetectionResult> & detection_queue)
 }
 
 VisionTargetInfo Decider::get_target_info(
-  const std::list<auto_aim::Armor> & armors, const std::list<auto_aim::Target> & targets)
+  const std::list<auto_aim::Armor> & armors, const std::list<auto_aim::Target> & targets,
+  const Eigen::Matrix3d & R_gimbal2world)
 {
   // 当前没有装甲板或目标轨迹时，直接返回空结果，
   // 让上层融合节点自己决定是否继续保持接管。
   if (armors.empty() || targets.empty()) return VisionTargetInfo{};
 
-  auto target = targets.front();
+  const auto & target = targets.front();
+  VisionTargetInfo info;
+  info.valid = true;
+  // 这里延续原有协议的 +1 约定，
+  // 这样不会和枚举下标产生歧义，也便于旧链路平滑迁移。
+  info.target_id = static_cast<int>(target.name) + 1;
+  info.confidence = 1.0;
 
   for (const auto & armor : armors) {
     if (armor.name == target.name) {
-      VisionTargetInfo info;
-      info.valid = true;
-      // 这里延续原有协议的 +1 约定，
-      // 这样不会和枚举下标产生歧义，也便于旧链路平滑迁移。
-      info.target_id = static_cast<int>(armor.name) + 1;  // 避免歧义 +1（与原协议保持一致）
-      info.confidence = 1.0;
-      info.position_gimbal = armor.xyz_in_gimbal;
-      return info;
+      if (std::isfinite(armor.confidence)) {
+        info.confidence = armor.confidence;
+      }
+      break;
     }
   }
 
-  return VisionTargetInfo{};
+  // 视觉跟随应跟随整车中心，而不是当前被看到/被击打的装甲板中心。
+  // 小陀螺时如果继续输出装甲板点，导航跟随目标会围着敌方车体绕圈抖动。
+  const Eigen::Vector3d center_world = target.center_xyz_in_world();
+  if (!center_world.allFinite()) {
+    return VisionTargetInfo{};
+  }
+  info.position_gimbal = R_gimbal2world.transpose() * center_world;
+  return info;
 }
 
 io::VisionTargetState Decider::build_vision_target_state(
@@ -236,6 +247,8 @@ io::VisionTargetState Decider::build_vision_target_state(
   std::chrono::steady_clock::time_point observation_time) const
 {
   io::VisionTargetState state;
+  const auto invalid_target_point =
+    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
   state.tracking = command.control;
   state.nav_hold = command.control;
   state.fire_permitted = command.shoot;
@@ -245,6 +258,8 @@ io::VisionTargetState Decider::build_vision_target_state(
   state.target_pitch = command.pitch;
   state.has_observation_time = true;
   state.observation_time = observation_time;
+  state.target_position_gimbal = invalid_target_point;
+  state.target_position_map = invalid_target_point;
 
   if (!target_info.valid) {
     return state;
