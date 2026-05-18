@@ -292,7 +292,7 @@ bool Detector::check_name(const Armor & armor) const
 bool Detector::check_type(const Armor & armor) const
 {
   auto name_ok = armor.type == ArmorType::small
-                   ? (armor.name != ArmorName::one && armor.name != ArmorName::base)
+                   ? (armor.name != ArmorName::one)
                    : (armor.name == ArmorName::one || armor.name == ArmorName::base);
 
   // 保存异常的图案，用于分类器的迭代
@@ -356,13 +356,12 @@ ArmorType Detector::get_type(const Armor & armor)
 
   // tools::logger()->debug("[Detector] get armor type by name: {}", ARMOR_NAMES[armor.name]);
 
-  // 英雄、基地只能是大装甲板
-  if (armor.name == ArmorName::one || armor.name == ArmorName::base) {
+  // 英雄默认为大装甲板；基地装甲按小装甲板处理，除非比例明显属于大装甲板。
+  if (armor.name == ArmorName::one) {
     return ArmorType::big;
   }
 
-  // 其他所有（工程、哨兵、前哨站、步兵）都是小装甲板
-  /// TODO: 基地顶装甲是小装甲板
+  // 其他所有（工程、哨兵、前哨站、步兵、基地）都是小装甲板
   return ArmorType::small;
 }
 

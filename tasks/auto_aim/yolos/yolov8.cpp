@@ -224,7 +224,7 @@ bool YOLOV8::check_name(const Armor & armor) const
 bool YOLOV8::check_type(const Armor & armor) const
 {
   auto name_ok = (armor.type == ArmorType::small)
-                   ? (armor.name != ArmorName::one && armor.name != ArmorName::base)
+                   ? (armor.name != ArmorName::one)
                    : (armor.name != ArmorName::two && armor.name != ArmorName::sentry &&
                       armor.name != ArmorName::outpost);
 
@@ -236,15 +236,24 @@ bool YOLOV8::check_type(const Armor & armor) const
 
 ArmorType YOLOV8::get_type(const Armor & armor)
 {
-  // 英雄、基地只能是大装甲板
-  if (armor.name == ArmorName::one || armor.name == ArmorName::base) {
+  // 英雄按名字固定为大装甲板，保持原有 YOLOv8 行为。
+  if (armor.name == ArmorName::one) {
     return ArmorType::big;
   }
 
-  // 工程、哨兵、前哨站只能是小装甲板
+  if (armor.ratio > 3.0) {
+    return ArmorType::big;
+  }
+
+  if (armor.ratio < 2.5) {
+    return ArmorType::small;
+  }
+
+  // 基地装甲按小装甲板处理，除非比例明显属于大装甲板。
+  // 工程、哨兵、前哨站也只能是小装甲板。
   if (
     armor.name == ArmorName::two || armor.name == ArmorName::sentry ||
-    armor.name == ArmorName::outpost) {
+    armor.name == ArmorName::outpost || armor.name == ArmorName::base) {
     return ArmorType::small;
   }
 
