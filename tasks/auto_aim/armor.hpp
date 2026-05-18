@@ -57,7 +57,8 @@ const std::vector<std::tuple<Color, ArmorName, ArmorType>> armor_properties = {
   {blue, four, small},       {red, four, small},       {extinguish, four, small},
   {blue, five, small},       {red, five, small},       {extinguish, five, small},
   {blue, outpost, small},    {red, outpost, small},    {extinguish, outpost, small},
-  {blue, base, big},         {red, base, big},         {extinguish, base, big},      {purple, base, big},       
+  // Keep the original base class-id slots, but map them to the small armor geometry.
+  {blue, base, small},       {red, base, small},       {extinguish, base, small},    {purple, base, small},
   {blue, base, small},       {red, base, small},       {extinguish, base, small},    {purple, base, small},    
   {blue, three, big},        {red, three, big},        {extinguish, three, big}, 
   {blue, four, big},         {red, four, big},         {extinguish, four, big},  
@@ -91,7 +92,7 @@ struct Armor
 
   ArmorType type;
   ArmorName name;
-  ArmorPriority priority;
+  ArmorPriority priority = ArmorPriority::fifth;
   int class_id;
   cv::Rect box;
   cv::Mat pattern;

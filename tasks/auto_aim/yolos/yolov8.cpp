@@ -224,9 +224,9 @@ bool YOLOV8::check_name(const Armor & armor) const
 bool YOLOV8::check_type(const Armor & armor) const
 {
   auto name_ok = (armor.type == ArmorType::small)
-                   ? (armor.name != ArmorName::one && armor.name != ArmorName::base)
+                   ? (armor.name != ArmorName::one)
                    : (armor.name != ArmorName::two && armor.name != ArmorName::sentry &&
-                      armor.name != ArmorName::outpost);
+                      armor.name != ArmorName::outpost && armor.name != ArmorName::base);
 
   // 保存异常的图案，用于分类器的迭代
   // if (!name_ok) save(armor);
@@ -236,15 +236,15 @@ bool YOLOV8::check_type(const Armor & armor) const
 
 ArmorType YOLOV8::get_type(const Armor & armor)
 {
-  // 英雄、基地只能是大装甲板
-  if (armor.name == ArmorName::one || armor.name == ArmorName::base) {
+  // 英雄只能是大装甲板；基地顶装甲按小装甲板处理。
+  if (armor.name == ArmorName::one) {
     return ArmorType::big;
   }
 
-  // 工程、哨兵、前哨站只能是小装甲板
+  // 工程、哨兵、前哨站、基地只能是小装甲板
   if (
     armor.name == ArmorName::two || armor.name == ArmorName::sentry ||
-    armor.name == ArmorName::outpost) {
+    armor.name == ArmorName::outpost || armor.name == ArmorName::base) {
     return ArmorType::small;
   }
 
