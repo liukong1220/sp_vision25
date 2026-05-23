@@ -1,1133 +1,860 @@
-# Outpost 识别、跟踪与控制算法解析
+# 前哨站跟踪匹配与 EKF 预测算法详解
 
-以下分析完全基于当前 `/home/aw/sp_vision25` 仓库代码整理，目标是把项目里与 `outpost` 相关的识别、解算、跟踪、控制链路完整拆开，方便后续做参数整定、算法验收和实车定位。
+本文档只包含前哨站（outpost）专用算法，详细说明跟踪匹配、EKF 预测、板号映射的完整代码实现。
 
-## 1. 结论先行
+## 1. 前哨站跟踪匹配流程
 
-当前项目里的 `outpost` 不是一套完全独立的新系统，而是在通用自动瞄准链路上做了三层特化：
+### 1.1 入口：update_target()
 
-1. 识别层：
-   `outpost` 首先只是一个 `ArmorName::outpost` 类别，检测结果仍然是 4 个角点的装甲板观测，没有直接输出转轴中心或角速度。
-2. 跟踪层：
-   这里是前哨算法最核心的特化。项目把前哨建模为 `3` 块装甲板、同一半径、不同高度的旋转目标，并为它写了专用的匹配、物理板号重映射、固定中心预测和角速度锁定逻辑。
-3. 控制层：
-   当前项目同时保留 `Aimer` 和 `Planner(MPC)` 两套火控思路。
-   其中前哨相关策略最完整的是 `Planner` 分支：支持前哨独立角窗口、独立延迟、板级高度补偿、命中时刻迭代和开火相位门。
-
-一句话概括当前工程：
-
-```text
-前哨 = 通用检测/解算 + 前哨专用 3 板跟踪 + 火控框架中的前哨专用策略
-普通装甲板 = 通用检测/解算 + 2/4 板目标跟踪 + 通用火控
-```
-
-## 2. 代码入口与主链路
-
-当前工程自动瞄准主要有三条和前哨强相关的入口。
-
-### 2.1 `src/standard.cpp`
-
-这是普通自瞄入口，使用：
-
-- `io::CBoard`
-- `auto_aim::YOLO`
-- `auto_aim::Solver`
-- `auto_aim::Tracker`
-- `auto_aim::Aimer`
-
-当前这条链路的实际调用是：
-
-```text
-相机图像
-  -> YOLO 检测
-  -> Solver 解算
-  -> Tracker 跟踪
-  -> Aimer 计算 yaw/pitch
-  -> CBoard.send(command)
-```
-
-要特别注意：
-
-1. `standard.cpp` 虽然实例化了 `Shooter`，但当前并没有真正调用 `shooter.shoot()`；
-2. 这意味着这条入口主要负责出瞄准角，不是当前项目里前哨验收最完整的分支。
-
-### 2.2 `src/standard_mpc.cpp`
-
-这是 MPC 控制入口，使用：
-
-- `io::Gimbal`
-- `auto_aim::YOLO`
-- `auto_aim::Solver`
-- `auto_aim::Tracker`
-- `auto_aim::Planner`
-
-链路形式是：
-
-```text
-感知线程：相机 -> YOLO -> Solver -> Tracker -> Target
-规划线程：Target -> Planner(MPC) -> Gimbal.send(...)
-```
-
-### 2.3 `src/auto_aim_debug_mpc.cpp`
-
-这是最适合做前哨调试和验收的入口。它在 `standard_mpc.cpp` 的基础上额外提供了：
-
-- 网页调试器
-- 弹道诊断面板
-- `planner` 和 `tracker` 内部量可视化
-- 前哨选板、物理板号、命中时刻、相位门、匹配得分等调试量输出
-
-因此，当前工程里 `outpost` 的完整路径可以概括为：
-
-```text
-YOLO / Detector 标出 outpost
-  -> Solver 把 2D 角点解算成 3D 装甲板观测
-  -> Tracker 按前哨 3 板模型跟踪
-  -> Planner 或 Aimer 选择应击打的板
-  -> 输出 yaw / pitch
-  -> 若走 Planner 分支，再额外给出 fire
-```
-
-## 3. 识别层解析
-
-### 3.1 类别定义
-
-当前项目的装甲板类别定义在 `tasks/auto_aim/armor.hpp`：
+代码位置：[tracker.cpp:459-521](tasks/auto_aim/tracker.cpp#L459-L521)
 
 ```cpp
-enum ArmorName
+bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock::time_point t)
 {
-  one,
-  two,
-  three,
-  four,
-  five,
-  sentry,
-  outpost,
-  base,
-  not_armor
-};
+  target_.predict(t);  // [1] EKF 预测
+
+  int found_count = 0;
+  for (const auto & armor : armors) {
+    if (armor.name != target_.name || armor.type != target_.armor_type) continue;
+    found_count++;
+  }
+
+  if (target_.name == ArmorName::outpost) {
+    // [2] 前哨专用匹配
+    const auto best_match = select_best_outpost_match(target_, solver_, armors);
+    // [3] 门限筛选
+    const bool accept = accept_outpost_match(best_match);
+    if (!accept) {
+      return false;
+    }
+    // [4] 设置物理板号映射
+    target_.set_armor_id_offset(best_match.offset, target_.last_id);
+    // [5] 用指定的局部板号做 EKF 更新
+    target_.update(*best_match.armor_it, best_match.id);
+    return true;
+  }
+
+  // 普通目标：直接就近关联
+  for (auto & armor : armors) {
+    if (armor.name != target_.name || armor.type != target_.armor_type) continue;
+    solver_.solve(armor);
+    target_.update(armor);
+  }
+  return true;
+}
 ```
 
-同时，`armor_properties` 把前哨明确登记为：
+**关键区别**：普通目标直接调用 `target_.update(armor)` 走默认就近关联；前哨站必须经过 `select_best_outpost_match()` + `accept_outpost_match()` 两步专用匹配。
 
-```text
-{blue/red/extinguish, outpost, small}
+---
+
+### 1.2 核心匹配：select_best_outpost_match()
+
+代码位置：[tracker.cpp:50-129](tasks/auto_aim/tracker.cpp#L50-L129)
+
+这是前哨匹配的核心函数。它对每一块检测到的装甲板，枚举所有可能的 `(id, offset)` 组合，计算综合代价，返回得分最低者。
+
+```cpp
+OutpostMatchResult select_best_outpost_match(
+  const Target & target, Solver & solver, std::list<Armor> & armors)
+{
+  OutpostMatchResult best_match;
+  const int armor_num = static_cast<int>(target.armor_xyza_list().size());
+  if (armor_num <= 0) return best_match;
+
+  // 各代价项的归一化门限
+  constexpr double kYawGate = 6.0 / 57.3;
+  constexpr double kPitchGate = 5.0 / 57.3;
+  constexpr double kArmorYawGate = 14.0 / 57.3;
+  constexpr double kDistanceGate = 0.16;
+  constexpr double kXYGate = 0.12;
+  constexpr double kZGate = 0.05;
+  constexpr double kReprojectionGate = 18.0;
+
+  for (auto it = armors.begin(); it != armors.end(); ++it) {
+    auto & armor = *it;
+    if (armor.name != target.name || armor.type != target.armor_type) continue;
+
+    solver.solve(armor);
+    const Eigen::Vector3d observed_xyz = armor.xyz_in_world;
+    const Eigen::Vector3d observed_ypd = armor.ypd_in_world;
+
+    // 枚举所有 (id, offset) 组合
+    for (int id = 0; id < armor_num; ++id) {
+      for (int offset = 0; offset < armor_num; ++offset) {
+        // 创建副本，设置物理板号偏移
+        Target mapped_target = target;
+        mapped_target.set_armor_id_offset(offset, target.last_id);
+
+        // 获取第 id 块板的预测位置
+        const auto predicted_armors = mapped_target.armor_xyza_list();
+        const auto & predicted_xyza = predicted_armors[id];
+        const Eigen::Vector3d predicted_xyz = predicted_xyza.head<3>();
+        const Eigen::Vector3d predicted_ypd = tools::xyz2ypd(predicted_xyz);
+        const auto predicted_points =
+          solver.reproject_armor(predicted_xyz, predicted_xyza[3], armor.type, armor.name);
+
+        // 计算各项误差
+        const double reprojection_error = average_point_error(armor.points, predicted_points);
+        const double los_yaw_error =
+          std::abs(tools::limit_rad(observed_ypd[0] - predicted_ypd[0]));
+        const double pitch_error = std::abs(observed_ypd[1] - predicted_ypd[1]);
+        const double distance_error = std::abs(observed_ypd[2] - predicted_ypd[2]);
+        const double armor_yaw_error =
+          std::abs(tools::limit_rad(armor.ypr_in_world[0] - predicted_xyza[3]));
+        const double xy_error = (observed_xyz.head<2>() - predicted_xyz.head<2>()).norm();
+        const double z_error = std::abs(observed_xyz.z() - predicted_xyz.z());
+
+        // 连续性惩罚：惩罚 id 跳变和 offset 跳变
+        double continuity_penalty = 0.0;
+        if (id != target.last_id) {
+          const int step = cyclic_id_distance(id, target.last_id, armor_num);
+          continuity_penalty += target.jumped ? 0.8 * step : 0.35 * step;
+        }
+        if (offset != target.armor_id_offset()) {
+          const int step = cyclic_id_distance(offset, target.armor_id_offset(), armor_num);
+          continuity_penalty += target.jumped ? 0.22 * step : 0.08 * step;
+        }
+
+        // 加权求和
+        const double score =
+          std::pow(reprojection_error / kReprojectionGate, 2) +
+          std::pow(los_yaw_error / kYawGate, 2) +
+          std::pow(pitch_error / kPitchGate, 2) +
+          std::pow(distance_error / kDistanceGate, 2) +
+          std::pow(armor_yaw_error / kArmorYawGate, 2) +
+          std::pow(xy_error / kXYGate, 2) +
+          std::pow(z_error / kZGate, 2) + continuity_penalty;
+
+        if (score >= best_match.score) continue;
+
+        best_match.armor_it = it;
+        best_match.id = id;
+        best_match.offset = offset;
+        best_match.physical_id = mapped_target.physical_armor_id(id);
+        best_match.score = score;
+        best_match.reprojection_error = reprojection_error;
+        best_match.xy_error = xy_error;
+        best_match.z_error = z_error;
+        best_match.valid = true;
+      }
+    }
+  }
+
+  return best_match;
+}
 ```
 
-这意味着当前工程里：
+**算法要点**：
 
-1. 前哨在检测层就是一个 `ArmorName::outpost`
-2. 它在几何模板上按小装甲板处理
+1. **三重循环**：对每个检测到的 armor，枚举 `id ∈ {0,1,2}`（局部板号）× `offset ∈ {0,1,2}`（物理板号偏移），共 9 种组合
+2. **每种组合**：创建 `mapped_target` 副本，调用 `set_armor_id_offset(offset)` 设置物理板号映射，然后取第 `id` 块板的预测位置
+3. **代价计算**：7 项几何误差 + 1 项连续性惩罚，各项除以门限后平方求和
+4. **连续性惩罚**：`jumped` 后惩罚更重（0.8/0.22），未 jump 时惩罚较轻（0.35/0.08）
+5. **返回**：得分最低的 `(id, offset, armor)` 组合
 
-### 3.2 检测器如何识别 outpost
+---
 
-项目通过 `tasks/auto_aim/yolo.cpp` 统一封装检测器，根据配置里的 `yolo_name` 选择：
+### 1.3 门限筛选：accept_outpost_match()
 
-- `YOLOV5`
-- `YOLOV8`
-- `YOLO11`
+代码位置：[tracker.cpp:131-137](tasks/auto_aim/tracker.cpp#L131-L137)
 
-当前主配置 `configs/standard3.yaml` 使用的是：
-
-```yaml
-yolo_name: yolov5
-device: GPU
-use_traditional: true
+```cpp
+bool accept_outpost_match(const OutpostMatchResult & match)
+{
+  return
+    match.valid && std::isfinite(match.score) && std::isfinite(match.reprojection_error) &&
+    match.reprojection_error < 90.0 && match.xy_error < 0.40 && match.z_error < 0.20 &&
+    match.score < 36.0;
+}
 ```
 
-也就是说，主链路实际是：
+四个硬门限：
 
-```text
-YOLOV5 网络检测
-  + 可选传统方法二次角点矫正
+| 条件 | 阈值 | 含义 |
+|------|------|------|
+| `reprojection_error` | < 90 px | 预测角点与观测角点的像素距离 |
+| `xy_error` | < 0.40 m | 水平面位置误差 |
+| `z_error` | < 0.20 m | 高度误差 |
+| `score` | < 36.0 | 综合加权得分 |
+
+---
+
+## 2. 物理板号映射机制
+
+### 2.1 两套板号
+
+前哨站有 3 块装甲板，但存在两套编号：
+
+- **局部板号 (local id)**：EKF 状态中几何顺序的第几块板（0, 1, 2）
+- **物理板号 (physical id)**：真实物理上的高板/低板是哪一块（0, 1, 2）
+
+转换关系：`physical_id = (local_id + offset) % 3`
+
+### 2.2 set_armor_id_offset() — 设置物理板号映射
+
+代码位置：[target.cpp:325-342](tasks/auto_aim/target.cpp#L325-L342)
+
+```cpp
+void Target::set_armor_id_offset(int offset, int reference_id)
+{
+  if (armor_num_ <= 0) return;
+
+  const int normalized_offset = normalize_armor_id(offset);
+  if (normalized_offset == armor_id_offset_) return;
+
+  const int reference_local_id = normalize_armor_id(reference_id);
+  const double old_reference_z_offset = armor_z_offset(reference_local_id);
+  armor_id_offset_ = normalized_offset;
+  const double new_reference_z_offset = armor_z_offset(reference_local_id);
+
+  // 保持当前跟踪的参考板高度连续
+  if (ekf_.x.size() > 4) {
+    ekf_.x[4] += old_reference_z_offset - new_reference_z_offset;
+  }
+}
 ```
 
-以 `tasks/auto_aim/yolos/yolov5.cpp` 为例，网络输出包含：
+**关键设计**：切换物理板号映射时，调整 `ekf_.x[4]`（中心 z 位置），使得当前参考板的实际高度保持连续。这避免了切板时中心高度的跳变。
 
-1. 颜色类别
-2. 编号类别
-3. 4 个角点
-4. 置信度
+**示例**：假设当前 `offset=0`，参考板 id=0，其物理板号为 0，高度偏移为 0.0m。切换到 `offset=1` 后，参考板 id=0 的物理板号变为 1，高度偏移变为 -0.102m。此时 `ekf_.x[4]` 会增加 `0.0 - (-0.102) = 0.102m`，使得参考板的实际高度不变。
 
-对前哨来说，识别层输出的仍然只是：
+### 2.3 physical_armor_id() — 获取物理板号
 
-```text
-“这是一块 outpost 装甲板 + 这块板的四角点”
+代码位置：[target.cpp:318-321](tasks/auto_aim/target.cpp#L318-L321)
+
+```cpp
+int Target::physical_armor_id(int id) const
+{
+  return normalize_armor_id(normalize_armor_id(id) + armor_id_offset_);
+}
 ```
 
-并不会直接给出：
+### 2.4 armor_z_offset() — 获取板高度偏移
 
-- 前哨转轴中心
-- 三块板的整体编号
-- 角速度
+代码位置：[target.cpp:312-316](tasks/auto_aim/target.cpp#L312-L316)
 
-### 3.3 识别后处理
-
-`YOLOV5::parse()` 的主要流程是：
-
-1. 从网络输出中读取颜色、类别、角点和置信度；
-2. 通过 NMS 过滤重复检测；
-3. 构造 `Armor`；
-4. 用 `check_name()` 过滤 `not_armor` 与低置信度目标；
-5. 用 `check_type()` 检查类别和大小装甲板的一致性；
-6. 如果启用了 `use_traditional`，用 `detector_.detect(*it, bgr_img)` 做角点二次矫正；
-7. 生成归一化中心点 `center_norm`。
-
-与前哨直接相关的点有三个：
-
-1. `outpost` 在类别系统里是合法目标；
-2. `check_type()` 会禁止 `outpost` 走大装甲板类型；
-3. 传统检测器在这里承担的是“角点优化”或独立传统检测，不是前哨专用识别器。
-
-### 3.4 识别层对 outpost 的真实作用
-
-从工程角度看，检测层对前哨的职责只有三件事：
-
-1. 把目标标成 `ArmorName::outpost`
-2. 给出尽量稳定的四角点
-3. 给后续 `Solver` 和 `Tracker` 提供一块可解算的装甲板观测
-
-也就是说，当前工程里前哨的主要难点不在 detector，而在：
-
-1. 3 板几何恢复
-2. 板号与物理高度重映射
-3. 选板与开火时机控制
-
-## 4. 跟踪层解析
-
-### 4.1 跟踪器状态机
-
-`tasks/auto_aim/tracker.cpp` 的外层状态机包括：
-
-- `lost`
-- `detecting`
-- `tracking`
-- `temp_lost`
-- `switching`
-
-其中前四个是自动瞄准主链路常用状态，`switching` 主要用于全向感知切目标流程。
-
-基本逻辑是：
-
-1. `lost -> detecting`
-   首次找到可信目标
-2. `detecting -> tracking`
-   连续检测次数达到 `min_detect_count`
-3. `tracking -> temp_lost`
-   当前帧没找到匹配目标
-4. `temp_lost -> lost`
-   临时丢失超过阈值
-
-对前哨还有一个专门差异：
-
-1. `temp_lost` 阈值会切到 `outpost_max_temp_lost_count`
-2. 也就是前哨允许比普通目标更长时间的短暂丢失
-
-### 4.2 初始化
-
-`Tracker::set_target()` 会根据装甲板类型构造不同 `Target`：
-
-1. 平衡步兵：
-   `2` 板模型
-2. 前哨：
-   `3` 板模型
-3. 基地：
-   `3` 板模型
-4. 其他普通目标：
-   `4` 板模型
-
-对前哨的初始化参数是：
-
-```text
-P0 diag = [1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0]
-radius = outpost_radius
-armor_num = 3
-armor_z_offsets = outpost_armor_z_offsets
-fixed_center_rotation_model = outpost_fixed_center_rotation_model
-spin_speed_lock = outpost_spin_speed_lock
+```cpp
+double Target::armor_z_offset(int id) const
+{
+  if (armor_z_offsets_.empty() || armor_num_ <= 0) return 0.0;
+  return armor_z_offsets_[physical_armor_id(id)];
+}
 ```
 
-默认主配置 `configs/standard3.yaml` 中对应的是：
+**注意**：`armor_z_offset(id)` 接受局部板号，内部通过 `physical_armor_id(id)` 转换为物理板号后查表。三块板的高度偏移来自配置：
 
-```yaml
-outpost_radius: 0.2765
-outpost_armor_z_offsets: [0.0, -0.102, 0.102]
-outpost_fixed_center_rotation_model: true
-outpost_spin_speed_lock: 2.51
+| 物理板号 | 高度偏移 | 含义 |
+|---------|---------|------|
+| 0 | 0.0 m | 基准板 |
+| 1 | -0.102 m | 低板 |
+| 2 | +0.102 m | 高板 |
+
+---
+
+## 3. EKF 预测模型
+
+### 3.1 11 维状态向量
+
+代码位置：[target.cpp:49](tasks/auto_aim/target.cpp#L49)
+
 ```
-
-### 4.3 状态定义
-
-`Target` 内部使用统一的 11 维 EKF 状态：
-
-```text
 x = [cx, vcx, cy, vcy, cz, vcz, yaw, vyaw, r, l, h]
+      0    1    2    3    4    5    6     7    8   9  10
 ```
 
-含义如下：
+| 索引 | 符号 | 含义 |
+|-----|------|------|
+| x[0] | cx | 旋转中心 x 坐标 |
+| x[1] | vcx | 中心 x 方向速度 |
+| x[2] | cy | 旋转中心 y 坐标 |
+| x[3] | vcy | 中心 y 方向速度 |
+| x[4] | cz | 旋转中心 z 坐标 |
+| x[5] | vcz | 中心 z 方向速度 |
+| x[6] | yaw | 参考装甲板相位角 |
+| x[7] | vyaw | 角速度 |
+| x[8] | r | 旋转半径 |
+| x[9] | l | 长短半径差（前哨不使用） |
+| x[10] | h | 高度差（前哨不使用） |
 
-- `cx, cy, cz`：旋转中心位置
-- `vcx, vcy, vcz`：中心速度
-- `yaw`：参考装甲板相位
-- `vyaw`：角速度
-- `r`：基础半径
-- `l, h`：
-  对普通 4 板目标表示长短半径差和高度差
+### 3.2 固定中心旋转模型（前哨默认）
 
-对前哨要特别注意：
+代码位置：[target.cpp:98-123](tasks/auto_aim/target.cpp#L98-L123)
 
-1. 当前前哨仍然复用这套 11 维状态接口；
-2. 但三块板的真实高度关系，主要不是靠 `h` 建模，而是靠 `outpost_armor_z_offsets`；
-3. 也就是说，前哨在状态向量上“共用外形”，在几何解释上“走专门分支”。
+```cpp
+void Target::predict(double dt)
+{
+  Eigen::MatrixXd F = Eigen::MatrixXd::Identity(11, 11);
+  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(11, 11);
+  std::function<Eigen::VectorXd(const Eigen::VectorXd &)> f =
+    [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
+    Eigen::VectorXd x_prior = F * x;
+    x_prior[6] = tools::limit_rad(x_prior[6]);
+    return x_prior;
+  };
 
-### 4.4 outpost 的装甲板几何建模
+  if (fixed_center_rotation_model_) {
+    const double dt_abs = std::max(std::abs(dt), 1e-3);
 
-`Target::h_armor_xyz()` 里，普通 4 板目标采用：
+    // 状态转移矩阵 F
+    F(6, 7) = dt;    // yaw += vyaw * dt
+    F(1, 1) = 0.0;   // 速度不传播到位置
+    F(3, 3) = 0.0;
+    F(5, 5) = 0.0;
 
-```text
-偶数板：半径 r，高度 cz
-奇数板：半径 r + l，高度 cz + h
+    // 过程噪声 Q
+    Q(0, 0) = 1e-5 * dt_abs;   // 位置噪声
+    Q(1, 1) = 1e-4 * dt_abs;   // 速度噪声
+    Q(2, 2) = 1e-5 * dt_abs;
+    Q(3, 3) = 1e-4 * dt_abs;
+    Q(4, 4) = 1e-5 * dt_abs;
+    Q(5, 5) = 1e-4 * dt_abs;
+    Q(6, 6) = 2e-3 * dt_abs;   // 角度噪声
+    Q(7, 7) = 5e-3 * dt_abs;   // 角速度噪声
+
+    // 状态转移函数 f
+    f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
+      Eigen::VectorXd x_prior = x;
+      x_prior[1] = 0.0;   // 速度压零
+      x_prior[3] = 0.0;
+      x_prior[5] = 0.0;
+      x_prior[6] = tools::limit_rad(x[6] + x[7] * dt);  // 角度积分
+      return x_prior;
+    };
+  }
+
+  // 角速度锁定
+  if (this->convergened() && this->name == ArmorName::outpost && std::abs(this->ekf_.x[7]) > 2) {
+    this->ekf_.x[7] = this->ekf_.x[7] > 0 ? spin_speed_lock_ : -spin_speed_lock_;
+  }
+
+  ekf_.predict(F, Q, f);
+}
 ```
 
-而前哨由于 `armor_num = 3`，不会进入 `use_l_h` 分支，所以它的三块板几何是：
+**算法要点**：
 
-```text
-x_i = cx - r * cos(yaw_i)
-y_i = cy - r * sin(yaw_i)
-z_i = cz + armor_z_offset(i)
-yaw_i = yaw + i * 2pi / 3
+1. **位置不移动**：`F(1,1)=F(3,3)=F(5,5)=0`，速度不传播到位置，中心保持固定
+2. **速度压零**：`f` 中将 `x[1], x[3], x[5]` 设为 0，等价于"前哨不平移"
+3. **角度积分**：`yaw += vyaw × dt`，只旋转不平移
+4. **小过程噪声**：位置 1e-5、速度 1e-4、角度 2e-3、角速度 5e-3，反映"前哨中心稳定"的假设
+5. **角速度锁定**：收敛后若 `|vyaw| > 2`，锁定到 `±2.51 rad/s`
+
+### 3.3 普通常速度模型（备选）
+
+代码位置：[target.cpp:123-167](tasks/auto_aim/target.cpp#L123-L167)
+
+```cpp
+  } else {
+    // 状态转移矩阵
+    F <<
+      1, dt,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  1, dt,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  1, dt,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  1, dt,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1;
+
+    // Piecewise White Noise Model
+    double v1, v2;
+    if (name == ArmorName::outpost) {
+      v1 = 10;   // 前哨站加速度方差
+      v2 = 0.1;  // 前哨站角加速度方差
+    } else {
+      v1 = 100;  // 加速度方差
+      v2 = 400;  // 角加速度方差
+    }
+    // ... Q 矩阵构建
+  }
 ```
 
-这里的关键点有两个：
+前哨在此模式下的过程噪声仍比普通目标小一个数量级。
 
-1. 三块板共用同一个旋转半径 `r`
-2. 三块板的高度差来自 `armor_z_offset(i)`，而不是状态里的 `h`
+---
 
-更进一步，前哨还引入了：
+## 4. EKF 量测更新
 
-```text
-local armor id
-vs
-physical armor id
+### 4.1 观测模型
+
+代码位置：[target.cpp:231-288](tasks/auto_aim/target.cpp#L231-L288)
+
+```cpp
+void Target::update_ypda(const Armor & armor, int id)
+{
+  // 参数保护：检查半径、l、h 是否越界
+  if (this->convergened()) {
+    if (ekf_.x[8] < 0.18 || ekf_.x[8] > 0.35) {
+      ekf_.x[8] = 0.25;  // 半径越界重置
+    }
+    if (std::abs(ekf_.x[9]) > 0.20) {
+      ekf_.x[9] = 0.1;   // l 越界重置
+    }
+    if (std::abs(ekf_.x[10]) > 0.20) {
+      ekf_.x[10] = 0.0;  // h 越界重置
+    }
+  }
+
+  // 观测雅可比矩阵
+  Eigen::MatrixXd H = h_jacobian(ekf_.x, id);
+
+  // 自适应观测噪声
+  auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
+  auto delta_angle = tools::limit_rad(armor.ypr_in_world[0] - center_yaw);
+  Eigen::VectorXd R_dig{
+    {4e-3, 4e-3, log(std::abs(delta_angle) + 1) + 1,
+     log(std::abs(armor.ypd_in_world[2]) + 1) / 200 + 9e-2}};
+
+  Eigen::MatrixXd R = R_dig.asDiagonal();
+
+  // 非线性观测函数 h: x -> z
+  auto h = [&](const Eigen::VectorXd & x) -> Eigen::Vector4d {
+    Eigen::VectorXd xyz = h_armor_xyz(x, id);
+    Eigen::VectorXd ypd = tools::xyz2ypd(xyz);
+    auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
+    return {ypd[0], ypd[1], ypd[2], angle};
+  };
+
+  // 角度差值函数（防止 2π 跳变）
+  auto z_subtract = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
+    Eigen::VectorXd c = a - b;
+    c[0] = tools::limit_rad(c[0]);
+    c[1] = tools::limit_rad(c[1]);
+    c[3] = tools::limit_rad(c[3]);
+    return c;
+  };
+
+  // 观测量
+  const Eigen::VectorXd & ypd = armor.ypd_in_world;
+  const Eigen::VectorXd & ypr = armor.ypr_in_world;
+  Eigen::VectorXd z{{ypd[0], ypd[1], ypd[2], ypr[0]}};
+
+  ekf_.update(z, H, R, h, z_subtract);
+}
 ```
 
-对应接口是：
+**观测量**：`z = [yaw_los, pitch_los, distance, armor_yaw]`
 
-- `physical_armor_id()`
-- `set_armor_id_offset()`
-- `armor_z_offset()`
+| 分量 | 来源 | 含义 |
+|------|------|------|
+| `ypd[0]` | `armor.ypd_in_world[0]` | 视线水平角 |
+| `ypd[1]` | `armor.ypd_in_world[1]` | 视线垂直角 |
+| `ypd[2]` | `armor.ypd_in_world[2]` | 目标距离 |
+| `ypr[0]` | `armor.ypr_in_world[0]` | 装甲板朝向角 |
 
-这样做的目的，是把：
+**自适应噪声**：
 
-1. “当前几何顺序中的第几块板”
-2. “真实物理上高板/低板是哪一块”
-
-这两件事分开处理。
-
-### 4.5 outpost 的姿态建模
-
-当前工程里，前哨与普通装甲板最重要的姿态差异发生在 `Solver::reproject_armor()`：
-
-```text
-outpost      -> pitch = -15°
-普通装甲板   -> pitch = +15°
+```
+R_diag = [4e-3, 4e-3, log(|delta_angle|+1)+1, log(|distance|+1)/200 + 9e-2]
 ```
 
-这不是 EKF 状态里单独估计的 pitch，而是重投影和 yaw 优化时的几何假设。
+- 角度噪声固定 4e-3
+- 距离噪声随板相位偏角增大（板面倾斜时测距更不准）
+- 装甲板 yaw 噪声随距离增大（远距离角点退化）
 
-它会直接影响：
+### 4.2 装甲板几何模型：h_armor_xyz()
 
-1. 重投影误差
-2. tracker 匹配质量
-3. 板位空间估计
+代码位置：[target.cpp:382-393](tasks/auto_aim/target.cpp#L382-L393)
 
-因此，当前工程里前哨并不是“普通小装甲板换个标签”这么简单，至少从重投影几何开始就已经分叉。
+```cpp
+Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
+{
+  auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
+  auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
 
-### 4.6 预测模型
+  auto r = (use_l_h) ? x[8] + x[9] : x[8];
+  auto armor_x = x[0] - r * std::cos(angle);
+  auto armor_y = x[2] - r * std::sin(angle);
+  auto armor_z = (use_l_h) ? x[4] + x[10] : x[4] + armor_z_offset(id);
 
-`Target::predict()` 中，前哨有两种工作模式。
-
-#### 模式 A：固定中心旋转模型
-
-当 `outpost_fixed_center_rotation_model=true` 时：
-
-1. `vx, vy, vz` 会被压回 `0`
-2. 中心默认不平移
-3. 只保留 `yaw += vyaw * dt`
-4. 过程噪声采用一组比普通目标更小的固定值
-
-这等价于假设：
-
-```text
-前哨主要绕固定中心转，而不是像车体那样在平面上机动
+  return {armor_x, armor_y, armor_z};
+}
 ```
 
-#### 模式 B：普通常速度模型
+对前哨（`armor_num_ = 3`），`use_l_h` 恒为 `false`，因此：
 
-如果关闭固定中心模型，就退回统一常速度 EKF 预测。
-
-此外，前哨还有一个关键逻辑：
-
-1. 当目标已经收敛；
-2. 且目标是前哨；
-3. 且 `|vyaw| > 2`
-
-就会把角速度锁到：
-
-```text
-+outpost_spin_speed_lock 或 -outpost_spin_speed_lock
+```
+第 i 块板的位置：
+  angle_i = yaw + i × 2π/3
+  x_i = cx - r × cos(angle_i)
+  y_i = cy - r × sin(angle_i)
+  z_i = cz + armor_z_offset(i)
 ```
 
-这可以抑制前哨角速度估计在稳定跟踪后继续漂动。
+三块板共用半径 `r`，高度差完全由 `armor_z_offsets` 决定。
 
-### 4.7 过程噪声
+### 4.3 观测雅可比矩阵：h_jacobian()
 
-当前工程里，前哨过程噪声不是旧项目里的一组 `qxyz_outpost / qyaw_output / q_outpost_dz` 风格参数，而是写在 `Target::predict()` 里的两套实现。
+代码位置：[target.cpp:395-432](tasks/auto_aim/target.cpp#L395-L432)
 
-对前哨：
+```cpp
+Eigen::MatrixXd Target::h_jacobian(const Eigen::VectorXd & x, int id) const
+{
+  auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
+  auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
 
-1. 如果走固定中心模型，过程噪声直接硬编码为一组很小的对角项；
-2. 如果走普通常速度模型，则使用：
-   `v1 = 10`
-   `v2 = 0.1`
+  auto r = (use_l_h) ? x[8] + x[9] : x[8];
+  auto dx_da = r * std::sin(angle);
+  auto dy_da = -r * std::cos(angle);
 
-对普通目标：
+  auto dx_dr = -std::cos(angle);
+  auto dy_dr = -std::sin(angle);
+  auto dx_dl = (use_l_h) ? -std::cos(angle) : 0.0;
+  auto dy_dl = (use_l_h) ? -std::sin(angle) : 0.0;
 
-```text
-v1 = 100
-v2 = 400
+  auto dz_dh = (use_l_h) ? 1.0 : 0.0;
+
+  // 装甲板位置对状态的雅可比
+  Eigen::MatrixXd H_armor_xyza{
+    {1, 0, 0, 0, 0, 0, dx_da, 0, dx_dr, dx_dl,     0},
+    {0, 0, 1, 0, 0, 0, dy_da, 0, dy_dr, dy_dl,     0},
+    {0, 0, 0, 0, 1, 0,     0, 0,     0,     0, dz_dh},
+    {0, 0, 0, 0, 0, 0,     1, 0,     0,     0,     0}
+  };
+
+  // xyz -> ypd 的雅可比
+  Eigen::VectorXd armor_xyz = h_armor_xyz(x, id);
+  Eigen::MatrixXd H_armor_ypd = tools::xyz2ypd_jacobian(armor_xyz);
+  Eigen::MatrixXd H_armor_ypda{
+    {H_armor_ypd(0, 0), H_armor_ypd(0, 1), H_armor_ypd(0, 2), 0},
+    {H_armor_ypd(1, 0), H_armor_ypd(1, 1), H_armor_ypd(1, 2), 0},
+    {H_armor_ypd(2, 0), H_armor_ypd(2, 1), H_armor_ypd(2, 2), 0},
+    {                0,                 0,                 0, 1}
+  };
+
+  return H_armor_ypda * H_armor_xyza;
+}
 ```
 
-这说明当前工程的设计倾向非常明确：
+对前哨（`use_l_h = false`），`dx_dl = dy_dl = dz_dh = 0`，雅可比矩阵简化为：
 
-1. 相信前哨中心比普通车更稳定
-2. 相信前哨角速度变化远小于普通小陀螺目标
-
-### 4.8 观测模型
-
-`Target::update_ypda()` 的观测量是：
-
-```text
-z = [yaw_los, pitch_los, distance, armor_yaw]
 ```
-
-其中：
-
-1. `yaw_los / pitch_los / distance` 来自 `armor.ypd_in_world`
-2. `armor_yaw` 来自 `armor.ypr_in_world[0]`
-
-当前工程里观测噪声不是固定常数，而是经验相关项：
-
-```text
-R_dig = [
-  4e-3,
-  4e-3,
-  log(|delta_angle| + 1) + 1,
-  log(|distance| + 1) / 200 + 9e-2
+H_armor_xyza = [
+  [1, 0, 0, 0, 0, 0, r·sin(a), 0, -cos(a), 0, 0],
+  [0, 0, 1, 0, 0, 0, -r·cos(a), 0, -sin(a), 0, 0],
+  [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
 ]
 ```
 
-这意味着：
+---
 
-1. 前两项角度观测给固定噪声；
-2. 距离噪声会随板相位偏角变化；
-3. 装甲板 yaw 观测噪声会随距离变化。
+## 5. 前哨站初始化
 
-从工程上看，这是一种“轻量自适应”的经验建模，不是旧文档里的单独前哨量测噪声参数化。
+### 5.1 Target 构造函数
 
-### 4.9 匹配与门控
+代码位置：[target.cpp:12-60](tasks/auto_aim/target.cpp#L12-L60)
 
-这里是当前工程里前哨最专门化的部分。
+```cpp
+Target::Target(
+  const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
+  Eigen::VectorXd P0_dig, const std::vector<double> & armor_z_offsets,
+  bool fixed_center_rotation_model, double spin_speed_lock)
+: name(armor.name),
+  armor_type(armor.type),
+  jumped(false),
+  last_id(0),
+  update_count_(0),
+  armor_num_(armor_num),
+  t_(t),
+  is_switch_(false),
+  is_converged_(false),
+  fixed_center_rotation_model_(fixed_center_rotation_model),
+  spin_speed_lock_(spin_speed_lock),
+  switch_count_(0)
+{
+  auto r = radius;
+  priority = armor.priority;
+  armor_z_offsets_.assign(armor_num_, 0.0);
+  for (int i = 0; i < std::min<int>(armor_num_, armor_z_offsets.size()); ++i) {
+    armor_z_offsets_[i] = armor_z_offsets[i];
+  }
 
-普通目标的更新方式更简单：
+  const Eigen::VectorXd & xyz = armor.xyz_in_world;
+  const Eigen::VectorXd & ypr = armor.ypr_in_world;
 
-1. 先预测 `target_`
-2. 找到同名同类型候选
-3. `solver.solve()`
-4. 调 `target_.update(armor)`，由默认就近关联完成匹配
+  // 从观测装甲板位置沿 yaw 方向回推旋转中心
+  auto center_x = xyz[0] + r * std::cos(ypr[0]);
+  auto center_y = xyz[1] + r * std::sin(ypr[0]);
+  auto center_z = xyz[2];
 
-前哨则不会直接走这条路，而是先执行：
+  // 初始化状态向量
+  Eigen::VectorXd x0{{center_x, 0, center_y, 0, center_z, 0, ypr[0], 0, r, 0, 0}};
+  Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
-```text
-select_best_outpost_match()
+  ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
+}
 ```
 
-它会同时枚举：
+### 5.2 Tracker::set_target() 中的前哨初始化
 
-1. 当前局部板号 `id`
-2. 物理板号偏移 `offset`
+代码位置：[tracker.cpp:439-443](tasks/auto_aim/tracker.cpp#L439-L443)
 
-对每种组合计算综合代价，代价项包括：
-
-1. 重投影误差
-2. 视线 yaw 误差
-3. pitch 误差
-4. 距离误差
-5. 装甲板 yaw 误差
-6. xy 位置误差
-7. z 位置误差
-8. 与上一帧 `id`、`offset` 的连续性惩罚
-
-然后再用 `accept_outpost_match()` 做门限筛选：
-
-```text
-reprojection_error < 90 px
-xy_error < 0.40 m
-z_error < 0.20 m
-score < 36
+```cpp
+else if (armor.name == ArmorName::outpost) {
+    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
+    target_ = Target(
+      armor, t, outpost_radius_, 3, P0_dig, outpost_armor_z_offsets_,
+      outpost_fixed_center_rotation_model_, outpost_spin_speed_lock_);
+}
 ```
 
-只有通过筛选后，才会：
+| 参数 | 配置项 | 默认值 |
+|-----|-------|-------|
+| 半径 | `outpost_radius` | 0.2765 m |
+| 装甲板数 | 硬编码 | 3 |
+| 高度偏移 | `outpost_armor_z_offsets` | [0.0, -0.102, 0.102] |
+| 固定中心模型 | `outpost_fixed_center_rotation_model` | true |
+| 角速度锁定 | `outpost_spin_speed_lock` | 2.51 rad/s |
+| 初始协方差 | 硬编码 | [1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0] |
 
-1. `set_armor_id_offset(best_match.offset, target_.last_id)`
-2. `target_.update(*best_match.armor_it, best_match.id)`
+---
 
-这一步把：
+## 6. 前哨站 Planner 火控
 
-1. 哪块局部板被看到
-2. 当前物理高低板映射关系
+### 6.1 命中时刻固定点迭代：solve_hit_target()
 
-放到了同一个匹配框架里统一求解。
+代码位置：[planner.cpp:179-230](tasks/auto_aim/planner/planner.cpp#L179-L230)
 
-### 4.10 ROI 预测
+```cpp
+HitTargetSolution solve_hit_target(
+  const Target & base_target, double bullet_speed, double coming_angle, double leaving_angle,
+  int initial_lock_id,
+  const std::function<Eigen::Vector3d(const Target &, const AimSelection &)> & resolve_aim_xyz)
+{
+  HitTargetSolution solution;
+  int working_lock_id = initial_lock_id;
+  double fly_time = 0.0;
+  int previous_armor_id = -1;
 
-当前工程没有旧项目里那种“根据上一帧目标预测自适应 ROI”的单独前哨策略。
+  for (int iter = 0; iter < kHitTimeIterMax; ++iter) {
+    Target iter_target = base_target;
+    if (fly_time > 0.0) {
+      iter_target.predict(fly_time);  // 预测到命中时刻
+    }
 
-目前实际生效的是 YOLO 分支里的静态 ROI：
+    // 在预测后的 target 上选板
+    auto selection =
+      choose_aim_selection(iter_target, coming_angle, leaving_angle, working_lock_id);
+    if (!selection.valid) return solution;
 
-- `use_roi`
-- `roi.x`
-- `roi.y`
-- `roi.width`
-- `roi.height`
+    // 解弹道得到飞行时间
+    const Eigen::Vector3d xyz = resolve_aim_xyz(iter_target, selection);
+    const double dist_xy = xyz.head<2>().norm();
+    auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
+    if (bullet_traj.unsolvable) return solution;
 
-它由配置和运行时参数共同控制，属于检测加速手段，不是 tracker 驱动的目标预测 ROI。
+    // 再预测到命中时刻
+    Target hit_target = base_target;
+    hit_target.predict(bullet_traj.fly_time);
 
-因此，这一版工程里前哨 ROI 的主要特点是：
+    // 收敛判定：飞行时间变化 < 1ms 且板号不变
+    if (
+      iter > 0 && std::abs(bullet_traj.fly_time - fly_time) < kHitTimeTol &&
+      selection.armor_id == previous_armor_id)
+    {
+      solution.valid = true;
+      solution.target_at_hit = hit_target;
+      solution.selection = selection;
+      solution.fly_time = bullet_traj.fly_time;
+      solution.iter_count = iter + 1;
+      solution.converged = true;
+      return solution;
+    }
 
-1. 可以配置
-2. 可以热更新
-3. 但不是按目标状态动态滑窗
+    fly_time = bullet_traj.fly_time;
+    previous_armor_id = selection.armor_id;
+    solution.valid = true;
+    solution.target_at_hit = hit_target;
+    solution.selection = selection;
+    solution.fly_time = bullet_traj.fly_time;
+    solution.iter_count = iter + 1;
+  }
 
-## 5. 控制层解析
-
-### 5.1 控制入口
-
-当前工程有两套自动瞄准控制入口。
-
-#### 入口 A：`Aimer`
-
-主要在：
-
-- `src/standard.cpp`
-- `src/uav.cpp`
-- `src/sentry.cpp`
-
-这条链路以“单次求 yaw/pitch”为主，更接近传统火控。
-
-#### 入口 B：`Planner(MPC)`
-
-主要在：
-
-- `src/standard_mpc.cpp`
-- `src/auto_aim_debug_mpc.cpp`
-- `src/auto_debug.cpp`
-
-这条链路会：
-
-1. 构造未来参考轨迹
-2. 分别对 yaw / pitch 解 MPC
-3. 同时输出位置、速度、加速度和 `fire`
-
-对前哨来说，这一分支明显更完整。
-
-### 5.2 弹道求解
-
-两套方案都基于 `tools::Trajectory` 做弹道解算，但用法不同。
-
-#### `Aimer`
-
-`Aimer::aim()` 的流程是：
-
-1. 按 `decision_speed` 选择高低速延迟；
-2. 预测目标到当前决策时刻；
-3. 用 `choose_aim_point()` 选板；
-4. 用 `tools::Trajectory` 计算飞行时间；
-5. 最多做 10 次“预测到命中时刻 -> 重选板 -> 重算飞行时间”的迭代；
-6. 输出最终 yaw / pitch。
-
-#### `Planner`
-
-`Planner::plan()` 的流程是：
-
-1. 先按 `delay_time` 预测到当前决策时刻；
-2. 用 `solve_hit_target()` 做“选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板”的固定点迭代；
-3. 以命中时刻目标为基准生成控制轨迹；
-4. 再解 MPC。
-
-当前实现里：
-
-1. `Aimer` 更像“单次求解 + 轻量迭代”
-2. `Planner` 更像“命中时刻求解 + 连续控制”
-
-### 5.3 装甲板选择策略
-
-#### `Aimer::choose_aim_point()`
-
-当前逻辑是：
-
-1. 如果 `target.jumped == false`，直接打当前板；
-2. 非小陀螺时，只在 `60°` 可见角内选板，并尽量锁住 `lock_id_`；
-3. 小陀螺时，用 `comingle/leaving_angle` 选“正在进入窗口”的板；
-4. 如果窗口内没有合适候选，退化为 `fallback_to_closest()`。
-
-对前哨，`Aimer` 还有一个现状：
-
-```text
-前哨被强制视为 spin gate 目标
-coming/leaving 角仍然写死为 70° / 30°
+  return solution;
+}
 ```
 
-也就是说，`Aimer` 分支里的前哨窗口目前还是硬编码。
+**迭代过程**：
+1. 将 target 预测 `fly_time` 秒
+2. 在预测后的 target 上执行 `choose_aim_selection()` 选板
+3. 解弹道得到新的 `fly_time`
+4. 若 `|new_fly_time - old_fly_time| < 1ms` 且板号不变 → 收敛
+5. 否则用新的 `fly_time` 继续迭代（最多 6 次）
 
-#### `Planner::choose_aim_selection()`
+### 6.2 选板策略：choose_aim_selection()
 
-`Planner` 的选板逻辑和 `Aimer` 框架相似，但更完整：
+代码位置：[planner.cpp:48-167](tasks/auto_aim/planner/planner.cpp#L48-L167)
 
-1. 仍然区分“未 jump”和“已 jump”
-2. 仍然支持正常可见角选板和 spin gate 选板
-3. 前哨窗口来自：
-   `outpost_coming_angle`
-   `outpost_leaving_angle`
-4. 选板不是只看当前时刻，而是会进入命中时刻固定点迭代
+```cpp
+AimSelection choose_aim_selection(
+  const Target & target, double coming_angle, double leaving_angle, int & lock_id)
+{
+  AimSelection selection;
+  const auto armor_xyza_list = target.armor_xyza_list();
+  if (armor_xyza_list.empty()) return selection;
 
-因此，当前工程里前哨“未来命中板选择”真正落地的是 `Planner` 分支，而不是 `Aimer` 分支。
+  const Eigen::VectorXd ekf_x = target.ekf_x();
+  selection.center_yaw = std::atan2(ekf_x[2], ekf_x[0]);
+  selection.delta_angle_list.reserve(armor_xyza_list.size());
 
-### 5.4 控制点生成
+  // 计算每块板相对于中心的相位角
+  for (const auto & xyza : armor_xyza_list) {
+    selection.delta_angle_list.push_back(
+      tools::limit_rad(xyza[3] - selection.center_yaw));
+  }
 
-#### `Aimer`
+  auto fill_selection = [&](int armor_id, bool used_spin_gate) {
+    selection.valid = true;
+    selection.armor_id = armor_id;
+    selection.used_spin_gate = used_spin_gate;
+    selection.xyza = armor_xyza_list[armor_id];
+    selection.selected_delta_angle = resolve_selected_delta_angle(selection);
+  };
 
-`Aimer` 最终只输出一个命中点对应的：
+  auto fallback_to_closest = [&]() {
+    int best_id = 0;
+    double best_score = std::numeric_limits<double>::max();
+    for (int i = 0; i < static_cast<int>(selection.delta_angle_list.size()); ++i) {
+      const double score = std::abs(selection.delta_angle_list[i]);
+      if (score < best_score) {
+        best_score = score;
+        best_id = i;
+      }
+    }
+    lock_id = -1;
+    fill_selection(best_id, false);
+  };
 
-- `yaw`
-- `pitch`
+  // 未 jump 时锁定当前板
+  if (!target.jumped) {
+    const int armor_count = static_cast<int>(armor_xyza_list.size());
+    const int observed_id = (target.last_id % armor_count + armor_count) % armor_count;
+    lock_id = observed_id;
+    fill_selection(observed_id, false);
+    return selection;
+  }
 
-没有显式轨迹，也没有前哨板级高度补偿接口。
+  const double target_w = ekf_x[7];
+  const bool use_spin_gate =
+    std::abs(target_w) > kSpinSpeedThreshold || target.name == ArmorName::outpost;
 
-#### `Planner`
+  // 小陀螺或前哨：选正在进入击打窗口的板
+  int best_id = -1;
+  double best_score = std::numeric_limits<double>::max();
+  for (int i = 0; i < static_cast<int>(selection.delta_angle_list.size()); ++i) {
+    const double delta_angle = selection.delta_angle_list[i];
+    if (std::abs(delta_angle) > coming_angle) continue;
 
-`Planner` 在求控制点时，会先通过：
+    bool entering_window = false;
+    if (target_w > 0) entering_window = delta_angle < leaving_angle;
+    if (target_w < 0) entering_window = delta_angle > -leaving_angle;
+    if (!entering_window) continue;
 
-```text
-resolve_aim_xyz()
+    const double score = std::abs(delta_angle);
+    if (score < best_score) {
+      best_score = score;
+      best_id = i;
+    }
+  }
+
+  if (best_id == -1) {
+    fallback_to_closest();
+    return selection;
+  }
+
+  lock_id = -1;
+  fill_selection(best_id, true);
+  return selection;
+}
 ```
 
-把选中的板中心位置取出来，再叠加：
+**前哨选板逻辑**：
 
-```text
-outpost_fire_z_compensation[physical_armor_id]
+1. **未 jump**：锁定 `last_id`，不切板
+2. **Spin Gate**（前哨始终启用）：选择正在进入 `leaving_angle` 窗口的板
+   - 正转：`delta_angle < leaving_angle`
+   - 反转：`delta_angle > -leaving_angle`
+3. **Fallback**：若无候选，选绝对 `delta_angle` 最小的板
+
+### 6.3 开火相位门
+
+代码位置：[planner.cpp:389-397](tasks/auto_aim/planner/planner.cpp#L389-L397)
+
+```cpp
+  bool fire_ready = debug_fire_track_ready;
+  if (target.name == ArmorName::outpost) {
+    const bool spin_gate_ready = !target.jumped || selection.used_spin_gate;
+    debug_fire_phase_limit = resolve_outpost_fire_phase_angle(leaving_angle);
+    debug_fire_phase_ready =
+      spin_gate_ready && std::abs(selection.selected_delta_angle) <= debug_fire_phase_limit;
+    fire_ready = fire_ready && hit_solution.converged && debug_fire_phase_ready;
+  }
 ```
 
-也就是说，当前前哨在 `Planner` 分支里可以做到：
+**前哨开火必须同时满足**：
 
-1. 选中不同物理板
-2. 对不同物理板加不同的额外击打高度补偿
+1. 轨迹跟踪误差 < `fire_thresh`
+2. 命中时刻迭代收敛：`hit_solution.converged == true`
+3. 相位门通过：`|delta_angle|` ≤ `fire_phase_limit`
+4. 若已 `jumped`，必须通过 spin gate 选板（非 fallback）
 
-这是当前工程相对完整的一项前哨专用火控能力。
+**相位门限计算**：
 
-### 5.5 轨迹生成与限加速度
+代码位置：[planner.cpp:28-35](tasks/auto_aim/planner/planner.cpp#L28-L35)
 
-这一节主要对应 `Planner`。
-
-`Planner::get_trajectory()` 会：
-
-1. 把目标从当前时刻回滚到轨迹起点；
-2. 逐步向前预测；
-3. 每一帧重新求 `yaw/pitch`；
-4. 生成未来 `HORIZON` 长度的参考轨迹；
-5. 如果切板造成的 `yaw_acc` 尖峰过大，就做一次轻量抑制。
-
-随后：
-
-1. yaw 和 pitch 分别进入 `TinyMPC`
-2. 最大角加速度由：
-   `max_yaw_acc`
-   `max_pitch_acc`
-   约束
-
-因此，当前前哨控制不是简单的“算一个角度打过去”，而是已经包含：
-
-1. 飞行时间补偿
-2. 连续轨迹参考
-3. 控制输入限幅
-
-### 5.6 开火门控
-
-这部分必须按入口区分。
-
-#### `standard.cpp`
-
-当前 `standard.cpp` 里虽然创建了 `Shooter`，但没有真正调用 `shooter.shoot()`。
-
-因此这条链路的现状是：
-
-1. `Aimer` 输出 `Command`
-2. 直接 `cboard.send(command)`
-3. 不存在当前入口内额外的前哨专用开火门
-
-#### `uav/sentry` 等分支
-
-这些入口会调用 `Shooter::shoot()`，其门控条件主要是：
-
-1. 当前命令不能突变太大
-2. 当前云台角要接近上一帧命令
-3. `aimer.debug_aim_point.valid == true`
-
-它是通用门控，不是前哨专用相位门。
-
-#### `Planner`
-
-当前 `Planner` 分支对前哨已经有更完整的开火门控：
-
-1. 先计算轨迹跟踪误差 `tracking_error`
-2. 普通目标只看 `tracking_error < fire_thresh`
-3. 前哨目标还必须同时满足：
-   - `hit_solution.converged == true`
-   - 选中板命中时刻的相位角落入更紧的击打窗口
-   - 如果目标已经 `jumped`，则必须是真正通过 `spin gate` 选中的板，而不是 fallback 板
-
-当前前哨击打窗口的推导规则是：
-
-```text
-fire_phase_limit =
-  clamp(outpost_leaving_angle * 0.5, 4°, 12°)
-  再限制不超过 outpost_leaving_angle 本身
+```cpp
+double resolve_outpost_fire_phase_angle(double leaving_angle)
+{
+  if (leaving_angle <= 1e-6) return 8.0 / 57.3;
+  const double fire_angle =
+    std::clamp(leaving_angle * 0.5, kMinOutpostFireAngle, kMaxOutpostFireAngle);
+  return std::min(fire_angle, leaving_angle);
+}
 ```
 
-这意味着当前工程已经显式区分：
-
-1. 控制参考连续性
-2. 实际是否允许开火
-
-## 6. outpost 专用逻辑总结
-
-### 6.1 感知层
-
-当前工程对前哨在感知层的特化主要是：
-
-1. 网络类别里有 `outpost`
-2. `outpost` 被定义为小装甲板
-3. 可以使用 YOLO + 传统角点二次矫正
-
-但没有：
-
-1. 独立前哨 detector
-2. 直接输出整体转轴或相位的识别器
-
-### 6.2 几何层
-
-当前工程对前哨的几何特化包括：
-
-1. 3 板模型
-2. 同一半径 `r`
-3. 三板高度由 `outpost_armor_z_offsets` 给出
-4. 重投影时使用 `-15°` pitch 假设
-5. 通过 `physical armor id` 管理真实高低板
-
-### 6.3 动力学层
-
-当前工程对前哨的动力学特化包括：
-
-1. 可选固定中心旋转模型
-2. 收敛后的角速度锁
-3. 单独更大的 `temp_lost` 容忍
-4. 专用 `id + offset` 联合匹配
-
-### 6.4 控制层
-
-当前工程对前哨的控制特化主要集中在 `Planner`：
-
-1. 前哨独立 `coming/leaving` 角窗口
-2. 前哨独立 `delay_time`
-3. 前哨板级 `z` 补偿
-4. 命中时刻固定点迭代
-5. 前哨专用开火相位门
-
-相对而言，`Aimer` 分支对前哨的支持仍然偏简化。
-
-## 7. 当前实现中值得优先关注的问题
-
-下面这些点是当前工程里仍然值得重点关注的风险，它们不一定都是“错误”，但都可能直接影响前哨验收结果。
-
-### 7.1 `Aimer` 与 `Planner` 的前哨策略并不一致
-
-当前 `Aimer` 分支和 `Planner` 分支对前哨的支持程度不一样：
-
-1. `Aimer` 仍然使用硬编码 `70° / 30°`
-2. `Aimer` 没有板级 `z` 补偿
-3. `Aimer` 没有当前 `Planner` 这套更严格的前哨相位开火门
-
-因此，如果实车主要用的是 `Planner`，就不能再沿用旧的 `Aimer` 经验去理解问题。
-
-### 7.2 `standard.cpp` 入口当前并不代表完整前哨火控能力
-
-当前 `standard.cpp` 没有真正接入 `Shooter::shoot()`。
-
-这意味着：
-
-1. 这条入口更像“出瞄准角”
-2. 不是当前前哨击发逻辑最完整的验收入口
-3. 如果把这条入口和 `auto_aim_debug_mpc` 的表现混着看，很容易误判问题来源
-
-### 7.3 `Planner` 的开火效果仍高度依赖 `outpost_delay_time`
-
-当前前哨在 `Planner` 分支里虽然已经有：
-
-1. 命中时刻迭代
-2. 相位门
-3. convergence 门
-
-但如果 `outpost_delay_time` 偏差较大，仍然会出现：
-
-1. 总体偏早
-2. 总体偏晚
-3. 相位门长期不过
-
-所以这仍然是实车验收中最敏感的参数之一。
-
-### 7.4 前哨匹配门限仍然是硬编码经验值
-
-`select_best_outpost_match()` 和 `accept_outpost_match()` 的门限当前写在代码里，不是运行时参数。
-
-这意味着：
-
-1. 远距离
-2. 画面边缘
-3. 角点退化
-
-这几种工况下，如果需要放宽或收紧门限，就必须改代码，而不能只靠网页调参。
-
-### 7.5 `outpost_armor_z_offsets` 与 `outpost_fire_z_compensation` 必须配套看
-
-这两个量解决的是不同问题：
-
-1. `outpost_armor_z_offsets`
-   描述几何模型里三块板本身的真实高度关系
-2. `outpost_fire_z_compensation`
-   描述火控层额外补偿给某块物理板的击打高度修正
-
-如果它们混用，现场就容易出现：
-
-1. tracker 看起来稳定
-2. planner 选板也对
-3. 但实际总打高或打低
-
-### 7.6 初始阶段仍然更相信“当前看到的这块板”
-
-当前无论是 `Aimer` 还是 `Planner`，在 `target.jumped == false` 时都更相信当前观测板。
-
-这是合理的，但也意味着：
-
-1. 前哨刚建链时，相位是“当前板优先”
-2. 如果初始化板本身就带较大观测误差，第一段参考可能仍然偏
-
-### 7.7 文档验收时要区分“算法问题”和“入口问题”
-
-当前工程里前哨相关表现至少会同时受到三类因素影响：
-
-1. 跟踪是否稳
-2. 当前实际跑的是 `Aimer` 还是 `Planner`
-3. 当前入口有没有把开火门真正接进去
-
-因此，文档和实车验收时一定要先确认运行入口，再谈算法效果。
-
-## 8. 面向 outpost 的优化建议
-
-### 8.1 第一优先级：先用 `Planner` 分支做前哨验收
-
-当前工程里最完整的前哨方案已经在：
-
-- `planner.cpp`
-- `auto_aim_debug_mpc.cpp`
-- `auto_debug.cpp`
-
-所以如果目标是“先确认当前工程前哨算法是否合理”，最优先应该验这条链路。
-
-### 8.2 第二优先级：统一 `Aimer` 与 `Planner` 的前哨策略
-
-如果后续仍需要保留 `Aimer` 入口，建议至少补齐：
-
-1. 前哨可配置窗口，而不是硬编码 `70/30`
-2. 前哨板级高度补偿
-3. 前哨开火相位门
-
-否则不同入口的表现会长期不一致。
-
-### 8.3 第三优先级：把前哨匹配门限做成运行时参数
-
-建议优先考虑把下面几类量参数化：
-
-1. `accept_outpost_match()` 的总分门限
-2. 重投影误差门限
-3. `xy/z` 误差门限
-
-这样前哨实车调试就不必每次改代码重编译。
-
-### 8.4 第四优先级：把前哨验收重点集中到“相位、延迟、物理板号”
-
-当前工程里，前哨最值得关注的不是 detector，而是：
-
-1. `tracker` 是否把局部板号和物理板号映射对了
-2. `planner` 的命中时刻是否收敛
-3. `delay_time` 是否让板真正落入击打相位
-
-### 8.5 第五优先级：如果还要继续提升，再考虑自适应 ROI 和距离相关门限
-
-当前项目没有目标驱动的动态 ROI，也没有前哨匹配的距离自适应门限。
-
-如果前哨问题主要出现在：
-
-1. 远距离
-2. 边缘角度
-3. 大视角切板
-
-这两块会是后续继续提升的方向。
-
-## 9. 建议的调参顺序
-
-如果目的是做当前工程前哨验收，建议按下面顺序推进。
-
-1. 先确认入口
-   当前到底跑的是 `standard.cpp`、`standard_mpc.cpp`、`auto_aim_debug_mpc.cpp` 还是 `auto_debug.cpp`。
-2. 再看检测是否稳定
-   `outpost` 是否能稳定识别为 `ArmorName::outpost`，角点是否平稳。
-3. 再看 tracker
-   重点关注 `tracker_match_valid / tracker_match_score / tracker_reprojection_px`，确认 3 板匹配和物理板号映射是否稳定。
-4. 再看 planner 命中时刻求解
-   重点关注 `planner_hit_converged / planner_hit_iters / planner_selected_physical_armor`。
-5. 再调前哨延迟和相位
-   重点关注 `outpost_delay_time / planner_selected_delta_deg / planner_fire_phase_ready / planner_fire_phase_limit_deg`。
-6. 最后看板级高度补偿
-   如果相位已经对了但仍总打高或打低，再调 `outpost_fire_z_compensation`。
-
-从验收角度，当前建议的通过标准可以先定成：
-
-1. 前哨识别稳定，不频繁掉成别的类别；
-2. `tracker_match_valid` 大部分时间为真；
-3. `planner_hit_converged` 大部分时间为真；
-4. 空发不再呈现“固定每切一次板就空一枪”的规律性节奏；
-5. 若仍空枪，其原因能从相位、延迟、弹道、机械零偏中明确归类。
-
-## 10. 最终评价
-
-对当前 `sp_vision25` 来说：
-
-1. 前哨识别层仍然是通用检测方案，特化重点不在 detector；
-2. 前哨跟踪层已经有比较明确的工程化建模：
-   `3` 板模型、固定中心预测、角速度锁、专用匹配、物理板号重映射；
-3. 前哨控制层里最完整的实现已经在 `Planner` 分支，不再是旧文档里那种“只会选当前最正脸板”的状态。
-
-当前这套实现的整体评价是：
-
-1. 跟踪层设计已经比较像真正面向前哨的方案；
-2. `Planner` 分支的火控闭环已经具备前哨专用相位控制雏形；
-3. 但不同入口之间前哨能力仍不完全一致；
-4. 实车验收时必须优先确认入口，并用调试量去拆分问题来源。
-
-## 11. 2026-04-22 前哨实车补充分析与代码修改记录
-
-以下内容为基于近期排查追加的补充说明，不改动上文主结论，只记录本次前哨问题定位、代码修改和后续验收重点。
-
-本节当前也作为哨兵分支 `/home/aw/ATS_2026_snetry_test/src/sp_vision25` 同步迁移前哨优化时的记录基线使用。
-
-### 11.1 实车现象补充
-
-当前反馈现象可以概括为：
-
-1. 距离约 4 米、低弹频条件下，识别与跟踪本身相对稳定；
-2. `tracker` 可视化观测稳定，问题不像是检测抖动或频繁丢板；
-3. 实际更像是：
-   先命中当前装甲板
-   -> 紧接着空发一枪
-   -> 再命中下一块装甲板
-
-因此，本轮排查重点放在：
-
-1. `planner` 前哨选板
-2. 命中时刻固定点迭代
-3. 最终 `fire` 判定
-
-而不是先回头怀疑 detector。
-
-### 11.2 本次新增判断：为什么会出现“中一发、空一发”
-
-本次复查确认，造成这种节奏的核心风险是：
-
-1. `planner` 负责选“哪块板作为控制参考”；
-2. 但如果“控制参考连续性”和“真正允许开火”没有分开约束；
-3. 那么切板空窗期也可能被误当成可开火区间。
-
-对前哨来说，这种风险尤其明显，因为：
-
-1. 板切换频率高；
-2. `fallback_to_closest()` 对控制参考是有价值的；
-3. 但 fallback 目标并不一定已经进入稳定击打相位。
-
-### 11.3 本次确认并修复的算法问题
-
-这次不是简单调参数，而是确认并补上了几个算法层面的关键收口。
-
-#### 1. 前哨缺少“开火相位门”
-
-原先前哨虽然已经有：
-
-1. `outpost_coming_angle / outpost_leaving_angle`
-2. 选板窗口
-
-但最终开火若只看轨迹跟踪误差，就会把：
-
-1. 切板空窗期的参考板
-2. fallback 维持连续参考的板
-
-也误当成可开火目标。
-
-修复后：
-
-1. 前哨在开火前除了要满足 `tracking_error < fire_thresh`
-2. 还必须满足命中时刻的 `|delta_angle|` 落入更紧的击打窗口
-3. 这个窗口由 `outpost_leaving_angle` 推导：
-   `leaving_angle * 0.5`
-   并限制在 `4° ~ 12°`
-   同时不超过 `leaving_angle` 本身
-
-补充收口：
-
-1. 如果目标已经发生过 `jumped`
-2. 但当前命中时刻求解并没有通过 `spin gate` 选到真正进入窗口的板
-3. 而只是退化到 `fallback_to_closest`
-4. 那么系统现在仍然允许维持连续控制参考，但不再允许开火
-
-#### 2. 命中时刻迭代未收敛时，不能再允许前哨开火
-
-当前 `Planner` 里前哨会做：
-
-```text
-选板 -> 算飞行时间 -> 预测到命中时刻 -> 再选板
+其中 `kMinOutpostFireAngle = 4°`，`kMaxOutpostFireAngle = 12°`。
+
+### 6.4 板级高度补偿
+
+代码位置：[planner.cpp:611-621](tasks/auto_aim/planner/planner.cpp#L611-L621)
+
+```cpp
+double Planner::resolve_aim_z_compensation(const Target & target, int armor_id) const
+{
+  if (target.name != ArmorName::outpost || armor_id < 0) return 0.0;
+  if (outpost_fire_z_compensation_.size() != 3) return 0.0;
+
+  const int physical_id = target.physical_armor_id(armor_id);
+  if (physical_id < 0 || physical_id >= static_cast<int>(outpost_fire_z_compensation_.size())) {
+    return 0.0;
+  }
+  return outpost_fire_z_compensation_[physical_id];
+}
 ```
 
-如果这一步本身都还没收敛，就说明：
+不同物理板可以有不同的额外击打高度补偿，配置项 `outpost_fire_z_compensation` 默认为 `[0.0, 0.0, 0.0]`。
 
-1. 命中时刻还在跳
-2. 命中板号还在跳
+---
 
-这时允许开火风险很大。
+## 7. 前哨站专用逻辑总结
 
-因此现在的收口是：
-
-1. 对前哨目标，只有 `hit_solution.converged == true` 时才允许开火；
-2. 若未收敛，系统仍可继续控制瞄准，但不放枪。
-
-#### 3. 轨迹规划起点优先继承命中时刻求解出的板号
-
-当前实现里，轨迹规划会优先使用：
-
-```text
-hit_solution.selection.armor_id
-```
-
-作为后续 `solve_aim_command()` 和 `get_trajectory()` 的初始板号。
-
-这样做的意义是：
-
-1. 命中时刻求解结果
-2. 后续 MPC 轨迹起点
-
-两者更一致，不容易出现“算的是这块板，轨迹却又从另一块板起步”的轻微偏差。
-
-### 11.4 本次实际修改的代码文件
-
-本次与前哨问题直接相关的修改主要在：
-
-1. `tasks/auto_aim/planner/planner.hpp`
-2. `tasks/auto_aim/planner/planner.cpp`
-3. `src/auto_aim_debug_mpc.cpp`
-4. `src/auto_debug.cpp`
-
-补充说明：
-
-1. 当前哨兵分支里的 `planner.hpp` 已经预先具备本轮需要的调试字段；
-2. 因此这次迁移时，算法差异主要实际落在 `planner.cpp` 与两个 debug 入口；
-3. 文档里仍保留 `planner.hpp` 在清单中，是为了对应这套前哨优化逻辑的完整落点。
-
-### 11.5 本次新增的调试量
-
-为了便于后续实车验证，本次已补充并确认以下调试量：
-
-1. `planner_selected_delta_deg`
-   当前被选中装甲板在命中时刻的相位角
-2. `planner_fire_tracking_error_deg`
-   当前 `fire` 判定所看到的轨迹跟踪误差
-3. `planner_fire_phase_limit_deg`
-   当前前哨击打相位门限
-4. `planner_fire_track_ready`
-   轨迹误差是否满足开火要求
-5. `planner_fire_phase_ready`
-   选中板是否进入相位开火窗口
-6. `planner_hit_converged`
-   命中时刻固定点迭代是否收敛
-7. `planner_selected_physical_armor`
-   当前被击打判定引用的是哪块物理板
-
-这些量已经接入：
-
-1. `auto_aim_debug_mpc`
-2. `auto_debug`
-
-的 plot / web state。
-
-### 11.6 预期效果
-
-本轮修改后的预期是：
-
-1. `planner` 仍然可以在切板间隙保持控制参考连续；
-2. 但不再把切板空窗期参考板直接当成可开火板；
-3. 低弹频条件下，原来那种“命中一发后紧跟一发空枪”的固定节奏应明显减少；
-4. 开火会更偏向“少打一发，但发出去的枪更像有效枪”。
-
-### 11.7 这次修改后仍需要继续观察的点
-
-本次修复的是算法逻辑漏洞，但不代表前哨所有问题都已经结束，后续仍建议重点观察：
-
-1. `outpost_delay_time`
-   如果实车总是统一偏早或统一偏晚，仍然需要继续测和调；
-2. `planner_selected_delta_deg`
-   如果它已经稳定进入小角度窗口但依旧空枪，则问题更可能转向弹道、零偏或机械时延；
-3. `planner_hit_converged`
-   如果它经常不收敛，说明命中时刻固定点求解本身还需要继续优化；
-4. `planner_spin_gate`
-   如果目标已经 `jumped`，但这个量经常为 `false`，说明切板窗口判定或角速度符号稳定性还不够好；
-5. `planner_fire_phase_ready`
-   如果它长期为 `false`，要结合 `planner_spin_gate` 一起看：
-   `spin_gate = 0` 更像 fallback 禁火在生效；
-   `spin_gate = 1` 但仍长期为 `false`，则更像相位门偏严或 `delay_time` 有偏差。
-
-### 11.8 当前状态说明
-
-本次先不做进一步实车回归，这里记录当前状态：
-
-1. 已完成代码修改；
-2. 已完成文档记录同步；
-3. 已完成代码复查；
-4. 尚未完成当前哨兵分支的本地编译验证；
-5. 尚未完成新的实车回归验证。
-
-从当前工程验收角度，建议下一步按下面顺序进行：
-
-1. 先在 `auto_aim_debug_mpc` 或 `auto_debug` 上车看：
-   `planner_selected_delta_deg`
-   `planner_fire_phase_ready`
-   `planner_hit_converged`
-   `planner_selected_physical_armor`
-2. 再看空发是否已经从“稳定每切板一次出现一枪”下降到“偶发”；
-3. 最后再决定是继续调 `outpost_delay_time`、`outpost_fire_z_compensation`，还是继续细化前哨专用选板逻辑。
+| 环节 | 代码位置 | 前哨特殊处理 |
+|------|---------|-------------|
+| 初始化 | `tracker.cpp:439` | `armor_num=3`，固定中心模型，专用半径和高度偏移 |
+| 匹配 | `tracker.cpp:50-129` | 枚举 3×3 种 `(id, offset)` 组合，综合 7 项几何误差 + 连续性惩罚 |
+| 门限 | `tracker.cpp:131` | `reproj<90px, xy<0.4m, z<0.2m, score<36` |
+| 板号映射 | `target.cpp:325` | `set_armor_id_offset()` 调整 `ekf_.x[4]` 保持高度连续 |
+| 几何模型 | `target.cpp:382` | 三板共用半径，高度差由 `armor_z_offsets` 决定 |
+| 预测 | `target.cpp:98` | 固定中心旋转，速度压零，只积分角度 |
+| 角速度锁 | `target.cpp:169` | 收敛后 `|vyaw|>2` 时锁到 `±2.51 rad/s` |
+| 量测更新 | `target.cpp:231` | 4 维观测量 `[yaw, pitch, distance, armor_yaw]`，自适应噪声 |
+| 收敛判定 | `target.cpp:374` | 前哨需要 10 次更新（普通目标 3 次） |
+| 选板 | `planner.cpp:48` | 前哨始终走 spin gate 选板，未 jump 时锁定当前板 |
+| 命中迭代 | `planner.cpp:179` | 固定点迭代：选板→弹道→预测→再选板 |
+| 开火门 | `planner.cpp:389` | 相位门 `4°~12°` + 收敛门 + spin gate 门 |
+| 高度补偿 | `planner.cpp:611` | 按物理板号查表补偿 |
