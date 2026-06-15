@@ -22,13 +22,13 @@
 默认行为：
 
 - 网页调试器开启
-- 监听 `0.0.0.0:8090`
+- 监听 `127.0.0.1:8090`（仅本机可访问；如需远程调试请改为 `0.0.0.0`）
 - 不再强制打开本地 OpenCV 窗口
 
 程序启动后会在日志里打印类似：
 
 ```text
-Web debugger listening on 0.0.0.0:8090 (open http://127.0.0.1:8090/)
+Web debugger listening on 127.0.0.1:8090 (open http://127.0.0.1:8090/)
 ```
 
 本机直接打开：
@@ -46,7 +46,7 @@ http://127.0.0.1:8090/
 ```yaml
 show_local: false
 disable_web: false
-web_host: "0.0.0.0"
+web_host: "127.0.0.1"  # 改为 "0.0.0.0" 允许远程访问
 web_port: 8090
 web_fps: 8.0
 web_scale: 0.7
@@ -77,7 +77,7 @@ web_client_ttl_ms: 2000
 
 - `--show-local`: 保留原来的本地 OpenCV 窗口
 - `--disable-web`: 禁用网页调试器
-- `--web-host`: 绑定地址，默认 `0.0.0.0`
+- `--web-host`: 绑定地址，默认 `127.0.0.1`（设为 `0.0.0.0` 允许远程访问）
 - `--web-port`: 网页端口，默认 `8090`
 - `--web-fps`: 网页图像刷新帧率，默认 `8`
 - `--web-scale`: 网页图像缩放系数，默认 `0.7`

@@ -83,6 +83,7 @@ private:
 
     ifreq ifr;
     std::strncpy(ifr.ifr_name, interface_.c_str(), IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
     if (ioctl(socket_fd_, SIOCGIFINDEX, &ifr) < 0)
       throw std::runtime_error("Error getting interface index!");
 

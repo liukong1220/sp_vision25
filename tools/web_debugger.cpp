@@ -247,11 +247,20 @@ void WebDebugger::server_loop()
       continue;
     }
 
-    std::lock_guard<std::mutex> lock(client_threads_mutex_);
-    client_threads_.emplace_back([this, client_fd]() {
-      handle_client(client_fd);
-      ::close(client_fd);
-    });
+    {
+      std::lock_guard<std::mutex> lock(client_threads_mutex_);
+      // Join and remove threads that have finished to prevent unbounded growth.
+      // Older threads (front of the vector) are most likely to have completed.
+      constexpr size_t kMaxClientThreads = 32;
+      while (client_threads_.size() >= kMaxClientThreads && !client_threads_.empty()) {
+        client_threads_.front().join();
+        client_threads_.erase(client_threads_.begin());
+      }
+      client_threads_.emplace_back([this, client_fd]() {
+        handle_client(client_fd);
+        ::close(client_fd);
+      });
+    }
   }
 }
 
@@ -910,8 +919,9 @@ std::string WebDebugger::index_html()
       return `${Number(value).toFixed(digits)}${suffix}`;
     };
 
+    const esc = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     const boolText = (value, yes = "ON", no = "OFF") => value ? yes : no;
-    const cardRow = (name, value) => `<div class="row"><span>${name}</span><strong>${value}</strong></div>`;
+    const cardRow = (name, value) => `<div class="row"><span>${esc(name)}</span><strong>${esc(value)}</strong></div>`;
 
     const get = (obj, path, fallback = null) => {
       return path.split(".").reduce((acc, key) => {
@@ -944,7 +954,7 @@ std::string WebDebugger::index_html()
       fireEl.className = fire ? "value fire" : "value";
 
       const targetText = get(state, "preview.has_target", false)
-        ? `${get(state, "preview.target_name", "target")} / ${get(state, "preview.armor_type", "--")}`
+        ? `${String(get(state, "preview.target_name", "target"))} / ${String(get(state, "preview.armor_type", "--"))}`
         : "none";
       document.getElementById("status-target").textContent = targetText;
       document.getElementById("status-latency").textContent = `${text(get(state, "frame.latency_ms"), 1, " ms")}`;

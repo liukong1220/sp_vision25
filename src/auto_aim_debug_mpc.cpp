@@ -32,7 +32,7 @@ const std::string keys =
   "{@config-path   | configs/standard3.yaml | 位置参数yaml配置文件路径 }"
   "{show-local     | false                  | 保留本地OpenCV调试窗口(显式传参时覆盖yaml) }"
   "{disable-web    | false                  | 禁用内置网页调试器(显式传参时覆盖yaml) }"
-  "{web-host       | 0.0.0.0                | 网页调试器绑定地址(显式传参时覆盖yaml) }"
+  "{web-host       | 127.0.0.1              | 网页调试器绑定地址(显式传参时覆盖yaml) }"
   "{web-port       | 8090                   | 网页调试器端口(显式传参时覆盖yaml) }"
   "{web-fps        | 8.0                    | 网页图像刷新帧率(显式传参时覆盖yaml) }"
   "{web-scale      | 0.7                    | 网页图像缩放系数(显式传参时覆盖yaml) }"
@@ -454,7 +454,7 @@ int main(int argc, char * argv[])
   const bool disable_web = has_cli_option(argc, argv, "disable-web") ?
     cli.get<bool>("disable-web") : tools::read_or<bool>(yaml, "disable_web", false);
   const std::string web_host = has_cli_option(argc, argv, "web-host") ?
-    cli.get<std::string>("web-host") : tools::read_or<std::string>(yaml, "web_host", "0.0.0.0");
+    cli.get<std::string>("web-host") : tools::read_or<std::string>(yaml, "web_host", "127.0.0.1");
   const uint16_t web_port = static_cast<uint16_t>(std::clamp(
     has_cli_option(argc, argv, "web-port") ?
       cli.get<int>("web-port") : tools::read_or<int>(yaml, "web_port", 8090),

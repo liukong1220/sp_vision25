@@ -101,7 +101,7 @@ t_camera2gimbal: [0.13089617453251859, 0.0038468007459533785, 0.0941399452220102
 #####-----web_debugger参数-----#####
 show_local: false
 disable_web: false
-web_host: "0.0.0.0"
+web_host: "127.0.0.1"
 web_port: 8090
 web_fps: 8.0
 web_scale: 0.7

@@ -220,7 +220,7 @@ predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况�
 #####-----web_debugger参数-----#####
 show_local: false
 disable_web: false
-web_host: "0.0.0.0"
+web_host: "127.0.0.1"
 web_port: 8090
 web_fps: 30.0
 web_scale: 0.8

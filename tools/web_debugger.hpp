@@ -17,7 +17,7 @@ namespace tools
 class WebDebugger
 {
 public:
-  WebDebugger(const std::string & host = "0.0.0.0", uint16_t port = 8090);
+  WebDebugger(const std::string & host = "127.0.0.1", uint16_t port = 8090);
   ~WebDebugger();
 
   WebDebugger(const WebDebugger &) = delete;

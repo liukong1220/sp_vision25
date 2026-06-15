@@ -108,17 +108,17 @@ int codegen_create_directories(const char* output_dir, int verbose) {
 
     // Create src folder
     char src_dir[PATH_LENGTH];
-    sprintf(src_dir, "%s/src/", output_dir);
+    snprintf(src_dir, PATH_LENGTH, "%s/src/", output_dir);
     create_directory(src_dir, verbose);
 
     // Create tinympc folder
     char tinympc_dir[PATH_LENGTH];
-    sprintf(tinympc_dir, "%s/tinympc/", output_dir);
+    snprintf(tinympc_dir, PATH_LENGTH, "%s/tinympc/", output_dir);
     create_directory(tinympc_dir, verbose);
 
     // // Create include folder
     // char inc_dir[PATH_LENGTH];
-    // sprintf(inc_dir, "%s/include/", output_dir);
+    // snprintf(inc_dir, PATH_LENGTH, "%s/include/", output_dir);
     // create_directory(inc_dir, verbose);
 
     return EXIT_SUCCESS;
@@ -129,7 +129,7 @@ int codegen_data_header(const char* output_dir, int verbose) {
     char data_hpp_fname[PATH_LENGTH];
     FILE *data_hpp_f;
 
-    sprintf(data_hpp_fname, "%s/tinympc/tiny_data.hpp", output_dir);
+    snprintf(data_hpp_fname, PATH_LENGTH, "%s/tinympc/tiny_data.hpp", output_dir);
 
     // Open data header file
     data_hpp_f = fopen(data_hpp_fname, "w+");
@@ -175,7 +175,7 @@ int codegen_data_source(TinySolver* solver, const char* output_dir, int verbose)
     int nu = solver->work->nu;
     int N = solver->work->N;
 
-    sprintf(data_cpp_fname, "%s/src/tiny_data.cpp", output_dir);
+    snprintf(data_cpp_fname, PATH_LENGTH, "%s/src/tiny_data.cpp", output_dir);
 
     // Open data source file
     data_cpp_f = fopen(data_cpp_fname, "w+");
@@ -385,7 +385,7 @@ int codegen_example(const char* output_dir, int verbose) {
     char example_cpp_fname[PATH_LENGTH];
     FILE *example_cpp_f;
 
-    sprintf(example_cpp_fname, "%s/src/tiny_main.cpp", output_dir);
+    snprintf(example_cpp_fname, PATH_LENGTH, "%s/src/tiny_main.cpp", output_dir);
 
     // Open example file
     example_cpp_f = fopen(example_cpp_fname, "w+");

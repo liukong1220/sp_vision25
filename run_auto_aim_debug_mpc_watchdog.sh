@@ -70,7 +70,7 @@ is_truthy() {
 
 resolve_web_settings() {
   EFFECTIVE_DISABLE_WEB="$(yaml_value disable_web false)"
-  EFFECTIVE_WEB_HOST="$(yaml_value web_host 0.0.0.0)"
+  EFFECTIVE_WEB_HOST="$(yaml_value web_host 127.0.0.1)"
   EFFECTIVE_WEB_PORT="$(yaml_value web_port 8090)"
 
   local i=0
