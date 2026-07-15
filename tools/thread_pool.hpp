@@ -110,7 +110,11 @@ public:
     return true;
   }
 
-  size_t get_size() { return main_queue_.size() + buffer_.size(); }
+  size_t get_size()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return main_queue_.size() + buffer_.size();
+  }
 
 private:
   std::queue<tools::Frame> main_queue_;

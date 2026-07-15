@@ -36,6 +36,15 @@ min_confidence: 0.8
 min_detect_count: 5
 max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
+tracker_acceleration_variance: 100.0
+tracker_yaw_acceleration_variance: 400.0
+tracker_roll_pitch_random_walk: 2.0e-3
+tracker_geometry_random_walk: 1.0e-4
+tracker_uvl_angle_variance: 2.5e-3
+tracker_uvl_center_variance: 9.0
+tracker_uvl_length_variance: 9.0
+tracker_nis_gate: 20.090  # 8 DoF chi-square, 99%
+inference_max_inflight: 3
 
 #####-----aimer参数-----#####
 yaw_offset: -1 # degree -2.5
@@ -132,6 +141,7 @@ web_jpeg_quality: 70
 web_client_ttl_ms: 2000
 
 #####-----debug_record参数-----#####
+gimbal_state_unit: "deg"
 record_raw_video: false
 record_debug_video: false
 record_debug_fps: 30.0

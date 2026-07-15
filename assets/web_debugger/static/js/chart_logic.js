@@ -27,6 +27,8 @@ const DebugCharts = (() => {
     },
     w: { label: "目标角速度", color: "#8bd0ff", unit: "rad/s", group: "motion" },
     target_vz: { label: "目标 Z 速度", color: "#ffcb77", unit: "m/s", group: "motion" },
+    car_pitch: { label: "整车 Pitch", color: "#67b7c7", unit: "deg", group: "angles" },
+    car_roll: { label: "整车 Roll", color: "#d58b72", unit: "deg", group: "angles" },
 
     target_z: { label: "目标高度 Z", color: "#acf58e", unit: "m", group: "target" },
     target_h: { label: "目标尺寸 H", color: "#d7a6ff", unit: "m", group: "target" },
@@ -61,6 +63,25 @@ const DebugCharts = (() => {
       unit: "idx",
       group: "planner",
     },
+    planner_hit_iters: { label: "命中迭代", color: "#e4b85a", unit: "count", group: "planner" },
+    planner_hit_converged: {
+      label: "命中解收敛",
+      color: "#72c58c",
+      unit: "bool",
+      group: "planner",
+    },
+    planner_yaw_solver_iterations: {
+      label: "Yaw MPC 迭代",
+      color: "#67b7c7",
+      unit: "count",
+      group: "planner",
+    },
+    planner_pitch_solver_iterations: {
+      label: "Pitch MPC 迭代",
+      color: "#d58b72",
+      unit: "count",
+      group: "planner",
+    },
 
     bullet_speed: { label: "串口弹速", color: "#53d6ff", unit: "m/s", group: "fire" },
     fire: { label: "建议开火", color: "#ff7388", unit: "bool", group: "fire" },
@@ -81,7 +102,35 @@ const DebugCharts = (() => {
       group: "diagnostics",
     },
     nis: { label: "NIS", color: "#d087ff", unit: "score", group: "diagnostics" },
+    nis_gate: { label: "NIS 门限", color: "#67b7c7", unit: "score", group: "diagnostics" },
     nees: { label: "NEES", color: "#ff7dc0", unit: "score", group: "diagnostics" },
+    nis_fail: { label: "NIS 门控拒绝", color: "#e56b6f", unit: "bool", group: "diagnostics" },
+    update_accepted: {
+      label: "量测接受",
+      color: "#72c58c",
+      unit: "bool",
+      group: "diagnostics",
+    },
+    recent_nis_failures: {
+      label: "近窗拒绝率",
+      color: "#e4b85a",
+      unit: "ratio",
+      group: "diagnostics",
+    },
+    uvl_left_center_u: { label: "左灯条 U 残差", color: "#67b7c7", unit: "px", group: "diagnostics" },
+    uvl_left_center_v: { label: "左灯条 V 残差", color: "#72c58c", unit: "px", group: "diagnostics" },
+    uvl_right_center_u: { label: "右灯条 U 残差", color: "#d58b72", unit: "px", group: "diagnostics" },
+    uvl_right_center_v: { label: "右灯条 V 残差", color: "#e4b85a", unit: "px", group: "diagnostics" },
+
+    pipeline_pending: { label: "推理等待", color: "#67b7c7", unit: "count", group: "pipeline" },
+    pipeline_inflight: { label: "执行中", color: "#72c58c", unit: "count", group: "pipeline" },
+    pipeline_dropped: { label: "累计丢弃", color: "#e56b6f", unit: "count", group: "pipeline" },
+    pipeline_inference_latency_ms: {
+      label: "推理耗时",
+      color: "#e4b85a",
+      unit: "ms",
+      group: "pipeline",
+    },
   };
 
   const groupMeta = {
@@ -92,6 +141,7 @@ const DebugCharts = (() => {
     planner: { label: "切板/MPC", description: "切板状态和规划诊断" },
     fire: { label: "击发", description: "开火建议与弹速" },
     diagnostics: { label: "残差/滤波", description: "残差、NIS 和 NEES" },
+    pipeline: { label: "并发推理", description: "队列压力、丢帧和推理延迟" },
   };
 
   const defaultKeys = ["gimbal_yaw", "target_yaw", "plan_yaw"];
@@ -127,6 +177,11 @@ const DebugCharts = (() => {
       id: "diagnostics",
       label: "残差",
       keys: Object.keys(chartMap).filter((key) => chartMap[key].group === "diagnostics"),
+    },
+    {
+      id: "pipeline",
+      label: "推理",
+      keys: Object.keys(chartMap).filter((key) => chartMap[key].group === "pipeline"),
     },
     { id: "clear", label: "清空", keys: [] },
   ];
@@ -238,7 +293,8 @@ const DebugCharts = (() => {
 
   const rangeStepForKey = (key) => {
     const unit = chartMap[key]?.unit || "";
-    if (unit === "bool" || unit === "idx" || unit === "sign") return 1;
+    if (unit === "bool" || unit === "idx" || unit === "sign" || unit === "count") return 1;
+    if (unit === "ratio") return 0.01;
     if (unit === "deg") return 0.5;
     if (unit === "deg/s") return 0.5;
     if (unit === "deg/s^2") return 1;
@@ -381,7 +437,7 @@ const DebugCharts = (() => {
     const ratio = window.devicePixelRatio || 1;
 
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = "#0b1722";
+    ctx.fillStyle = "#0d1011";
     ctx.fillRect(0, 0, width, height);
 
     const pad = {
@@ -401,7 +457,7 @@ const DebugCharts = (() => {
     });
 
     if (!allValues.length) {
-      ctx.fillStyle = "#90b6c8";
+      ctx.fillStyle = "#96a19d";
       ctx.font = `${13 * ratio}px Segoe UI`;
       ctx.fillText("等待数据", pad.left, height / 2);
       return;
@@ -418,7 +474,7 @@ const DebugCharts = (() => {
       maxValue += margin;
     }
 
-    ctx.strokeStyle = "rgba(125, 194, 220, 0.16)";
+    ctx.strokeStyle = "rgba(154, 177, 168, 0.16)";
     ctx.lineWidth = 1 * ratio;
     for (let i = 0; i <= 4; i += 1) {
       const y = pad.top + (plotHeight * i) / 4;
@@ -465,7 +521,7 @@ const DebugCharts = (() => {
     ctx.setLineDash([]);
     ctx.lineDashOffset = 0;
 
-    ctx.fillStyle = "#d8f3ff";
+    ctx.fillStyle = "#e4e9e6";
     ctx.font = `${11 * ratio}px Segoe UI`;
     ctx.textAlign = "left";
     ctx.fillText(maxValue.toFixed(2), 8 * ratio, pad.top + 4 * ratio);
@@ -475,7 +531,7 @@ const DebugCharts = (() => {
     if (units.length) {
       const unitText = units.length === 1 ? `单位 ${units[0]}` : `混合 ${units.join(" / ")}`;
       ctx.textAlign = "right";
-      ctx.fillStyle = units.length === 1 ? "#90b6c8" : "#ffcf70";
+      ctx.fillStyle = units.length === 1 ? "#96a19d" : "#e4b85a";
       ctx.fillText(unitText, width - pad.right, 16 * ratio);
       ctx.textAlign = "left";
     }
@@ -518,7 +574,7 @@ const DebugCharts = (() => {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.lineDashOffset = 0;
-      ctx.fillStyle = "#d8f3ff";
+      ctx.fillStyle = "#e4e9e6";
       ctx.fillText(series.label, legendX + 22 * ratio, legendY + 2 * ratio);
       legendX += 28 * ratio + ctx.measureText(series.label).width;
     });

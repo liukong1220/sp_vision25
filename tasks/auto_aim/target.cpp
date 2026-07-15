@@ -2,17 +2,107 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 #include <numeric>
 
+#include "solver.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 
 namespace auto_aim
 {
+namespace
+{
+constexpr double kMinRadius = 0.05;
+constexpr double kMaxRadius = 1.0;
+constexpr double kNumericEpsilon = 1e-5;
+
+Eigen::Vector3d rotation_vector(const Eigen::VectorXd & x)
+{
+  return {x[target_state::ROT_X], x[target_state::ROT_Y], x[target_state::ROT_Z]};
+}
+
+Eigen::Matrix3d rotation_from_state(const Eigen::VectorXd & x, bool full_rotation)
+{
+  if (!full_rotation) {
+    return tools::so3_exp(Eigen::Vector3d(0.0, 0.0, x[target_state::ROT_Z]));
+  }
+  return tools::so3_exp(rotation_vector(x));
+}
+
+void write_rotation(Eigen::VectorXd & x, const Eigen::Matrix3d & rotation)
+{
+  const Eigen::Vector3d rotvec = tools::so3_log(rotation);
+  x[target_state::ROT_X] = rotvec.x();
+  x[target_state::ROT_Y] = rotvec.y();
+  x[target_state::ROT_Z] = rotvec.z();
+}
+
+Eigen::VectorXd inject_state(
+  const Eigen::VectorXd & nominal, const Eigen::VectorXd & delta, bool full_rotation)
+{
+  Eigen::VectorXd value = nominal + delta;
+  const Eigen::Vector3d delta_rotation = full_rotation ?
+    Eigen::Vector3d(
+      delta[target_state::ROT_X], delta[target_state::ROT_Y], delta[target_state::ROT_Z]) :
+    Eigen::Vector3d(0.0, 0.0, delta[target_state::ROT_Z]);
+  write_rotation(
+    value, rotation_from_state(nominal, full_rotation) * tools::so3_exp(delta_rotation));
+  if (!full_rotation) {
+    value[target_state::ROT_X] = 0.0;
+    value[target_state::ROT_Y] = 0.0;
+  }
+  return value;
+}
+
+Eigen::VectorXd subtract_state(
+  const Eigen::VectorXd & nominal, const Eigen::VectorXd & value, bool full_rotation)
+{
+  Eigen::VectorXd delta = value - nominal;
+  const Eigen::Vector3d delta_rotation = tools::so3_log(
+    rotation_from_state(nominal, full_rotation).transpose() *
+    rotation_from_state(value, full_rotation));
+  delta[target_state::ROT_X] = full_rotation ? delta_rotation.x() : 0.0;
+  delta[target_state::ROT_Y] = full_rotation ? delta_rotation.y() : 0.0;
+  delta[target_state::ROT_Z] = delta_rotation.z();
+  return delta;
+}
+
+Eigen::Vector4d lightbar_observation(const cv::Point2f & top, const cv::Point2f & bottom)
+{
+  const cv::Point2f delta = top - bottom;
+  const cv::Point2f center = (top + bottom) * 0.5F;
+  return {
+    std::atan2(delta.x, delta.y), center.x, center.y,
+    std::hypot(delta.x, delta.y)};
+}
+
+Eigen::VectorXd uvl_observation(const std::vector<cv::Point2f> & points)
+{
+  if (points.size() != 4) return {};
+  Eigen::VectorXd observation(8);
+  observation.segment<4>(0) = lightbar_observation(points[0], points[3]);
+  observation.segment<4>(4) = lightbar_observation(points[1], points[2]);
+  return observation;
+}
+
+Eigen::VectorXd subtract_uvl(const Eigen::VectorXd & lhs, const Eigen::VectorXd & rhs)
+{
+  Eigen::VectorXd residual = lhs - rhs;
+  if (residual.size() == 8) {
+    residual[0] = tools::limit_rad(residual[0]);
+    residual[4] = tools::limit_rad(residual[4]);
+  }
+  return residual;
+}
+}  // namespace
+
 Target::Target(
   const Armor & armor, std::chrono::steady_clock::time_point t, double radius, int armor_num,
   Eigen::VectorXd P0_dig, const std::vector<double> & armor_z_offsets,
-  bool fixed_center_rotation_model, double spin_speed_lock)
+  bool fixed_center_rotation_model, double spin_speed_lock,
+  const TargetEstimatorParams & estimator_params)
 : name(armor.name),
   armor_type(armor.type),
   jumped(false),
@@ -24,57 +114,73 @@ Target::Target(
   is_converged_(false),
   fixed_center_rotation_model_(fixed_center_rotation_model),
   spin_speed_lock_(spin_speed_lock),
+  estimator_params_(estimator_params),
   switch_count_(0)
 {
-  auto r = radius;
   priority = armor.priority;
   armor_z_offsets_.assign(armor_num_, 0.0);
   for (int i = 0; i < std::min<int>(armor_num_, armor_z_offsets.size()); ++i) {
     armor_z_offsets_[i] = armor_z_offsets[i];
   }
 
-  const Eigen::VectorXd & xyz = armor.xyz_in_world;
-  const Eigen::VectorXd & ypr = armor.ypr_in_world;
+  const Eigen::Matrix3d armor_rotation = armor.R_armor2world;
+  const Eigen::Matrix3d nominal_armor_pitch =
+    Eigen::AngleAxisd(armor_pitch(), Eigen::Vector3d::UnitY()).toRotationMatrix();
+  Eigen::Matrix3d car_rotation = armor_rotation * nominal_armor_pitch.transpose();
+  if (!uses_full_rotation()) {
+    const double yaw = armor.ypr_in_world[0];
+    car_rotation = tools::so3_exp(Eigen::Vector3d(0.0, 0.0, yaw));
+  }
+  const Eigen::Vector3d center =
+    armor.xyz_in_world + car_rotation * Eigen::Vector3d(radius, 0.0, 0.0);
 
-  // 旋转中心的坐标
-  auto center_x = xyz[0] + r * std::cos(ypr[0]);
-  auto center_y = xyz[1] + r * std::sin(ypr[0]);
-  auto center_z = xyz[2];
+  Eigen::VectorXd x0 = Eigen::VectorXd::Zero(target_state::SIZE);
+  x0[target_state::CX] = center.x();
+  x0[target_state::CY] = center.y();
+  x0[target_state::CZ] = center.z();
+  x0[target_state::LOG_R1] = std::log(radius);
+  x0[target_state::LOG_R2] = std::log(radius);
+  write_rotation(x0, car_rotation);
+  if (!uses_full_rotation()) {
+    x0[target_state::ROT_X] = 0.0;
+    x0[target_state::ROT_Y] = 0.0;
+  }
+  Eigen::VectorXd initial_variance = P0_dig;
+  if (initial_variance.size() != target_state::SIZE || !initial_variance.allFinite()) {
+    tools::logger()->warn(
+      "[Target] invalid initial covariance diagonal (size {}), using identity",
+      initial_variance.size());
+    initial_variance = Eigen::VectorXd::Ones(target_state::SIZE);
+  }
+  Eigen::MatrixXd P0 = initial_variance.asDiagonal();
 
-  // x vx y vy z vz a w r l h
-  // a: angle
-  // w: angular velocity
-  // l: r2 - r1
-  // h: z2 - z1
-  Eigen::VectorXd x0{{center_x, 0, center_y, 0, center_z, 0, ypr[0], 0, r, 0, 0}};  //初始化预测量
-  Eigen::MatrixXd P0 = P0_dig.asDiagonal();
-
-  // 防止夹角求和出现异常值
-  auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
-    Eigen::VectorXd c = a + b;
-    c[6] = tools::limit_rad(c[6]);
-    return c;
+  const bool full_rotation = uses_full_rotation();
+  auto x_add = [full_rotation](const Eigen::VectorXd & a, const Eigen::VectorXd & b) {
+    return inject_state(a, b, full_rotation);
   };
-
-  ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
+  ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
 }
 
 Target::Target(double x, double vyaw, double radius, double h)
 : armor_num_(4), fixed_center_rotation_model_(false), spin_speed_lock_(2.51)
 {
-  Eigen::VectorXd x0{{x, 0, 0, 0, 0, 0, 0, vyaw, radius, 0, h}};
-  Eigen::VectorXd P0_dig{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+  name = ArmorName::three;
+  armor_type = ArmorType::small;
+  priority = ArmorPriority::fifth;
+  Eigen::VectorXd x0 = Eigen::VectorXd::Zero(target_state::SIZE);
+  x0[target_state::CX] = x;
+  x0[target_state::VYAW] = vyaw;
+  x0[target_state::LOG_R1] = std::log(radius);
+  x0[target_state::LOG_R2] = std::log(radius);
+  x0[target_state::H] = h;
+  Eigen::VectorXd P0_dig = Eigen::VectorXd::Zero(target_state::SIZE);
   Eigen::MatrixXd P0 = P0_dig.asDiagonal();
   armor_z_offsets_.assign(armor_num_, 0.0);
 
-  // 防止夹角求和出现异常值
-  auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
-    Eigen::VectorXd c = a + b;
-    c[6] = tools::limit_rad(c[6]);
-    return c;
+  auto x_add = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) {
+    return inject_state(a, b, true);
   };
-
-  ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);  //初始化滤波器（预测量、预测量协方差）
+  ekf_ = tools::ExtendedKalmanFilter(x0, P0, x_add);
 }
 
 void Target::predict(std::chrono::steady_clock::time_point t)
@@ -86,132 +192,82 @@ void Target::predict(std::chrono::steady_clock::time_point t)
 
 void Target::predict(double dt)
 {
-  Eigen::MatrixXd F = Eigen::MatrixXd::Identity(11, 11);
-  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(11, 11);
-  std::function<Eigen::VectorXd(const Eigen::VectorXd &)> f =
-    [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
-    Eigen::VectorXd x_prior = F * x;
-    x_prior[6] = tools::limit_rad(x_prior[6]);
-    return x_prior;
-  };
-
-  if (fixed_center_rotation_model_) {
-    const double dt_abs = std::max(std::abs(dt), 1e-3);
-
-    F(6, 7) = dt;
-    F(1, 1) = 0.0;
-    F(3, 3) = 0.0;
-    F(5, 5) = 0.0;
-
-    Q(0, 0) = 1e-5 * dt_abs;
-    Q(1, 1) = 1e-4 * dt_abs;
-    Q(2, 2) = 1e-5 * dt_abs;
-    Q(3, 3) = 1e-4 * dt_abs;
-    Q(4, 4) = 1e-5 * dt_abs;
-    Q(5, 5) = 1e-4 * dt_abs;
-    Q(6, 6) = 2e-3 * dt_abs;
-    Q(7, 7) = 5e-3 * dt_abs;
-
-    f = [&](const Eigen::VectorXd & x) -> Eigen::VectorXd {
-      Eigen::VectorXd x_prior = x;
-      x_prior[1] = 0.0;
-      x_prior[3] = 0.0;
-      x_prior[5] = 0.0;
-      x_prior[6] = tools::limit_rad(x[6] + x[7] * dt);
-      return x_prior;
-    };
-  } else {
-    // 状态转移矩阵
-    // clang-format off
-    F <<
-      1, dt,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  1, dt,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  1, dt,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  1, dt,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1;
-    // clang-format on
-
-    // Piecewise White Noise Model
-    // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
-    double v1, v2;
-    if (name == ArmorName::outpost) {
-      v1 = 10;   // 前哨站加速度方差
-      v2 = 0.1;  // 前哨站角加速度方差
-    } else {
-      v1 = 100;  // 加速度方差
-      v2 = 400;  // 角加速度方差
-    }
-    auto a = dt * dt * dt * dt / 4;
-    auto b = dt * dt * dt / 2;
-    auto c = dt * dt;
-    // clang-format off
-    Q <<
-      a * v1, b * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0,
-      b * v1, c * v1,      0,      0,      0,      0,      0,      0, 0, 0, 0,
-           0,      0, a * v1, b * v1,      0,      0,      0,      0, 0, 0, 0,
-           0,      0, b * v1, c * v1,      0,      0,      0,      0, 0, 0, 0,
-           0,      0,      0,      0, a * v1, b * v1,      0,      0, 0, 0, 0,
-           0,      0,      0,      0, b * v1, c * v1,      0,      0, 0, 0, 0,
-           0,      0,      0,      0,      0,      0, a * v2, b * v2, 0, 0, 0,
-           0,      0,      0,      0,      0,      0, b * v2, c * v2, 0, 0, 0,
-           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0,
-           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0,
-           0,      0,      0,      0,      0,      0,      0,      0, 0, 0, 0;
-    // clang-format on
+  if (!std::isfinite(dt)) return;
+  dt = std::clamp(dt, -0.1, 0.1);
+  if (convergened() && name == ArmorName::outpost && std::abs(ekf_.x[target_state::VYAW]) > 2.0) {
+    ekf_.x[target_state::VYAW] =
+      ekf_.x[target_state::VYAW] > 0.0 ? spin_speed_lock_ : -spin_speed_lock_;
   }
 
-  if (this->convergened() && this->name == ArmorName::outpost && std::abs(this->ekf_.x[7]) > 2) {
-    this->ekf_.x[7] = this->ekf_.x[7] > 0 ? spin_speed_lock_ : -spin_speed_lock_;
+  const Eigen::MatrixXd F = predict_jacobian(ekf_.x, dt);
+  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(target_state::SIZE, target_state::SIZE);
+  const double dt_abs = std::max(std::abs(dt), 1e-6);
+  const double dt2 = dt_abs * dt_abs;
+  const double dt3 = dt2 * dt_abs;
+  const double dt4 = dt2 * dt2;
+  const double acceleration_variance = name == ArmorName::outpost ?
+    std::min(estimator_params_.acceleration_variance, 10.0) :
+    estimator_params_.acceleration_variance;
+  const double yaw_acceleration_variance = name == ArmorName::outpost ?
+    std::min(estimator_params_.yaw_acceleration_variance, 0.1) :
+    estimator_params_.yaw_acceleration_variance;
+  constexpr std::array<int, 3> positions{
+    target_state::CX, target_state::CY, target_state::CZ};
+  constexpr std::array<int, 3> velocities{
+    target_state::VCX, target_state::VCY, target_state::VCZ};
+  for (int axis = 0; axis < 3; ++axis) {
+    const int p = positions[axis];
+    const int v = velocities[axis];
+    Q(p, p) = 0.25 * dt4 * acceleration_variance;
+    Q(p, v) = Q(v, p) = 0.5 * dt3 * acceleration_variance;
+    Q(v, v) = dt2 * acceleration_variance;
   }
+  Q(target_state::ROT_Z, target_state::ROT_Z) +=
+    0.25 * dt4 * yaw_acceleration_variance;
+  Q(target_state::ROT_Z, target_state::VYAW) +=
+    0.5 * dt3 * yaw_acceleration_variance;
+  Q(target_state::VYAW, target_state::ROT_Z) +=
+    0.5 * dt3 * yaw_acceleration_variance;
+  Q(target_state::VYAW, target_state::VYAW) += dt2 * yaw_acceleration_variance;
+  if (uses_full_rotation()) {
+    Q(target_state::ROT_X, target_state::ROT_X) +=
+      estimator_params_.roll_pitch_random_walk * dt_abs;
+    Q(target_state::ROT_Y, target_state::ROT_Y) +=
+      estimator_params_.roll_pitch_random_walk * dt_abs;
+  }
+  const double r1 = radius(0);
+  const double r2 = armor_num_ == 4 ? radius(1) : r1;
+  Q(target_state::LOG_R1, target_state::LOG_R1) =
+    estimator_params_.geometry_random_walk * dt_abs / (r1 * r1);
+  Q(target_state::LOG_R2, target_state::LOG_R2) =
+    estimator_params_.geometry_random_walk * dt_abs / (r2 * r2);
+  Q(target_state::H, target_state::H) = estimator_params_.geometry_random_walk * dt_abs;
 
+  const auto f = [&](const Eigen::VectorXd & x) { return predict_state(x, dt); };
   ekf_.predict(F, Q, f);
 }
 
-void Target::update(const Armor & armor)
+bool Target::update(const Armor & armor, const Solver & solver)
 {
-  // 装甲板匹配
-  int id = 0;
-  auto min_angle_error = 1e10;
-  const std::vector<Eigen::Vector4d> & xyza_list = armor_xyza_list();
-
-  std::vector<std::pair<Eigen::Vector4d, int>> xyza_i_list;
-  for (int i = 0; i < armor_num_; i++) {
-    xyza_i_list.push_back({xyza_list[i], i});
-  }
-
-  std::sort(
-    xyza_i_list.begin(), xyza_i_list.end(),
-    [](const std::pair<Eigen::Vector4d, int> & a, const std::pair<Eigen::Vector4d, int> & b) {
-      Eigen::Vector3d ypd1 = tools::xyz2ypd(a.first.head(3));
-      Eigen::Vector3d ypd2 = tools::xyz2ypd(b.first.head(3));
-      return ypd1[2] < ypd2[2];
-    });
-
-  // 取前3个distance最小的装甲板（候选数量不超过现有装甲板数）
-  const int candidate_num = std::min<int>(3, xyza_i_list.size());
-  for (int i = 0; i < candidate_num; i++) {
-    const auto & xyza = xyza_i_list[i].first;
-    Eigen::Vector3d ypd = tools::xyz2ypd(xyza.head(3));
-    auto angle_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - xyza[3])) +
-                       std::abs(tools::limit_rad(armor.ypd_in_world[0] - ypd[0]));
-
-    if (std::abs(angle_error) < std::abs(min_angle_error)) {
-      id = xyza_i_list[i].second;
-      min_angle_error = angle_error;
+  int best_id = 0;
+  double best_error = std::numeric_limits<double>::infinity();
+  for (int id = 0; id < armor_num_; ++id) {
+    const Eigen::VectorXd predicted = predict_uvl(ekf_.x, id, solver);
+    const Eigen::VectorXd measured = uvl_observation(armor.points);
+    if (predicted.size() != measured.size() || predicted.size() != 8) continue;
+    const double error = subtract_uvl(measured, predicted).squaredNorm();
+    if (error < best_error) {
+      best_error = error;
+      best_id = id;
     }
   }
-
-  update(armor, id);
+  return update(armor, best_id, solver);
 }
 
-void Target::update(const Armor & armor, int id)
+bool Target::update(const Armor & armor, int id, const Solver & solver)
 {
+  if (!update_uvl(armor, id, solver)) return false;
+
   if (id != 0) jumped = true;
 
   if (id != last_id) {
@@ -224,67 +280,35 @@ void Target::update(const Armor & armor, int id)
 
   last_id = id;
   update_count_++;
-
-  update_ypda(armor, id);
+  return true;
 }
 
-void Target::update_ypda(const Armor & armor, int id)
+bool Target::update_uvl(const Armor & armor, int id, const Solver & solver)
 {
-  // 检查装甲板参数是否过度收缩，如果过度收缩则重置
-  if (this->convergened()) {
-    // 检查半径r是否过度收缩（小于合理阈值）
-    if (ekf_.x[8] < 0.18 || ekf_.x[8] > 0.35) {  // 半径r小于20cm或大于30cm，认为过度收缩
-      tools::logger()->warn("[Target] 装甲板半径过度收缩 r={:.3f}, 重置为0.25", ekf_.x[8]);
-      ekf_.x[8] = 0.25;  // 重置为合理的初始值25cm
-    }
-    
-    // 检查长短轴差值l是否过度收缩（绝对值过大）
-    if (std::abs(ekf_.x[9]) > 0.20) {  // 长短轴差值l绝对值大于20cm，认为不合理
-      tools::logger()->warn("[Target] 装甲板长短轴差值异常 l={:.3f}, 重置为0.0", ekf_.x[9]);
-      ekf_.x[9] = 0.1;  // 重置为0
-    }
-    
-    // 检查高度差值h是否过度收缩（绝对值过大）
-    if (std::abs(ekf_.x[10]) > 0.20) {  // 高度差值h绝对值大于20cm，认为不合理
-      tools::logger()->warn("[Target] 装甲板高度差值异常 h={:.3f}, 重置为0.0", ekf_.x[10]);
-      ekf_.x[10] = 0.0;  // 重置为0
-    }
-  }
+  const Eigen::VectorXd z = uvl_observation(armor.points);
+  if (z.size() != 8) return false;
+  const Eigen::VectorXd predicted = predict_uvl(ekf_.x, id, solver);
+  if (predicted.size() != 8 || !predicted.allFinite()) return false;
 
-  //观测jacobi
-  Eigen::MatrixXd H = h_jacobian(ekf_.x, id);
-  // Eigen::VectorXd R_dig{{4e-3, 4e-3, 1, 9e-2}};
-  auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
-  auto delta_angle = tools::limit_rad(armor.ypr_in_world[0] - center_yaw);
-  Eigen::VectorXd R_dig{
-    {4e-3, 4e-3, log(std::abs(delta_angle) + 1) + 1,
-     log(std::abs(armor.ypd_in_world[2]) + 1) / 200 + 9e-2}};
+  const Eigen::MatrixXd H = uvl_jacobian(ekf_.x, id, solver);
+  if (H.rows() != 8 || H.cols() != target_state::SIZE || !H.allFinite()) return false;
+  Eigen::VectorXd variances(8);
+  variances << estimator_params_.uvl_angle_variance,
+    estimator_params_.uvl_center_variance, estimator_params_.uvl_center_variance,
+    estimator_params_.uvl_length_variance, estimator_params_.uvl_angle_variance,
+    estimator_params_.uvl_center_variance, estimator_params_.uvl_center_variance,
+    estimator_params_.uvl_length_variance;
+  const Eigen::MatrixXd R = variances.asDiagonal();
+  const auto h = [&](const Eigen::VectorXd & x) { return predict_uvl(x, id, solver); };
+  const bool accepted = ekf_.update_gated(
+    z, H, R, h, estimator_params_.nis_gate,
+    [](const Eigen::VectorXd & lhs, const Eigen::VectorXd & rhs) {
+      return subtract_uvl(lhs, rhs);
+    });
+  if (!accepted) return false;
 
-  //测量过程噪声偏差的方差
-  Eigen::MatrixXd R = R_dig.asDiagonal();
-
-  // 定义非线性转换函数h: x -> z
-  auto h = [&](const Eigen::VectorXd & x) -> Eigen::Vector4d {
-    Eigen::VectorXd xyz = h_armor_xyz(x, id);
-    Eigen::VectorXd ypd = tools::xyz2ypd(xyz);
-    auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
-    return {ypd[0], ypd[1], ypd[2], angle};
-  };
-
-  // 防止夹角求差出现异常值
-  auto z_subtract = [](const Eigen::VectorXd & a, const Eigen::VectorXd & b) -> Eigen::VectorXd {
-    Eigen::VectorXd c = a - b;
-    c[0] = tools::limit_rad(c[0]);
-    c[1] = tools::limit_rad(c[1]);
-    c[3] = tools::limit_rad(c[3]);
-    return c;
-  };
-
-  const Eigen::VectorXd & ypd = armor.ypd_in_world;
-  const Eigen::VectorXd & ypr = armor.ypr_in_world;
-  Eigen::VectorXd z{{ypd[0], ypd[1], ypd[2], ypr[0]}};  //获得观测量
-
-  ekf_.update(z, H, R, h, z_subtract);
+  clamp_state(ekf_.x);
+  return true;
 }
 
 Eigen::VectorXd Target::ekf_x() const { return ekf_.x; }
@@ -307,14 +331,32 @@ int Target::normalize_armor_id(int id) const
 
 std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
 {
-  std::vector<Eigen::Vector4d> _armor_xyza_list;
-
-  for (int i = 0; i < armor_num_; i++) {
-    auto angle = tools::limit_rad(ekf_.x[6] + i * 2 * CV_PI / armor_num_);
-    Eigen::Vector3d xyz = h_armor_xyz(ekf_.x, i);
-    _armor_xyza_list.push_back({xyz[0], xyz[1], xyz[2], angle});
+  std::vector<Eigen::Vector4d> result;
+  for (const auto & pose : armor_pose_list()) {
+    const double yaw = tools::eulers(pose.rotation, 2, 1, 0)[0];
+    result.push_back({pose.xyz.x(), pose.xyz.y(), pose.xyz.z(), yaw});
   }
-  return _armor_xyza_list;
+  return result;
+}
+
+std::vector<ArmorPose> Target::armor_pose_list() const
+{
+  std::vector<ArmorPose> result;
+  result.reserve(armor_num_);
+  for (int id = 0; id < armor_num_; ++id) result.push_back(armor_pose(ekf_.x, id));
+  return result;
+}
+
+Eigen::Vector3d Target::car_rpy() const
+{
+  return tools::eulers(state_rotation(ekf_.x), 2, 1, 0);
+}
+
+double Target::radius(int id) const
+{
+  const bool second_radius = armor_num_ == 4 && (normalize_armor_id(id) & 1);
+  const int index = second_radius ? target_state::LOG_R2 : target_state::LOG_R1;
+  return std::exp(std::clamp(ekf_.x[index], std::log(kMinRadius), std::log(kMaxRadius)));
 }
 
 double Target::armor_z_offset(int id) const
@@ -351,24 +393,23 @@ void Target::set_armor_id_offset(int offset, int reference_id)
 
 bool Target::fixed_center_rotation_model() const { return fixed_center_rotation_model_; }
 
+double Target::nis_gate() const { return estimator_params_.nis_gate; }
+
 bool Target::diverged() const
 {
-  // 检查装甲板参数是否在合理范围内
-  auto r_ok = ekf_.x[8] > 0.15 && ekf_.x[8] < 0.35;  // 调整上限为40cm
-  auto l_ok = ekf_.x[8] + ekf_.x[9] > 0.10 && ekf_.x[8] + ekf_.x[9] < 0.4;
-  
-  // 检查参数是否过度收缩或异常（放宽边界条件，避免边界值问题）
-  auto r_too_small = ekf_.x[8] < 0.14;  // 半径r小于18cm，认为过度收缩（从20cm放宽）
-  auto l_abnormal = std::abs(ekf_.x[9]) > 0.4;  // 长短轴差值l绝对值大于25cm，认为异常（从20cm放宽）
-  auto h_abnormal = std::abs(ekf_.x[10]) > 0.20;  // 高度差值h绝对值大于20cm，认为异常（从15cm放宽）
-
-  // 如果参数在合理范围内且没有过度收缩/异常，返回false（未发散）
-  if (r_ok && l_ok && !r_too_small && !l_abnormal && !h_abnormal) {
-    return false;
+  if (ekf_.x.size() != target_state::SIZE || !ekf_.x.allFinite() || !ekf_.P.allFinite()) {
+    return true;
   }
-
-  tools::logger()->info("[Target] 参数异常 r={:.3f}, l={:.3f}, h={:.3f}", 
-                        ekf_.x[8], ekf_.x[9], ekf_.x[10]);
+  const double r1 = radius(0);
+  const double r2 = armor_num_ == 4 ? radius(1) : r1;
+  const bool geometry_valid = r1 >= kMinRadius && r1 <= kMaxRadius &&
+                              r2 >= kMinRadius && r2 <= kMaxRadius &&
+                              std::abs(ekf_.x[target_state::H]) <= 0.5;
+  const bool motion_valid = std::abs(ekf_.x[target_state::VYAW]) <= 20.0;
+  if (geometry_valid && motion_valid) return false;
+  tools::logger()->info(
+    "[Target] invalid 13D state r1={:.3f}, r2={:.3f}, h={:.3f}, vyaw={:.3f}",
+    r1, r2, ekf_.x[target_state::H], ekf_.x[target_state::VYAW]);
   return true;
 }
 
@@ -386,57 +427,130 @@ bool Target::convergened()
   return is_converged_;
 }
 
-// 计算出装甲板中心的坐标（考虑长短轴）
-Eigen::Vector3d Target::h_armor_xyz(const Eigen::VectorXd & x, int id) const
+bool Target::uses_full_rotation() const
 {
-  auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
-  auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
-
-  auto r = (use_l_h) ? x[8] + x[9] : x[8];
-  auto armor_x = x[0] - r * std::cos(angle);
-  auto armor_y = x[2] - r * std::sin(angle);
-  auto armor_z = (use_l_h) ? x[4] + x[10] : x[4] + armor_z_offset(id);
-
-  return {armor_x, armor_y, armor_z};
+  return name != ArmorName::outpost && name != ArmorName::base &&
+         !fixed_center_rotation_model_;
 }
 
-Eigen::MatrixXd Target::h_jacobian(const Eigen::VectorXd & x, int id) const
+double Target::armor_pitch() const
 {
-  auto angle = tools::limit_rad(x[6] + id * 2 * CV_PI / armor_num_);
-  auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
+  return (name == ArmorName::outpost ? -15.0 : 15.0) * CV_PI / 180.0;
+}
 
-  auto r = (use_l_h) ? x[8] + x[9] : x[8];
-  auto dx_da = r * std::sin(angle);
-  auto dy_da = -r * std::cos(angle);
+Eigen::Matrix3d Target::state_rotation(const Eigen::VectorXd & x) const
+{
+  return rotation_from_state(x, uses_full_rotation());
+}
 
-  auto dx_dr = -std::cos(angle);
-  auto dy_dr = -std::sin(angle);
-  auto dx_dl = (use_l_h) ? -std::cos(angle) : 0.0;
-  auto dy_dl = (use_l_h) ? -std::sin(angle) : 0.0;
+ArmorPose Target::armor_pose(const Eigen::VectorXd & x, int id) const
+{
+  id = normalize_armor_id(id);
+  const double theta = id * 2.0 * CV_PI / static_cast<double>(armor_num_);
+  const bool second_height = armor_num_ == 4 && (id & 1);
+  const double r = std::exp(std::clamp(
+    x[second_height ? target_state::LOG_R2 : target_state::LOG_R1],
+    std::log(kMinRadius), std::log(kMaxRadius)));
+  double z_offset = second_height ? x[target_state::H] : 0.0;
+  if (name == ArmorName::outpost) z_offset = armor_z_offset(id);
 
-  auto dz_dh = (use_l_h) ? 1.0 : 0.0;
+  const Eigen::Matrix3d car_rotation = state_rotation(x);
+  const Eigen::Vector3d local_position(-r * std::cos(theta), -r * std::sin(theta), z_offset);
+  const Eigen::Matrix3d local_rotation =
+    Eigen::AngleAxisd(theta, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+    Eigen::AngleAxisd(armor_pitch(), Eigen::Vector3d::UnitY()).toRotationMatrix();
+  ArmorPose result;
+  result.xyz = Eigen::Vector3d(
+    x[target_state::CX], x[target_state::CY], x[target_state::CZ]) +
+    car_rotation * local_position;
+  result.rotation = car_rotation * local_rotation;
+  return result;
+}
 
-  // clang-format off
-  Eigen::MatrixXd H_armor_xyza{
-    {1, 0, 0, 0, 0, 0, dx_da, 0, dx_dr, dx_dl,     0},
-    {0, 0, 1, 0, 0, 0, dy_da, 0, dy_dr, dy_dl,     0},
-    {0, 0, 0, 0, 1, 0,     0, 0,     0,     0, dz_dh},
-    {0, 0, 0, 0, 0, 0,     1, 0,     0,     0,     0}
-  };
-  // clang-format on
+Eigen::VectorXd Target::predict_uvl(
+  const Eigen::VectorXd & x, int id, const Solver & solver) const
+{
+  const ArmorPose pose = armor_pose(x, id);
+  return uvl_observation(solver.reproject_armor(pose.xyz, pose.rotation, armor_type));
+}
 
-  Eigen::VectorXd armor_xyz = h_armor_xyz(x, id);
-  Eigen::MatrixXd H_armor_ypd = tools::xyz2ypd_jacobian(armor_xyz);
-  // clang-format off
-  Eigen::MatrixXd H_armor_ypda{
-    {H_armor_ypd(0, 0), H_armor_ypd(0, 1), H_armor_ypd(0, 2), 0},
-    {H_armor_ypd(1, 0), H_armor_ypd(1, 1), H_armor_ypd(1, 2), 0},
-    {H_armor_ypd(2, 0), H_armor_ypd(2, 1), H_armor_ypd(2, 2), 0},
-    {                0,                 0,                 0, 1}
-  };
-  // clang-format on
+Eigen::MatrixXd Target::uvl_jacobian(
+  const Eigen::VectorXd & x, int id, const Solver & solver) const
+{
+  Eigen::MatrixXd H(8, target_state::SIZE);
+  for (int column = 0; column < target_state::SIZE; ++column) {
+    Eigen::VectorXd delta = Eigen::VectorXd::Zero(target_state::SIZE);
+    delta[column] = kNumericEpsilon;
+    const Eigen::VectorXd plus = predict_uvl(inject_error(x, delta), id, solver);
+    delta[column] = -kNumericEpsilon;
+    const Eigen::VectorXd minus = predict_uvl(inject_error(x, delta), id, solver);
+    if (
+      plus.size() != 8 || minus.size() != 8 || !plus.allFinite() || !minus.allFinite()) {
+      return Eigen::MatrixXd::Constant(
+        8, target_state::SIZE, std::numeric_limits<double>::quiet_NaN());
+    }
+    H.col(column) = subtract_uvl(plus, minus) / (2.0 * kNumericEpsilon);
+  }
+  return H;
+}
 
-  return H_armor_ypda * H_armor_xyza;
+Eigen::VectorXd Target::predict_state(const Eigen::VectorXd & x, double dt) const
+{
+  Eigen::VectorXd predicted = x;
+  if (fixed_center_rotation_model_) {
+    predicted[target_state::VCX] = 0.0;
+    predicted[target_state::VCY] = 0.0;
+    predicted[target_state::VCZ] = 0.0;
+  } else {
+    predicted[target_state::CX] += x[target_state::VCX] * dt;
+    predicted[target_state::CY] += x[target_state::VCY] * dt;
+    predicted[target_state::CZ] += x[target_state::VCZ] * dt;
+  }
+  const Eigen::Matrix3d predicted_rotation =
+    state_rotation(x) *
+    tools::so3_exp(Eigen::Vector3d(0.0, 0.0, x[target_state::VYAW] * dt));
+  write_rotation(predicted, predicted_rotation);
+  clamp_state(predicted);
+  return predicted;
+}
+
+Eigen::MatrixXd Target::predict_jacobian(const Eigen::VectorXd & x, double dt) const
+{
+  const Eigen::VectorXd nominal_prediction = predict_state(x, dt);
+  Eigen::MatrixXd F(target_state::SIZE, target_state::SIZE);
+  for (int column = 0; column < target_state::SIZE; ++column) {
+    Eigen::VectorXd delta = Eigen::VectorXd::Zero(target_state::SIZE);
+    delta[column] = kNumericEpsilon;
+    const Eigen::VectorXd perturbed_prediction = predict_state(inject_error(x, delta), dt);
+    F.col(column) = box_minus(nominal_prediction, perturbed_prediction) / kNumericEpsilon;
+  }
+  return F;
+}
+
+Eigen::VectorXd Target::inject_error(
+  const Eigen::VectorXd & nominal, const Eigen::VectorXd & delta) const
+{
+  return inject_state(nominal, delta, uses_full_rotation());
+}
+
+Eigen::VectorXd Target::box_minus(
+  const Eigen::VectorXd & nominal, const Eigen::VectorXd & value) const
+{
+  return subtract_state(nominal, value, uses_full_rotation());
+}
+
+void Target::clamp_state(Eigen::VectorXd & x) const
+{
+  x[target_state::LOG_R1] = std::clamp(
+    x[target_state::LOG_R1], std::log(kMinRadius), std::log(kMaxRadius));
+  x[target_state::LOG_R2] = std::clamp(
+    x[target_state::LOG_R2], std::log(kMinRadius), std::log(kMaxRadius));
+  if (std::abs(x[target_state::H]) > 0.5) x[target_state::H] = 0.0;
+  if (std::abs(x[target_state::VYAW]) > 20.0) x[target_state::VYAW] = 0.0;
+  if (!uses_full_rotation()) {
+    x[target_state::ROT_X] = 0.0;
+    x[target_state::ROT_Y] = 0.0;
+  }
 }
 
 bool Target::checkinit() { return isinit; }

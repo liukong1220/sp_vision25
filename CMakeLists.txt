@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Release)
 message(STATUS "--------------------CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}--------------------")
 
+include(CTest)
+
 find_package(OpenCV REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -156,6 +158,24 @@ target_link_libraries(planner_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim too
 
 add_executable(planner_test_offline tests/planner_test_offline.cpp)
 target_link_libraries(planner_test_offline ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
+
+add_executable(
+  estimator_pipeline_test
+  tests/estimator_pipeline_test.cpp
+  tools/extended_kalman_filter.cpp
+)
+target_link_libraries(estimator_pipeline_test Eigen3::Eigen)
+
+add_executable(target_13d_test tests/target_13d_test.cpp)
+target_link_libraries(target_13d_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
+
+if(BUILD_TESTING)
+  add_test(NAME estimator_pipeline_test COMMAND estimator_pipeline_test)
+  add_test(
+    NAME target_13d_test
+    COMMAND target_13d_test ${PROJECT_SOURCE_DIR}/configs/demo.yaml
+  )
+endif()
 
 # 这些测试/调试程序本身就是现场定位问题常用的入口，
 # 迁入工作区后也一并安装到 lib/${PROJECT_NAME}，方便直接 `ros2 run sp_vision25 ...`。

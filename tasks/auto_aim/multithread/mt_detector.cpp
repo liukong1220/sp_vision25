@@ -1,5 +1,7 @@
 #include "mt_detector.hpp"
 
+#include <cstring>
+
 #include "tools/openvino_utils.hpp"
 #include "tools/path.hpp"
 #include "tools/yaml.hpp"
@@ -8,9 +10,21 @@ namespace auto_aim
 {
 namespace multithread
 {
+namespace
+{
+size_t inference_max_inflight(const std::string & config_path)
+{
+  const auto yaml = tools::load(config_path);
+  return std::max<size_t>(1, tools::read_or<int>(yaml, "inference_max_inflight", 3));
+}
+}  // namespace
 
 MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool debug)
-: yolo_(config_path, debug)
+: yolo_(config_path, debug),
+  max_inflight_(inference_max_inflight(config_path)),
+  queue_(
+    max_inflight_,
+    [] { tools::logger()->debug("[MultiThreadDetector] inference queue is full"); })
 {
   auto yaml = tools::load(config_path);
   auto yolo_name = yaml["yolo_name"].as<std::string>();
@@ -41,11 +55,19 @@ MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool d
     core_, model, device_, "MultiThreadDetector",
     ov::hint::performance_mode(ov::hint::PerformanceMode::THROUGHPUT));
 
-  tools::logger()->info("[MultiThreadDetector] initialized !");
+  tools::logger()->info(
+    "[MultiThreadDetector] initialized, max in-flight requests: {}", max_inflight_);
 }
 
-void MultiThreadDetector::push(cv::Mat img, std::chrono::steady_clock::time_point t)
+bool MultiThreadDetector::push(cv::Mat img, std::chrono::steady_clock::time_point t)
 {
+  // Reject before allocating and starting an InferRequest. This keeps latency bounded
+  // when camera throughput is temporarily higher than inference throughput.
+  if (queue_.size() >= max_inflight_) {
+    dropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
   auto x_scale = static_cast<double>(640) / img.rows;
   auto y_scale = static_cast<double>(640) / img.cols;
   auto scale = std::min(x_scale, y_scale);
@@ -57,14 +79,32 @@ void MultiThreadDetector::push(cv::Mat img, std::chrono::steady_clock::time_poin
   auto roi = cv::Rect(0, 0, w, h);
   cv::resize(img, input(roi), {w, h});
 
-  auto input_port = compiled_model_.input();
   auto infer_request = compiled_model_.create_infer_request();
-  ov::Tensor input_tensor(ov::element::u8, {1, 640, 640, 3}, input.data);
-
-  infer_request.set_input_tensor(input_tensor);
+  auto input_tensor = infer_request.get_input_tensor();
+  std::memcpy(input_tensor.data(), input.data, input.total() * input.elemSize());
   infer_request.start_async();
-  queue_.push({img.clone(), t, std::move(infer_request)});
+  const bool queued = queue_.try_push({img.clone(), t, std::move(infer_request)});
+  if (queued) {
+    submitted_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    dropped_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return queued;
 }
+
+size_t MultiThreadDetector::pending() const { return queue_.size(); }
+
+uint64_t MultiThreadDetector::submitted() const
+{
+  return submitted_.load(std::memory_order_relaxed);
+}
+
+uint64_t MultiThreadDetector::dropped() const
+{
+  return dropped_.load(std::memory_order_relaxed);
+}
+
+void MultiThreadDetector::clear() { queue_.clear(); }
 
 std::tuple<std::list<Armor>, std::chrono::steady_clock::time_point> MultiThreadDetector::pop()
 {

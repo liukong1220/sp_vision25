@@ -368,14 +368,13 @@ void draw_target_overlay(
       annotated_img, solver, target, options, smoothing_state);
   }
 
-  std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
+  const auto armor_poses = target.armor_pose_list();
   int armor_idx = 0;
-  for (const Eigen::Vector4d & xyza : armor_xyza_list) {
+  for (const auto & pose : armor_poses) {
     const bool is_selected = armor_idx == debug_planner.debug_armor_id;
     const cv::Scalar armor_color =
       is_selected ? cv::Scalar(255, 0, 255) : cv::Scalar(120, 255, 170);
-    auto image_points = solver.reproject_armor(
-      xyza.head(3), xyza[3], target.armor_type, target.name);
+    auto image_points = solver.reproject_armor(pose.xyz, pose.rotation, target.armor_type);
     if (image_points.empty()) {
       ++armor_idx;
       continue;
@@ -779,9 +778,8 @@ cv::Mat render_offline_debug_frame(
   cv::Mat annotated_img = source_img.clone();
   if (current_target.has_value()) {
     const auto & target = *current_target;
-    for (const Eigen::Vector4d & xyza : target.armor_xyza_list()) {
-      auto image_points = solver.reproject_armor(
-        xyza.head(3), xyza[3], target.armor_type, target.name);
+    for (const auto & pose : target.armor_pose_list()) {
+      auto image_points = solver.reproject_armor(pose.xyz, pose.rotation, target.armor_type);
       tools::draw_points(annotated_img, image_points, {0, 255, 0});
     }
 

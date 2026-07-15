@@ -11,6 +11,7 @@
 #include "io/command.hpp"
 #include "io/gimbal/gimbal.hpp"
 #include "tasks/auto_aim/planner/planner.hpp"
+#include "tasks/auto_aim/target.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/trajectory.hpp"
 
@@ -270,6 +271,65 @@ nlohmann::json ballistic_to_json(const BallisticDiagnostic & diag)
   data["vertical_error_mm"] = diag.vertical_error * 1000.0;
   data["total_error_mm"] = diag.total_error * 1000.0;
   return data;
+}
+
+nlohmann::json estimator_to_json(const auto_aim::Target * target)
+{
+  nlohmann::json data;
+  if (target == nullptr) {
+    data["nis"] = nullptr;
+    data["nis_gate"] = nullptr;
+    data["update_accepted"] = nullptr;
+    data["recent_reject_rate"] = nullptr;
+    data["accepted_updates"] = nullptr;
+    data["rejected_updates"] = nullptr;
+    data["car_yaw_deg"] = nullptr;
+    data["car_pitch_deg"] = nullptr;
+    data["car_roll_deg"] = nullptr;
+    data["radius_1_m"] = nullptr;
+    data["radius_2_m"] = nullptr;
+    return data;
+  }
+
+  const auto & diagnostics = target->ekf().data;
+  const auto read = [&](const char * key, double fallback = 0.0) {
+    const auto it = diagnostics.find(key);
+    return it == diagnostics.end() ? fallback : it->second;
+  };
+  data["nis"] = read("nis");
+  data["nis_gate"] = target->nis_gate();
+  data["update_accepted"] = read("update_accepted", 1.0) > 0.5;
+  data["recent_reject_rate"] = read("recent_nis_failures");
+  data["accepted_updates"] = read("accepted_updates");
+  data["rejected_updates"] = read("rejected_updates");
+  data["measurement_dim"] = read("measurement_dim");
+  data["uvl_left_angle_rad"] = read("uvl_left_angle");
+  data["uvl_left_center_u_px"] = read("uvl_left_center_u");
+  data["uvl_left_center_v_px"] = read("uvl_left_center_v");
+  data["uvl_left_length_px"] = read("uvl_left_length");
+  data["uvl_right_angle_rad"] = read("uvl_right_angle");
+  data["uvl_right_center_u_px"] = read("uvl_right_center_u");
+  data["uvl_right_center_v_px"] = read("uvl_right_center_v");
+  data["uvl_right_length_px"] = read("uvl_right_length");
+  const Eigen::Vector3d car_rpy = target->car_rpy();
+  data["car_yaw_deg"] = rad2deg(car_rpy[0]);
+  data["car_pitch_deg"] = rad2deg(car_rpy[1]);
+  data["car_roll_deg"] = rad2deg(car_rpy[2]);
+  data["radius_1_m"] = target->radius(0);
+  data["radius_2_m"] = target->radius(1);
+  return data;
+}
+
+nlohmann::json mpc_to_json(const auto_aim::Planner & planner)
+{
+  return {
+    {"yaw_solver_status", planner.debug_yaw_solver_status},
+    {"pitch_solver_status", planner.debug_pitch_solver_status},
+    {"yaw_solver_iterations", planner.debug_yaw_solver_iterations},
+    {"pitch_solver_iterations", planner.debug_pitch_solver_iterations},
+    {"mpc_converged",
+     planner.debug_yaw_solver_status == 0 && planner.debug_pitch_solver_status == 0},
+  };
 }
 
 void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag)

@@ -297,6 +297,10 @@ Plan Planner::plan(Target target, double bullet_speed)
   debug_fire_phase_limit = 0.0;
   debug_fire_track_ready = false;
   debug_fire_phase_ready = false;
+  debug_yaw_solver_status = -1;
+  debug_pitch_solver_status = -1;
+  debug_yaw_solver_iterations = 0;
+  debug_pitch_solver_iterations = 0;
 
   // 0. Check bullet speed
   // 串口测速可能在启动阶段、切模式阶段或掉线恢复阶段给出异常值。
@@ -347,14 +351,24 @@ Plan Planner::plan(Target target, double bullet_speed)
   tiny_set_x0(yaw_solver_, x0);
 
   yaw_solver_->work->Xref = traj.block(0, 0, 2, HORIZON);
-  tiny_solve(yaw_solver_);
+  debug_yaw_solver_status = tiny_solve(yaw_solver_);
+  debug_yaw_solver_iterations = yaw_solver_->solution->iter;
 
   // 4. Solve pitch
   x0 << traj(2, 0), traj(3, 0);
   tiny_set_x0(pitch_solver_, x0);
 
   pitch_solver_->work->Xref = traj.block(2, 0, 2, HORIZON);
-  tiny_solve(pitch_solver_);
+  debug_pitch_solver_status = tiny_solve(pitch_solver_);
+  debug_pitch_solver_iterations = pitch_solver_->solution->iter;
+
+  if (
+    !yaw_solver_->work->x.allFinite() || !yaw_solver_->work->u.allFinite() ||
+    !pitch_solver_->work->x.allFinite() || !pitch_solver_->work->u.allFinite())
+  {
+    tools::logger()->warn("[Planner] TinyMPC produced a non-finite trajectory");
+    return {false};
+  }
 
   Plan plan;
   plan.control = true;
@@ -385,7 +399,9 @@ Plan Planner::plan(Target target, double bullet_speed)
   debug_fire_track_ready = tracking_error < fire_thresh_;
   debug_fire_phase_ready = true;
 
-  bool fire_ready = debug_fire_track_ready;
+  const bool mpc_converged =
+    debug_yaw_solver_status == 0 && debug_pitch_solver_status == 0;
+  bool fire_ready = debug_fire_track_ready && mpc_converged;
   if (target.name == ArmorName::outpost) {
     // Keep using the nearest board for trajectory continuity in the inter-board gap,
     // but only allow fire once the selected plate is back in a tight hit phase.
@@ -469,12 +485,12 @@ void Planner::setup_yaw_solver()
   std::vector<double> R_yaw;
 
   if (tools::runtime_params::is_registered(config_path_)) {
-    max_yaw_acc = tools::runtime_params::get_double(config_path_, "max_yaw_acc");
+    max_yaw_acc = tools::runtime_params::get_double(config_path_, "max_yaw_acc") / 57.3;
     Q_yaw = tools::runtime_params::get_number_array(config_path_, "Q_yaw");
     R_yaw = tools::runtime_params::get_number_array(config_path_, "R_yaw");
   } else {
     auto yaml = tools::load(config_path_);
-    max_yaw_acc = tools::read<double>(yaml, "max_yaw_acc");
+    max_yaw_acc = tools::read<double>(yaml, "max_yaw_acc") / 57.3;
     Q_yaw = tools::read<std::vector<double>>(yaml, "Q_yaw");
     R_yaw = tools::read<std::vector<double>>(yaml, "R_yaw");
   }
@@ -514,12 +530,12 @@ void Planner::setup_pitch_solver()
   std::vector<double> R_pitch;
 
   if (tools::runtime_params::is_registered(config_path_)) {
-    max_pitch_acc = tools::runtime_params::get_double(config_path_, "max_pitch_acc");
+    max_pitch_acc = tools::runtime_params::get_double(config_path_, "max_pitch_acc") / 57.3;
     Q_pitch = tools::runtime_params::get_number_array(config_path_, "Q_pitch");
     R_pitch = tools::runtime_params::get_number_array(config_path_, "R_pitch");
   } else {
     auto yaml = tools::load(config_path_);
-    max_pitch_acc = tools::read<double>(yaml, "max_pitch_acc");
+    max_pitch_acc = tools::read<double>(yaml, "max_pitch_acc") / 57.3;
     Q_pitch = tools::read<std::vector<double>>(yaml, "Q_pitch");
     R_pitch = tools::read<std::vector<double>>(yaml, "R_pitch");
   }

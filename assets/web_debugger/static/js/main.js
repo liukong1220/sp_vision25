@@ -100,6 +100,14 @@
     return value === undefined || value === null ? fallback : value;
   };
 
+  const getFirstByPath = (source, paths, fallback = undefined) => {
+    for (const path of paths) {
+      const value = getByPath(source, path);
+      if (value !== undefined) return value;
+    }
+    return fallback;
+  };
+
   const formatNumber = (value, digits = 2, suffix = "") =>
     isFiniteNumber(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 
@@ -107,6 +115,26 @@
     isFiniteNumber(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(digits)}${suffix}` : "--";
 
   const formatBool = (value, truthy = "ON", falsy = "OFF") => (value ? truthy : falsy);
+
+  const formatOptionalBool = (value, truthy = "YES", falsy = "NO") => {
+    if (typeof value === "boolean") return value ? truthy : falsy;
+    if (isFiniteNumber(value)) return value !== 0 ? truthy : falsy;
+    return "--";
+  };
+
+  const formatCount = (value) =>
+    isFiniteNumber(value) && value >= 0 ? Math.round(value).toLocaleString("zh-CN") : "--";
+
+  const formatRatio = (value) => {
+    if (!isFiniteNumber(value)) return "--";
+    const percent = Math.abs(value) <= 1 ? value * 100 : value;
+    return `${percent.toFixed(1)}%`;
+  };
+
+  const formatSolverStatus = (value) => {
+    if (!isFiniteNumber(value)) return "--";
+    return value === 0 ? "OK" : `ERR ${Math.round(value)}`;
+  };
 
   const formatArmorId = (value) =>
     Number.isInteger(value) && value >= 0 ? `A${value}` : "A-";
@@ -876,6 +904,8 @@
     const frame = state.frame || {};
     const preview = state.preview || {};
     const planner = state.planner || {};
+    const estimator = state.estimator || {};
+    const pipeline = state.pipeline || {};
     const command = state.command || {};
     const ballistic = state.ballistic || {};
     const overlay = state.overlay || {};
@@ -943,6 +973,83 @@
       syncOverlayControls(getByPath(overlay, "controls", {}));
     }
     setOverlayMeta(`图层同步: ${getByPath(overlay, "stage", "--")} · 实时生效`);
+
+    const estimatorAccepted = getFirstByPath(estimator, ["update_accepted", "gate_accepted"]);
+    const estimatorRejectRate = getFirstByPath(estimator, [
+      "recent_reject_rate",
+      "recent_nis_failures",
+      "reject_rate",
+    ]);
+    renderRows("estimator-diagnostics", [
+      { label: "NIS", value: formatNumber(getByPath(estimator, "nis"), 3) },
+      { label: "NIS 门限", value: formatNumber(getByPath(estimator, "nis_gate"), 3) },
+      {
+        label: "门控判定",
+        value: formatOptionalBool(estimatorAccepted, "ACCEPT", "REJECT"),
+      },
+      { label: "近窗拒绝率", value: formatRatio(estimatorRejectRate) },
+      {
+        label: "累计接受 / 拒绝",
+        value: `${formatCount(getByPath(estimator, "accepted_updates"))} / ${formatCount(getByPath(estimator, "rejected_updates"))}`,
+      },
+      {
+        label: "整车 Yaw / Pitch / Roll",
+        value: `${formatSigned(getByPath(estimator, "car_yaw_deg"), 1, " deg")} / ${formatSigned(getByPath(estimator, "car_pitch_deg"), 1, " deg")} / ${formatSigned(getByPath(estimator, "car_roll_deg"), 1, " deg")}`,
+      },
+      {
+        label: "半径 r1 / r2",
+        value: `${formatNumber(getByPath(estimator, "radius_1_m"), 3, " m")} / ${formatNumber(getByPath(estimator, "radius_2_m"), 3, " m")}`,
+      },
+      {
+        label: "UVL 左/右中心残差",
+        value: `${formatNumber(getByPath(estimator, "uvl_left_center_u_px"), 1, " px")}, ${formatNumber(getByPath(estimator, "uvl_left_center_v_px"), 1, " px")} / ${formatNumber(getByPath(estimator, "uvl_right_center_u_px"), 1, " px")}, ${formatNumber(getByPath(estimator, "uvl_right_center_v_px"), 1, " px")}`,
+      },
+    ]);
+
+    renderRows("mpc-diagnostics", [
+      {
+        label: "MPC 收敛",
+        value: formatOptionalBool(getByPath(planner, "mpc_converged"), "CONVERGED", "FAILED"),
+      },
+      {
+        label: "Yaw / Pitch 迭代",
+        value: `${formatCount(getByPath(planner, "yaw_solver_iterations"))} / ${formatCount(getByPath(planner, "pitch_solver_iterations"))}`,
+      },
+      {
+        label: "Yaw / Pitch 状态",
+        value: `${formatSolverStatus(getByPath(planner, "yaw_solver_status"))} / ${formatSolverStatus(getByPath(planner, "pitch_solver_status"))}`,
+      },
+      {
+        label: "命中迭代",
+        value: formatCount(getByPath(planner, "hit_iter_count")),
+      },
+      {
+        label: "命中解收敛",
+        value: formatOptionalBool(getByPath(planner, "hit_converged"), "YES", "NO"),
+      },
+    ]);
+
+    const pipelinePending = getFirstByPath(pipeline, ["pending", "queue_depth"]);
+    const pipelineInflight = getFirstByPath(pipeline, ["inflight", "in_flight", "active"]);
+    const pipelineLatencyMs = getFirstByPath(pipeline, [
+      "inference_latency_ms",
+      "avg_inference_ms",
+      "latency_ms",
+    ]);
+    const pipelineFps = getFirstByPath(pipeline, ["inference_fps", "throughput_fps", "fps"]);
+    renderRows("inference-diagnostics", [
+      {
+        label: "等待 / 执行",
+        value: `${formatCount(pipelinePending)} / ${formatCount(pipelineInflight)}`,
+      },
+      { label: "并发上限", value: formatCount(getByPath(pipeline, "max_inflight")) },
+      {
+        label: "已提交 / 丢弃",
+        value: `${formatCount(getByPath(pipeline, "submitted"))} / ${formatCount(getByPath(pipeline, "dropped"))}`,
+      },
+      { label: "推理耗时", value: formatNumber(pipelineLatencyMs, 2, " ms") },
+      { label: "推理吞吐", value: formatNumber(pipelineFps, 1, " fps") },
+    ]);
 
     if (buffMode) {
       renderRows("overview-summary", [

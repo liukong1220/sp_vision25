@@ -197,6 +197,51 @@ std::vector<ParamSpec> build_specs()
       3, json::array({0.0, -0.102, 0.102}),
     },
     {
+      "tracker_acceleration_variance", "estimator", "状态估计", "平移加速度方差",
+      "整车中心常速度模型的白噪声加速度方差。", "m^2/s^4", ParamType::kDouble,
+      0, 100.0,
+    },
+    {
+      "tracker_yaw_acceleration_variance", "estimator", "状态估计", "角加速度方差",
+      "整车 yaw 常角速度模型的白噪声角加速度方差。", "rad^2/s^4", ParamType::kDouble,
+      0, 400.0,
+    },
+    {
+      "tracker_roll_pitch_random_walk", "estimator", "状态估计", "Roll/Pitch 随机游走",
+      "SO(3) 误差状态中 roll/pitch 每秒累积的过程噪声。", "rad^2/s", ParamType::kDouble,
+      0, 2e-3,
+    },
+    {
+      "tracker_geometry_random_walk", "estimator", "状态估计", "几何随机游走",
+      "车体对数半径和高度差的单位时间过程噪声。", "m^2/s", ParamType::kDouble,
+      0, 1e-4,
+    },
+    {
+      "tracker_uvl_angle_variance", "estimator", "状态估计", "灯条角度方差",
+      "UVL 图像观测中单灯条角度的量测方差。", "rad^2", ParamType::kDouble,
+      0, 2.5e-3,
+    },
+    {
+      "tracker_uvl_center_variance", "estimator", "状态估计", "灯条中心方差",
+      "UVL 图像观测中灯条中心 u/v 的像素方差。", "px^2", ParamType::kDouble,
+      0, 9.0,
+    },
+    {
+      "tracker_uvl_length_variance", "estimator", "状态估计", "灯条长度方差",
+      "UVL 图像观测中灯条投影长度的像素方差。", "px^2", ParamType::kDouble,
+      0, 9.0,
+    },
+    {
+      "tracker_nis_gate", "estimator", "状态估计", "NIS 门限",
+      "8 维双灯条 UVL 创新的卡方门限；20.090 对应 99% 置信度。", "score",
+      ParamType::kDouble, 0, 20.090,
+    },
+    {
+      "inference_max_inflight", "inference", "并发推理", "最大在途帧数",
+      "异步推理允许同时在队列中的最大帧数，满载时在启动推理前丢弃新帧。", "frame",
+      ParamType::kInt, 0, 3,
+    },
+    {
       "outpost_coming_angle", "planner", "规划/MPC", "前哨站进入窗口角",
       "前哨站选板进入击打窗口角度，0 表示沿用通用窗口。", "deg", ParamType::kDouble,
       0, 70.0,
@@ -479,9 +524,9 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
   if (spec.key == "web_client_ttl_ms" || spec.key == "web_jpeg_quality") return 0.0;
   if (
     spec.key == "min_detect_count" || spec.key == "max_temp_lost_count" ||
-    spec.key == "outpost_max_temp_lost_count")
+    spec.key == "outpost_max_temp_lost_count" || spec.key == "inference_max_inflight")
   {
-    return 0.0;
+    return spec.key == "inference_max_inflight" ? 1.0 : 0.0;
   }
   if (
     spec.key == "min_lightbar_ratio" || spec.key == "max_lightbar_ratio" ||
@@ -500,7 +545,8 @@ std::optional<double> ui_min_for(const ParamSpec & spec)
     spec.key == "max_yaw_acc" || spec.key == "max_pitch_acc" ||
     spec.key == "coming_angle" || spec.key == "leaving_angle" ||
     spec.key == "first_tolerance" || spec.key == "second_tolerance" ||
-    spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle")
+    spec.key == "outpost_coming_angle" || spec.key == "outpost_leaving_angle" ||
+    spec.group_id == "estimator")
   {
     return 0.0;
   }
@@ -515,6 +561,8 @@ std::optional<double> ui_max_for(const ParamSpec & spec)
   if (spec.key == "web_scale") return 1.0;
   if (spec.key == "web_jpeg_quality") return 95.0;
   if (spec.key == "web_client_ttl_ms") return 10000.0;
+  if (spec.key == "inference_max_inflight") return 16.0;
+  if (spec.key == "tracker_nis_gate") return 100.0;
   if (spec.key == "max_angle_error" || spec.key == "max_rectangular_error") return 90.0;
   if (spec.key == "first_tolerance" || spec.key == "second_tolerance") return 45.0;
   if (
@@ -533,6 +581,7 @@ int ui_precision_for(const ParamSpec & spec)
   if (spec.key == "threshold") return 0;
   if (spec.key == "min_confidence") return 2;
   if (spec.key == "fire_thresh") return 4;
+  if (spec.group_id == "estimator") return 6;
   if (spec.key == "web_scale") return 2;
   if (spec.key == "web_fps" || spec.key == "record_debug_fps") return 1;
   if (

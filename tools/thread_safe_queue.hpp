@@ -37,6 +37,22 @@ public:
     not_empty_condition_.notify_all();
   }
 
+  bool try_push(T value)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (queue_.size() >= max_size_) {
+      if constexpr (PopWhenFull) {
+        queue_.pop();
+      } else {
+        full_handler_();
+        return false;
+      }
+    }
+    queue_.push(std::move(value));
+    not_empty_condition_.notify_one();
+    return true;
+  }
+
   void pop(T & value)
   {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -114,6 +130,12 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return queue_.empty();
+  }
+
+  size_t size() const
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return queue_.size();
   }
 
   void clear()

@@ -109,9 +109,8 @@ int main(int argc, char * argv[])
 
       // 当前帧target更新后
       std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
-      for (const Eigen::Vector4d & xyza : armor_xyza_list) {
-        auto image_points =
-          solver.reproject_armor(xyza.head(3), xyza[3], target.armor_type, target.name);
+      for (const auto & pose : target.armor_pose_list()) {
+        auto image_points = solver.reproject_armor(pose.xyz, pose.rotation, target.armor_type);
         tools::draw_points(img, image_points, {0, 255, 0});
       }
 
@@ -133,10 +132,13 @@ int main(int argc, char * argv[])
       data["vy"] = x[3];
       data["z"] = x[4];
       data["vz"] = x[5];
-      data["a"] = x[6] * 57.3;
+      const Eigen::Vector3d car_rpy = target.car_rpy();
+      data["a"] = car_rpy[0] * 57.3;
+      data["car_pitch"] = car_rpy[1] * 57.3;
+      data["car_roll"] = car_rpy[2] * 57.3;
       data["w"] = x[7];
-      data["r"] = x[8];
-      data["l"] = x[9];
+      data["r"] = target.radius(0);
+      data["l"] = target.radius(1) - target.radius(0);
       data["h"] = x[10];
       data["last_id"] = target.last_id;
 

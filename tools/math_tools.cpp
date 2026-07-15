@@ -100,6 +100,23 @@ Eigen::Matrix3d rotation_matrix(const Eigen::Vector3d & ypr)
   return R;
 }
 
+Eigen::Matrix3d so3_exp(const Eigen::Vector3d & rotation_vector)
+{
+  const double angle = rotation_vector.norm();
+  if (angle < 1e-12) return Eigen::Matrix3d::Identity();
+  return Eigen::AngleAxisd(angle, rotation_vector / angle).toRotationMatrix();
+}
+
+Eigen::Vector3d so3_log(const Eigen::Matrix3d & rotation_matrix)
+{
+  Eigen::Quaterniond quaternion(rotation_matrix);
+  quaternion.normalize();
+  if (quaternion.w() < 0.0) quaternion.coeffs() *= -1.0;
+  const Eigen::AngleAxisd angle_axis(quaternion);
+  if (std::abs(angle_axis.angle()) < 1e-12) return Eigen::Vector3d::Zero();
+  return angle_axis.axis() * angle_axis.angle();
+}
+
 Eigen::Vector3d xyz2ypd(const Eigen::Vector3d & xyz)
 {
   auto x = xyz[0], y = xyz[1], z = xyz[2];

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <thread>
 
@@ -60,6 +61,7 @@ int main(int argc, char * argv[])
 
   std::atomic<io::Mode> mode{io::Mode::idle};
   auto last_mode{io::Mode::idle};
+  std::mutex camera_mutex;
 
   auto detect_thread = std::thread([&]() {
     cv::Mat img;
@@ -67,10 +69,18 @@ int main(int argc, char * argv[])
 
     while (!exiter.exit()) {
       if (mode.load() == io::Mode::auto_aim) {
-        camera.read(img, t);
-        detector.push(img, t);
-      } else
-        continue;
+        {
+          std::lock_guard<std::mutex> lock(camera_mutex);
+          camera.read(img, t);
+        }
+        if (!detector.push(img, t) && detector.dropped() % 100 == 1) {
+          tools::logger()->warn(
+            "[Inference] overload: submitted={}, dropped={}, pending={}",
+            detector.submitted(), detector.dropped(), detector.pending());
+        }
+      } else {
+        std::this_thread::sleep_for(2ms);
+      }
     }
   });
 
@@ -79,6 +89,7 @@ int main(int argc, char * argv[])
 
     if (last_mode != mode) {
       tools::logger()->info("Switch to {}", io::MODES[mode]);
+      detector.clear();
       last_mode = mode.load();
     }
 
@@ -105,7 +116,10 @@ int main(int argc, char * argv[])
       Eigen::Quaterniond q;
       std::chrono::steady_clock::time_point t;
 
-      camera.read(img, t);
+      {
+        std::lock_guard<std::mutex> lock(camera_mutex);
+        camera.read(img, t);
+      }
       q = cboard.imu_at(t - 1ms);
 
       // recorder.record(img, q, t);
@@ -128,8 +142,9 @@ int main(int argc, char * argv[])
       }
       cboard.send(buff_command);
 
-    } else
-      continue;
+    } else {
+      std::this_thread::sleep_for(2ms);
+    }
   }
 
   detect_thread.join();

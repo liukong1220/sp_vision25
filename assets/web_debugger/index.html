@@ -7,9 +7,6 @@
     <link rel="stylesheet" href="/static/css/style.css" />
   </head>
   <body>
-    <div class="ambient ambient-a"></div>
-    <div class="ambient ambient-b"></div>
-
     <header class="app-header">
       <div class="brand-block">
         <div class="brand-mark">ATS</div>
@@ -95,6 +92,30 @@
             </div>
             <div class="stack-list" id="overview-summary"></div>
           </aside>
+
+          <article class="panel diagnostics-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">Diagnostics</span>
+                <h2>运行诊断</h2>
+              </div>
+              <span class="panel-meta">缺失字段显示 --</span>
+            </div>
+            <div class="diagnostics-grid">
+              <section class="diagnostic-section" aria-labelledby="estimator-diagnostics-title">
+                <h3 id="estimator-diagnostics-title">状态估计</h3>
+                <div class="stack-list compact-list" id="estimator-diagnostics"></div>
+              </section>
+              <section class="diagnostic-section" aria-labelledby="mpc-diagnostics-title">
+                <h3 id="mpc-diagnostics-title">MPC 求解</h3>
+                <div class="stack-list compact-list" id="mpc-diagnostics"></div>
+              </section>
+              <section class="diagnostic-section" aria-labelledby="inference-diagnostics-title">
+                <h3 id="inference-diagnostics-title">并发推理</h3>
+                <div class="stack-list compact-list" id="inference-diagnostics"></div>
+              </section>
+            </div>
+          </article>
 
           <article class="panel summary-panel planner-summary-panel">
             <div class="panel-head">

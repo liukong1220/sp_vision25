@@ -1008,6 +1008,9 @@ int main(int argc, char * argv[])
           rad2deg(planner->debug_fire_phase_limit);
         web_state["planner"]["fire_track_ready"] = planner->debug_fire_track_ready;
         web_state["planner"]["fire_phase_ready"] = planner->debug_fire_phase_ready;
+        web_state["planner"].update(tools::debug::mpc_to_json(*planner));
+        web_state["estimator"] =
+          tools::debug::estimator_to_json(current_target ? &*current_target : nullptr);
 
         web_state["tracker"]["candidate_count"] =
           current_target.has_value() ? current_target->tracker_debug_candidate_count : 0;

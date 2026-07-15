@@ -173,10 +173,12 @@ int main(int argc, char * argv[])
   std::array<double, kFpsWindowSize> fps_history {};
   int fps_history_idx = 0;
   int fps_sample_count = 0;
+  uint64_t processed_frames = 0;
   auto last_loop_time = std::chrono::steady_clock::now();
 
   while (!exiter.exit()) {
     camera.read(img, t);
+    ++processed_frames;
     const double camera_fps = camera.camera_fps();
     const auto loop_now = std::chrono::steady_clock::now();
     const double loop_dt = tools::delta_time(loop_now, last_loop_time);
@@ -198,8 +200,11 @@ int main(int argc, char * argv[])
     }
 
     solver.set_R_gimbal2world(q);
+    const auto inference_start = std::chrono::steady_clock::now();
     auto armors = yolo.detect(img);
+    const auto inference_finish = std::chrono::steady_clock::now();
     auto targets = tracker.track(armors, t);
+    const auto tracker_finish = std::chrono::steady_clock::now();
     const auto gs = gimbal.state();
     const auto normalized_gimbal = normalize_gimbal_state(gs, gimbal_state_unit_mode);
 
@@ -207,6 +212,7 @@ int main(int argc, char * argv[])
     if (!targets.empty()) current_target = targets.front();
 
     const auto current_plan = planner.plan(current_target, gs.bullet_speed);
+    const auto planner_finish = std::chrono::steady_clock::now();
     gimbal.send(
       current_plan.control, current_plan.fire, current_plan.yaw, current_plan.yaw_vel,
       current_plan.yaw_acc, current_plan.pitch, current_plan.pitch_vel, current_plan.pitch_acc);
@@ -238,6 +244,11 @@ int main(int argc, char * argv[])
     data["gimbal_yaw_vel"] = normalized_gimbal.yaw_vel.deg;
     data["gimbal_pitch"] = normalized_gimbal.pitch.deg;
     data["gimbal_pitch_vel"] = normalized_gimbal.pitch_vel.deg;
+    data["pipeline_pending"] = 0;
+    data["pipeline_inflight"] = 0;
+    data["pipeline_dropped"] = 0;
+    data["pipeline_inference_latency_ms"] =
+      tools::delta_time(inference_finish, inference_start) * 1000.0;
     data["target_yaw"] = rad2deg(current_plan.target_yaw);
     data["target_pitch"] = rad2deg(current_plan.target_pitch);
     data["plan_yaw"] = rad2deg(current_plan.yaw);
@@ -259,6 +270,12 @@ int main(int argc, char * argv[])
       data["tracker_match_id"] = current_target->tracker_debug_match_id;
       data["tracker_match_score"] = current_target->tracker_debug_match_score;
       data["tracker_reprojection_px"] = current_target->tracker_debug_reprojection_px;
+      data["nis"] = current_target->ekf().data.at("nis");
+      data["nis_gate"] = current_target->nis_gate();
+      data["nis_fail"] = current_target->ekf().data.at("nis_fail");
+      data["update_accepted"] = current_target->ekf().data.at("update_accepted");
+      data["recent_nis_failures"] =
+        current_target->ekf().data.at("recent_nis_failures");
     } else {
       data["w"] = 0.0;
       data["tracker_match_valid"] = 0;
@@ -272,6 +289,8 @@ int main(int argc, char * argv[])
     data["planner_hit_fly_time_ms"] = planner.debug_hit_fly_time * 1000.0;
     data["planner_hit_iters"] = planner.debug_hit_iter_count;
     data["planner_hit_converged"] = planner.debug_hit_converged ? 1 : 0;
+    data["planner_yaw_solver_iterations"] = planner.debug_yaw_solver_iterations;
+    data["planner_pitch_solver_iterations"] = planner.debug_pitch_solver_iterations;
     data["planner_spin_gate"] = planner.debug_used_spin_gate ? 1 : 0;
     data["planner_center_yaw"] = rad2deg(planner.debug_center_yaw);
     data["planner_turn_sign"] =
@@ -328,6 +347,17 @@ int main(int argc, char * argv[])
       web_state["frame"]["bullet_speed_mps"] = gs.bullet_speed;
       web_state["frame"]["bullet_speed_source"] = "serial";
       web_state["frame"]["camera_fps"] = camera_fps;
+      web_state["pipeline"]["pending"] = 0;
+      web_state["pipeline"]["inflight"] = 0;
+      web_state["pipeline"]["max_inflight"] = 1;
+      web_state["pipeline"]["submitted"] = processed_frames;
+      web_state["pipeline"]["dropped"] = 0;
+      web_state["pipeline"]["inference_latency_ms"] =
+        tools::delta_time(inference_finish, inference_start) * 1000.0;
+      web_state["pipeline"]["tracker_latency_ms"] =
+        tools::delta_time(tracker_finish, inference_finish) * 1000.0;
+      web_state["pipeline"]["planner_latency_ms"] =
+        tools::delta_time(planner_finish, tracker_finish) * 1000.0;
       web_state["preview"]["has_target"] = current_target.has_value();
       web_state["preview"]["fire"] = current_plan.fire;
       web_state["preview"]["target_name"] =
@@ -380,6 +410,9 @@ int main(int argc, char * argv[])
         rad2deg(planner.debug_fire_phase_limit);
       web_state["planner"]["fire_track_ready"] = planner.debug_fire_track_ready;
       web_state["planner"]["fire_phase_ready"] = planner.debug_fire_phase_ready;
+      web_state["planner"].update(tools::debug::mpc_to_json(planner));
+      web_state["estimator"] =
+        tools::debug::estimator_to_json(current_target ? &*current_target : nullptr);
       if (current_target.has_value()) {
         web_state["tracker"]["candidate_count"] = current_target->tracker_debug_candidate_count;
         web_state["tracker"]["match_valid"] = current_target->tracker_debug_match_valid;

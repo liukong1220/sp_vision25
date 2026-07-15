@@ -159,6 +159,21 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
     tools::read_or<bool>(yaml, "outpost_fixed_center_rotation_model", true);
   outpost_armor_z_offsets_ =
     tools::read_or<std::vector<double>>(yaml, "outpost_armor_z_offsets", {0.0, -0.102, 0.102});
+  estimator_params_.acceleration_variance =
+    tools::read_or<double>(yaml, "tracker_acceleration_variance", 100.0);
+  estimator_params_.yaw_acceleration_variance =
+    tools::read_or<double>(yaml, "tracker_yaw_acceleration_variance", 400.0);
+  estimator_params_.roll_pitch_random_walk =
+    tools::read_or<double>(yaml, "tracker_roll_pitch_random_walk", 2e-3);
+  estimator_params_.geometry_random_walk =
+    tools::read_or<double>(yaml, "tracker_geometry_random_walk", 1e-4);
+  estimator_params_.uvl_angle_variance =
+    tools::read_or<double>(yaml, "tracker_uvl_angle_variance", 2.5e-3);
+  estimator_params_.uvl_center_variance =
+    tools::read_or<double>(yaml, "tracker_uvl_center_variance", 9.0);
+  estimator_params_.uvl_length_variance =
+    tools::read_or<double>(yaml, "tracker_uvl_length_variance", 9.0);
+  estimator_params_.nis_gate = tools::read_or<double>(yaml, "tracker_nis_gate", 20.090);
   if (outpost_armor_z_offsets_.size() != 3) {
     tools::logger()->warn(
       "[Tracker] outpost_armor_z_offsets size {} invalid, fallback to default 3-board model",
@@ -326,6 +341,7 @@ void Tracker::refresh_runtime_params_if_needed()
   const auto old_outpost_spin_speed_lock = outpost_spin_speed_lock_;
   const auto old_outpost_fixed_center_rotation_model = outpost_fixed_center_rotation_model_;
   const auto old_outpost_armor_z_offsets = outpost_armor_z_offsets_;
+  const auto old_estimator_params = estimator_params_;
 
   enemy_color_ =
     (tools::runtime_params::get_string(config_path_, "enemy_color") == "red") ?
@@ -342,6 +358,22 @@ void Tracker::refresh_runtime_params_if_needed()
     tools::runtime_params::get_bool(config_path_, "outpost_fixed_center_rotation_model");
   outpost_armor_z_offsets_ =
     tools::runtime_params::get_number_array(config_path_, "outpost_armor_z_offsets");
+  estimator_params_.acceleration_variance =
+    tools::runtime_params::get_double(config_path_, "tracker_acceleration_variance");
+  estimator_params_.yaw_acceleration_variance =
+    tools::runtime_params::get_double(config_path_, "tracker_yaw_acceleration_variance");
+  estimator_params_.roll_pitch_random_walk =
+    tools::runtime_params::get_double(config_path_, "tracker_roll_pitch_random_walk");
+  estimator_params_.geometry_random_walk =
+    tools::runtime_params::get_double(config_path_, "tracker_geometry_random_walk");
+  estimator_params_.uvl_angle_variance =
+    tools::runtime_params::get_double(config_path_, "tracker_uvl_angle_variance");
+  estimator_params_.uvl_center_variance =
+    tools::runtime_params::get_double(config_path_, "tracker_uvl_center_variance");
+  estimator_params_.uvl_length_variance =
+    tools::runtime_params::get_double(config_path_, "tracker_uvl_length_variance");
+  estimator_params_.nis_gate =
+    tools::runtime_params::get_double(config_path_, "tracker_nis_gate");
 
   if (outpost_armor_z_offsets_.size() != 3) {
     tools::logger()->warn(
@@ -355,7 +387,17 @@ void Tracker::refresh_runtime_params_if_needed()
     old_outpost_radius != outpost_radius_ ||
     old_outpost_spin_speed_lock != outpost_spin_speed_lock_ ||
     old_outpost_fixed_center_rotation_model != outpost_fixed_center_rotation_model_ ||
-    old_outpost_armor_z_offsets != outpost_armor_z_offsets_;
+    old_outpost_armor_z_offsets != outpost_armor_z_offsets_ ||
+    old_estimator_params.acceleration_variance != estimator_params_.acceleration_variance ||
+    old_estimator_params.yaw_acceleration_variance !=
+      estimator_params_.yaw_acceleration_variance ||
+    old_estimator_params.roll_pitch_random_walk !=
+      estimator_params_.roll_pitch_random_walk ||
+    old_estimator_params.geometry_random_walk != estimator_params_.geometry_random_walk ||
+    old_estimator_params.uvl_angle_variance != estimator_params_.uvl_angle_variance ||
+    old_estimator_params.uvl_center_variance != estimator_params_.uvl_center_variance ||
+    old_estimator_params.uvl_length_variance != estimator_params_.uvl_length_variance ||
+    old_estimator_params.nis_gate != estimator_params_.nis_gate;
   if (reset_for_consistency && state_ != "lost") {
     state_ = "lost";
     pre_state_ = "lost";
@@ -431,26 +473,34 @@ bool Tracker::set_target(std::list<Armor> & armors, std::chrono::steady_clock::t
                     (armor.name == ArmorName::three || armor.name == ArmorName::four ||
                      armor.name == ArmorName::five);
 
+  auto make_p0 = [](double z_velocity_variance, double geometry_variance, bool full_rotation) {
+    Eigen::VectorXd p0 = Eigen::VectorXd::Zero(target_state::SIZE);
+    p0 << 1, 64, 1, 64, 1, z_velocity_variance, 0.4, 100,
+      geometry_variance, geometry_variance, geometry_variance,
+      full_rotation ? 0.4 : 0.0, full_rotation ? 0.4 : 0.0;
+    return p0;
+  };
+
   if (is_balance) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
-    target_ = Target(armor, t, 0.2, 2, P0_dig);
+    Eigen::VectorXd P0_dig = make_p0(64, 1.0, true);
+    target_ = Target(armor, t, 0.2, 2, P0_dig, {}, false, 2.51, estimator_params_);
   }
 
   else if (armor.name == ArmorName::outpost) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0}};
+    Eigen::VectorXd P0_dig = make_p0(81, 1e-4, false);
     target_ = Target(
       armor, t, outpost_radius_, 3, P0_dig, outpost_armor_z_offsets_,
-      outpost_fixed_center_rotation_model_, outpost_spin_speed_lock_);
+      outpost_fixed_center_rotation_model_, outpost_spin_speed_lock_, estimator_params_);
   }
 
   else if (armor.name == ArmorName::base) {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0}};
-    target_ = Target(armor, t, 0.3205, 3, P0_dig);
+    Eigen::VectorXd P0_dig = make_p0(64, 1e-4, false);
+    target_ = Target(armor, t, 0.3205, 3, P0_dig, {}, false, 2.51, estimator_params_);
   }
 
   else {
-    Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
-    target_ = Target(armor, t, 0.2, 4, P0_dig);
+    Eigen::VectorXd P0_dig = make_p0(64, 1.0, true);
+    target_ = Target(armor, t, 0.2, 4, P0_dig, {}, false, 2.51, estimator_params_);
   }
 
   return true;
@@ -501,10 +551,10 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
     }
 
     target_.set_armor_id_offset(best_match.offset, target_.last_id);
-    target_.update(*best_match.armor_it, best_match.id);
-    return true;
+    return target_.update(*best_match.armor_it, best_match.id, solver_);
   }
 
+  bool accepted_measurement = false;
   for (auto & armor : armors) {
     if (
       armor.name != target_.name || armor.type != target_.armor_type
@@ -514,10 +564,10 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
 
     solver_.solve(armor);
 
-    target_.update(armor);
+    accepted_measurement = target_.update(armor, solver_) || accepted_measurement;
   }
 
-  return true;
+  return accepted_measurement;
 }
 
 }  // namespace auto_aim

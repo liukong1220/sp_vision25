@@ -25,6 +25,10 @@ Eigen::Vector3d eulers(Eigen::Matrix3d R, int axis0, int axis1, int axis2, bool 
 // zyx:先绕z轴旋转，再绕y轴旋转，最后绕x轴旋转
 Eigen::Matrix3d rotation_matrix(const Eigen::Vector3d & ypr);
 
+// SO(3) exponential/logarithm maps. Rotation vectors use axis * angle.
+Eigen::Matrix3d so3_exp(const Eigen::Vector3d & rotation_vector);
+Eigen::Vector3d so3_log(const Eigen::Matrix3d & rotation_matrix);
+
 // 直角坐标系转球坐标系
 // ypd为yaw、pitch、distance的缩写
 Eigen::Vector3d xyz2ypd(const Eigen::Vector3d & xyz);

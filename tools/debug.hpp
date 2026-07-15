@@ -19,6 +19,8 @@ struct GimbalState;
 namespace auto_aim
 {
 struct Plan;
+class Planner;
+class Target;
 }
 
 namespace tools::debug
@@ -100,6 +102,8 @@ BallisticDiagnostic build_ballistic_diagnostic(
   double pitch_offset);
 
 nlohmann::json ballistic_to_json(const BallisticDiagnostic & diag);
+nlohmann::json estimator_to_json(const auto_aim::Target * target);
+nlohmann::json mpc_to_json(const auto_aim::Planner & planner);
 void draw_ballistic_panel(cv::Mat & panel, const BallisticDiagnostic & diag);
 
 }  // namespace tools::debug

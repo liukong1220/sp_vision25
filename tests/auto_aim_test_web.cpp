@@ -712,12 +712,17 @@ int main(int argc, char * argv[])
       current_plan = debug_planner->plan(current_target, bullet_speed);
       const auto finish = std::chrono::steady_clock::now();
       const double processing_ms = tools::delta_time(finish, frame_start) * 1000.0;
+      const double inference_ms = tools::delta_time(tracker_start, yolo_start) * 1e3;
+      const double tracker_ms = tools::delta_time(planner_start, tracker_start) * 1e3;
+      const double planner_ms = tools::delta_time(finish, planner_start) * 1e3;
       tools::logger()->info(
         "[{}][{}] yolo: {:.1f}ms, tracker: {:.1f}ms, planner: {:.1f}ms",
-        frame_count, debug_mode_label(current_mode),
-        tools::delta_time(tracker_start, yolo_start) * 1e3,
-        tools::delta_time(planner_start, tracker_start) * 1e3,
-        tools::delta_time(finish, planner_start) * 1e3);
+        frame_count, debug_mode_label(current_mode), inference_ms, tracker_ms, planner_ms);
+
+      data["pipeline_pending"] = 0;
+      data["pipeline_inflight"] = 0;
+      data["pipeline_dropped"] = 0;
+      data["pipeline_inference_latency_ms"] = inference_ms;
 
       data["target_yaw"] = rad2deg(current_plan.target_yaw);
       data["target_pitch"] = rad2deg(current_plan.target_pitch);
@@ -741,10 +746,13 @@ int main(int argc, char * argv[])
         data["vy"] = x_state[3];
         data["z"] = x_state[4];
         data["vz"] = x_state[5];
-        data["a"] = x_state[6] * 57.3;
+        const Eigen::Vector3d car_rpy = target.car_rpy();
+        data["a"] = car_rpy[0] * 57.3;
+        data["car_pitch"] = car_rpy[1] * 57.3;
+        data["car_roll"] = car_rpy[2] * 57.3;
         data["w"] = x_state[7];
-        data["r"] = x_state[8];
-        data["l"] = x_state[9];
+        data["r"] = target.radius(0);
+        data["l"] = target.radius(1) - target.radius(0);
         data["h"] = x_state[10];
         data["last_id"] = target.last_id;
         data["residual_yaw"] = target.ekf().data.at("residual_yaw");
@@ -752,10 +760,16 @@ int main(int argc, char * argv[])
         data["residual_distance"] = target.ekf().data.at("residual_distance");
         data["residual_angle"] = target.ekf().data.at("residual_angle");
         data["nis"] = target.ekf().data.at("nis");
+        data["nis_gate"] = target.nis_gate();
+        data["update_accepted"] = target.ekf().data.at("update_accepted");
         data["nees"] = target.ekf().data.at("nees");
         data["nis_fail"] = target.ekf().data.at("nis_fail");
         data["nees_fail"] = target.ekf().data.at("nees_fail");
         data["recent_nis_failures"] = target.ekf().data.at("recent_nis_failures");
+        data["uvl_left_center_u"] = target.ekf().data.at("uvl_left_center_u");
+        data["uvl_left_center_v"] = target.ekf().data.at("uvl_left_center_v");
+        data["uvl_right_center_u"] = target.ekf().data.at("uvl_right_center_u");
+        data["uvl_right_center_v"] = target.ekf().data.at("uvl_right_center_v");
         data["tracker_match_valid"] = target.tracker_debug_match_valid ? 1 : 0;
         data["tracker_match_id"] = target.tracker_debug_match_id;
         data["tracker_match_score"] = target.tracker_debug_match_score;
@@ -774,6 +788,8 @@ int main(int argc, char * argv[])
       data["planner_hit_fly_time_ms"] = debug_planner->debug_hit_fly_time * 1000.0;
       data["planner_hit_iters"] = debug_planner->debug_hit_iter_count;
       data["planner_hit_converged"] = debug_planner->debug_hit_converged ? 1 : 0;
+      data["planner_yaw_solver_iterations"] = debug_planner->debug_yaw_solver_iterations;
+      data["planner_pitch_solver_iterations"] = debug_planner->debug_pitch_solver_iterations;
       data["planner_spin_gate"] = debug_planner->debug_used_spin_gate ? 1 : 0;
       data["planner_center_yaw"] = rad2deg(debug_planner->debug_center_yaw);
       data["planner_turn_sign"] =
@@ -816,6 +832,14 @@ int main(int argc, char * argv[])
         web_state["frame"]["bullet_speed_effective_mps"] = effective_bullet_speed(current_mode, bullet_speed);
         web_state["frame"]["bullet_speed_fallback"] = bullet_speed_fallback(current_mode, bullet_speed);
         web_state["frame"]["bullet_speed_source"] = "offline-cli";
+        web_state["pipeline"]["pending"] = 0;
+        web_state["pipeline"]["inflight"] = 0;
+        web_state["pipeline"]["max_inflight"] = 1;
+        web_state["pipeline"]["submitted"] = frame_count;
+        web_state["pipeline"]["dropped"] = 0;
+        web_state["pipeline"]["inference_latency_ms"] = inference_ms;
+        web_state["pipeline"]["tracker_latency_ms"] = tracker_ms;
+        web_state["pipeline"]["planner_latency_ms"] = planner_ms;
         web_state["preview"]["has_target"] = current_target.has_value();
         web_state["preview"]["fire"] = current_plan.fire;
         web_state["preview"]["target_name"] =
@@ -862,6 +886,9 @@ int main(int argc, char * argv[])
           debug_planner->debug_selected_aim_z_compensation;
         web_state["planner"]["fixed_center_rotation_model"] =
           debug_planner->debug_fixed_center_rotation_model;
+        web_state["planner"].update(tools::debug::mpc_to_json(*debug_planner));
+        web_state["estimator"] =
+          tools::debug::estimator_to_json(current_target ? &*current_target : nullptr);
         if (current_target.has_value()) {
           web_state["tracker"]["candidate_count"] = current_target->tracker_debug_candidate_count;
           web_state["tracker"]["match_valid"] = current_target->tracker_debug_match_valid;

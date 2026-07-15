@@ -80,8 +80,9 @@ int main(int argc, char * argv[])
       data["gimbal_pitch_vel"] = gs.pitch_vel;
       data["bullet_speed"] = gs.bullet_speed;
 
-      if (!target_queue.empty() && mode == io::GimbalMode::AUTO_AIM) {
-        auto target = target_queue.front();
+      const auto target_update = target_queue.pop_for(20ms);
+      if (target_update.has_value() && mode == io::GimbalMode::AUTO_AIM) {
+        auto target = std::move(*target_update);
         auto plan = planner.plan(target, gs.bullet_speed);
 
         gimbal.send(

@@ -129,6 +129,7 @@ void Solver::solve(Armor & armor) const
   cv::cv2eigen(rmat, R_armor2camera);
   Eigen::Matrix3d R_armor2gimbal = R_camera2gimbal_ * R_armor2camera;
   Eigen::Matrix3d R_armor2world = R_gimbal2world_ * R_armor2gimbal;
+  armor.R_armor2world = R_armor2world;
   armor.ypr_in_gimbal = tools::eulers(R_armor2gimbal, 2, 1, 0);
   armor.ypr_in_world = tools::eulers(R_armor2world, 2, 1, 0);
 
@@ -183,6 +184,30 @@ std::vector<cv::Point2f> Solver::reproject_armor(
   return image_points;
 }
 
+std::vector<cv::Point2f> Solver::reproject_armor(
+  const Eigen::Vector3d & xyz_in_world, const Eigen::Matrix3d & rotation_in_world,
+  ArmorType type) const
+{
+  const_cast<Solver *>(this)->refresh_runtime_params_if_needed();
+  const Eigen::Matrix3d rotation_in_camera =
+    R_camera2gimbal_.transpose() * R_gimbal2world_.transpose() * rotation_in_world;
+  const Eigen::Vector3d translation_in_camera =
+    R_camera2gimbal_.transpose() *
+    (R_gimbal2world_.transpose() * xyz_in_world - t_camera2gimbal_);
+
+  cv::Mat rotation_cv;
+  cv::eigen2cv(rotation_in_camera, rotation_cv);
+  cv::Vec3d rotation_vector;
+  cv::Rodrigues(rotation_cv, rotation_vector);
+  const cv::Vec3d translation(
+    translation_in_camera.x(), translation_in_camera.y(), translation_in_camera.z());
+  const auto & object_points = type == ArmorType::big ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
+  std::vector<cv::Point2f> image_points;
+  cv::projectPoints(
+    object_points, rotation_vector, translation, camera_matrix_, distort_coeffs_, image_points);
+  return image_points;
+}
+
 double Solver::oupost_reprojection_error(Armor armor, const double & pitch)
 {
   refresh_runtime_params_if_needed();
@@ -206,6 +231,7 @@ double Solver::oupost_reprojection_error(Armor armor, const double & pitch)
   cv::cv2eigen(rmat, R_armor2camera);
   Eigen::Matrix3d R_armor2gimbal = R_camera2gimbal_ * R_armor2camera;
   Eigen::Matrix3d R_armor2world = R_gimbal2world_ * R_armor2gimbal;
+  armor.R_armor2world = R_armor2world;
   armor.ypr_in_gimbal = tools::eulers(R_armor2gimbal, 2, 1, 0);
   armor.ypr_in_world = tools::eulers(R_armor2world, 2, 1, 0);
 

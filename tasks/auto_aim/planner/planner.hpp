@@ -65,6 +65,10 @@ public:
   double debug_fire_phase_limit = 0.0;
   bool debug_fire_track_ready = false;
   bool debug_fire_phase_ready = false;
+  int debug_yaw_solver_status = -1;
+  int debug_pitch_solver_status = -1;
+  int debug_yaw_solver_iterations = 0;
+  int debug_pitch_solver_iterations = 0;
   std::vector<double> debug_delta_angle_list;
   Planner(const std::string & config_path);
   ~Planner();
