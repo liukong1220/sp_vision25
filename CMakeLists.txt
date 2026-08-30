@@ -61,6 +61,10 @@ add_subdirectory(tasks/auto_aim)
 add_subdirectory(tasks/auto_buff)
 add_subdirectory(tasks/omniperception)
 
+# 仿真侧 IO 适配层（共享内存 IPC + 虚拟相机/云台）。
+# 刻意不依赖 io 里的物理相机与串口实现，可在没有任何硬件的机器上编译运行。
+add_subdirectory(simulation/io)
+
 ####################src###################
 add_executable(standard src/standard.cpp)
 add_executable(mt_standard src/mt_standard.cpp)
@@ -169,7 +173,41 @@ target_link_libraries(estimator_pipeline_test Eigen3::Eigen)
 add_executable(target_13d_test tests/target_13d_test.cpp)
 target_link_libraries(target_13d_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
 
+##################simulation##################
+# 仿真专用入口：复用 YOLO/Solver/Tracker/Planner，但相机与云台走共享内存，
+# 不初始化物理相机与串口。真实机器入口 (standard / mt_standard / ...) 保持不变。
+add_executable(sim_auto_aim src/sim_auto_aim.cpp)
+target_link_libraries(sim_auto_aim ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io sim_io)
+
+# ABI 合同测试：只依赖布局头，不需要 OpenCV 之外的任何运行时。
+add_executable(sim_ipc_contract_test tests/sim_ipc_contract_test.cpp)
+target_link_libraries(sim_ipc_contract_test sim_io)
+
+# 回环与故障注入测试：用 FakePublisher 充当生产者，无需启动 Bevy。
+# tools 是 OBJECT 库，链接它会把 debug.cpp.o 一起拖进来，而后者引用
+# auto_aim::Target 的成员函数，所以必须补上 auto_aim（仅链接，不加载模型）。
+add_executable(sim_io_loopback_test tests/sim_io_loopback_test.cpp)
+target_link_libraries(sim_io_loopback_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
+
+# 入口级端到端冒烟测试：fork 出真正的 sim_auto_aim，本进程当生产者。
+add_executable(sim_entry_smoke_test tests/sim_entry_smoke_test.cpp)
+target_link_libraries(sim_entry_smoke_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
+add_dependencies(sim_entry_smoke_test sim_auto_aim)
+
+list(APPEND SP_VISION_RUNTIME_TARGETS
+  sim_auto_aim
+  sim_ipc_contract_test
+  sim_io_loopback_test
+  sim_entry_smoke_test
+)
+
 if(BUILD_TESTING)
+  add_test(NAME sim_ipc_contract_test COMMAND sim_ipc_contract_test)
+  add_test(NAME sim_io_loopback_test COMMAND sim_io_loopback_test)
+  add_test(
+    NAME sim_entry_smoke_test
+    COMMAND sim_entry_smoke_test $<TARGET_FILE:sim_auto_aim>
+  )
   add_test(NAME estimator_pipeline_test COMMAND estimator_pipeline_test)
   add_test(
     NAME target_13d_test

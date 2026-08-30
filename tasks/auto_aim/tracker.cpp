@@ -153,6 +153,7 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
   normal_temp_lost_count_ = max_temp_lost_count_;
+  max_dt_ = tools::read_or<double>(yaml, "tracker_max_dt", 0.1);
   outpost_radius_ = tools::read_or<double>(yaml, "outpost_radius", 0.2765);
   outpost_spin_speed_lock_ = tools::read_or<double>(yaml, "outpost_spin_speed_lock", 2.51);
   outpost_fixed_center_rotation_model_ =
@@ -194,12 +195,20 @@ std::list<Target> Tracker::track(
   last_timestamp_ = t;
 
   // 时间间隔过长，说明可能发生了相机离线
-  if (state_ != "lost" && dt > 0.1) {
-    tools::logger()->warn("[Tracker] Large dt: {:.3f}s", dt);
+  if (state_ != "lost" && dt > max_dt_) {
+    tools::logger()->warn("[Tracker] Large dt: {:.3f}s (max {:.3f}s)", dt, max_dt_);
     state_ = "lost";
   }
-  // 过滤掉非我方装甲板
-  armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
+  // 过滤掉非我方装甲板。
+  //
+  // use_enemy_color 原本在两个 track() 重载的签名里都声明了却从没被读过（默认 true，
+  // 过滤无条件执行），这里把它接上，默认行为与之前完全一致。
+  // 仿真需要这个开关：合成图像上颜色分类头不可靠——同一块装甲板只把云台 pitch
+  // 从 -2.0° 转到 -3.8° 再到 -5.4°（画面里只挪 38~70 像素），类别就依次给出
+  // blue / red / extinguish，而编号与置信度一直稳定在 one/0.9+，单帧 PnP 也稳定在
+  // 1 cm 内。颜色一错，这一行就会把整帧检测结果清空，tracker 随即饿死。
+  if (use_enemy_color)
+    armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
 
   // 优先选择靠近图像中心的装甲板
   armors.sort([](const Armor & a, const Armor & b) {
@@ -263,8 +272,8 @@ std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
   last_timestamp_ = t;
 
   // 时间间隔过长，说明可能发生了相机离线
-  if (state_ != "lost" && dt > 0.1) {
-    tools::logger()->warn("[Tracker] Large dt: {:.3f}s", dt);
+  if (state_ != "lost" && dt > max_dt_) {
+    tools::logger()->warn("[Tracker] Large dt: {:.3f}s (max {:.3f}s)", dt, max_dt_);
     state_ = "lost";
   }
 

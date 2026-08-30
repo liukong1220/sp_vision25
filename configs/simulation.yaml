@@ -1,0 +1,239 @@
+enemy_color: "red"
+#enemy_color: "blue"
+
+#####-----神经网络参数-----#####
+yolo_name: yolov5
+classify_model: assets/tiny_resnet.onnx
+yolo11_model_path: assets/yolo11.xml
+yolov8_model_path: assets/yolov8.xml
+yolov5_model_path: assets/yolov5.xml
+device: CPU  # 仿真环境不保证有 iGPU，默认走 CPU
+min_confidence: 0.8
+use_traditional: true
+
+#####-----ROI-----#####
+roi: 
+  x: 420
+  y: 50
+  width: 600
+  height: 600
+
+use_roi: false
+
+#####-----传统方法参数-----#####
+threshold: 150
+max_angle_error: 45 # degree
+min_lightbar_ratio: 1.5
+max_lightbar_ratio: 20
+min_lightbar_length: 8
+min_armor_ratio: 1
+max_armor_ratio: 5
+max_side_ratio: 1.5
+max_rectangular_error: 25 # degree
+
+#####-----tracker参数-----#####
+# 判定相机离线的帧间隔上限(秒)。默认 0.1 是实车流水线的量级；
+# 本机 CPU 上 OpenVINO 跑一帧 YOLO 就要 110ms 以上(detect_ms p50≈113ms)，
+# 闭环实测 fps≈7.8，dt 恒在 0.13~0.16s，用 0.1 会让 tracker 每帧被打回 lost
+# (实测 tracked_frames 只有 5/91)。这里放宽到 0.35s，只是把“离线”判据对齐到
+# 本机真实帧率，不改变实车默认值。
+tracker_max_dt: 0.35
+min_detect_count: 3
+max_temp_lost_count: 15
+
+outpost_max_temp_lost_count: 75
+# EKF 过程噪声。实车默认 100 / 400，仿真必须压到 1/500 才不发散，原因如下。
+#
+# planner 的参考轨迹是 target.predict(-0.51s) 走到 predict(+0.49s)，取中点下发
+# （planner.cpp: get_trajectory / HALF_HORIZON），也就是把 EKF 的速度状态乘上
+# ±0.5s 再送进 MPC；而 MPC 的初值 x0 取自它自己的参考轨迹 traj(0,0)，完全不读
+# 云台反馈。这套设计在实车成立：dt≈5ms、帧龄≈10ms，速度状态几乎不会跑偏。
+# 本机 dt≈0.13s、frame_age p50≈200ms（约 300ms 环路死时），
+# 加速度方差 100 m²/s⁴ 意味着每步速度随机游走 σ=√(100*0.13)≈3.6m/s，
+# 静止靶都能被拟合出 vcz≈-2m/s、vyaw≈±40deg/s，再乘 ±0.5s 就是 ±1m / ±20°，
+# 下发角随即逐帧反号放大（实测 cmd pitch -7,+1.3,-13.4,+1,-12.4,+11.5,-32.6,+28.6），
+# 云台被甩到 (+55.7,+54.0) 后目标永久丢失。
+#
+# 实测对比（同一静止靶，闭环，其余参数不变）：
+#   100 / 400 -> tracked  30/116  safe_stops 89  final_faults 含 target_lost
+#   4.0 / 16  -> tracked  54/129  lost 75 帧（按 variance*dt 等效缩放也不够）
+#   1.0 / 10  -> tracked 188/189  lost  1 帧  vyaw 峰值 231deg/s
+#   0.2 / 2.0 -> tracked 191/191  lost  0 帧  cmd pitch 仅在 -5.97..-3.10 抖动
+# 取最后一组。代价是 σ_a≈0.45m/s²，真机动目标会跟不上；这是当前 8fps/200ms 帧龄
+# 下的必然折中，帧率提上去之后应当同步往实车值调回。实车入口读自己的配置，不受影响。
+tracker_acceleration_variance: 0.2
+tracker_yaw_acceleration_variance: 2.0
+tracker_roll_pitch_random_walk: 2.0e-3
+tracker_geometry_random_walk: 1.0e-4
+tracker_uvl_angle_variance: 2.5e-3
+tracker_uvl_center_variance: 9.0
+tracker_uvl_length_variance: 9.0
+tracker_nis_gate: 20.090  # 8 DoF chi-square, 99%
+inference_max_inflight: 3
+outpost_radius: 0.2765
+outpost_armor_z_offsets: [0.0, -0.102, 0.102]
+outpost_fixed_center_rotation_model: true
+outpost_spin_speed_lock: 2.51
+outpost_coming_angle: 60
+#决定“提前多早开始认定下一块板是应打板”，主要管选板提前量和轨迹连续性。
+outpost_leaving_angle: 18
+#决定“板进入正面附近后还能保留多久”，同时还间接决定最终 fire 相位窗口大小
+outpost_delay_time: 0.078
+outpost_fire_z_compensation: [0.0, -0.012, 0.0]
+
+#####-----aimer参数----
+# 仿真里没有真实机械零偏，先归零；单轴标定实验确认后再填。
+yaw_offset: 0.0
+pitch_offset: 0.0
+coming_angle: 50
+leaving_angle: 25
+decision_speed: 8
+high_speed_delay_time: 0.07  # 略微减少高速延迟，进一步提高响应速度 
+low_speed_delay_time: 0.10  # 略微减少低速延迟
+
+#####-----shooter参数-----#####
+first_tolerance: 3 # 近距离射击容差，degree 降低容差提高精度
+second_tolerance: 2 # 远距离射击容差，degree 降低容差提高精度
+judge_distance: 2 #距离判断阈值
+auto_fire: true # 是否由自瞄控制射击
+
+# 仿真入口不初始化物理相机与串口，以下硬件项仅为兼容旧配置读取而保留，实际不生效。
+camera_name: "simulation"
+exposure_ms: 5.0
+gain: 16.0
+vid_pid: "0000:0000"
+
+# 仿真端发布的 gimbal 四元数已经是 world<-gimbal，不存在 imubody 中间系，取单位阵。
+R_gimbal2imubody: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+# 仿真相机是理想针孔模型，内参由 fov_y=45deg 与 1440x1080 反算：
+#   fov_x = 2*atan(tan(fov_y/2) * 1440/1080)
+#   fx = 1440/(2*tan(fov_x/2)) = fy = 1080/(2*tan(fov_y/2)) = 1303.6752833867
+#   cx = 720, cy = 540（严格图像中心）
+# sim_auto_aim 启动时会用共享内存里的 CameraInfo 交叉校验这几个数，
+# 不一致超过 0.5px 直接拒绝启动，避免仿真端改了 fov 而这里没跟上。
+camera_matrix: [1303.6752833867, 0, 720.0, 0, 1303.6752833867, 540.0, 0, 0, 1]
+distort_coeffs: [0, 0, 0, 0, 0]
+
+
+# 仿真里相机是理想安装，没有装配偏角：
+#   相机 z(前) -> 云台 x(前)， 相机 x(右) -> 云台 -y， 相机 y(下) -> 云台 -z
+R_camera2gimbal: [0, 0, 1, -1, 0, 0, 0, -1, 0]
+# 相机相对云台的平移。仿真端每帧都会发布 Camera pose 的相对平移，
+# sim_auto_aim 会把观测值打印出来并与这里比对，超过 sim.extrinsic_tol_m 报警。
+# 实测值：由 sim_auto_aim 的外参自检从共享内存 Camera pose 读出（2026-08-29 passive 运行）。
+t_camera2gimbal: [0.060025, 0.002017, 0.196342]
+
+
+
+#####-----cboard参数-----#####
+quaternion_canid: 0x100
+bullet_speed_canid: 0x101
+send_canid: 0xff
+can_interface: "can0"
+
+#####-----gimbal参数-----
+com_port: "/dev/null"  # 仿真不开串口
+gimbal_state_unit: "deg"
+# yaw_kp: 0  # 进一步增加yaw轴比例增益，提高响应速度
+# yaw_kd: 0  # 进一步增加yaw轴微分增益，减少剩余震荡
+# pitch_kp: 0  # 进一步增加pitch轴比例增益，原先是0.22
+# pitch_kd: 0  # 进一步增加pitch轴微分增益，原先是0.15
+
+#####-----planner-----#####
+# fire_thresh 原来在这一节里出现了两次（0.005 与 0.0027），是从实车配置带过来的
+# 重复键。yaml-cpp 取后出现的那个，也就是实际生效值一直是 0.0027 rad(≈0.155deg)，
+# 前一个从来没起作用。这里只保留生效的那一个，行为不变。
+fire_thresh: 0.0027
+bullet_speed_min: 10.0
+bullet_speed_max: 25.0
+bullet_speed_fallback: 25.0
+
+max_yaw_acc: 90  # 当前设置为60度/秒² serial: SerialException device reports readiness to write but returned no data
+Q_yaw: [6e4, 0.3]  # 当前位置权重为4e6，速度权重为0
+R_yaw: [1.57] # 当前设置为0.7
+max_pitch_acc: 75  # 当前设置为100度/秒²
+Q_pitch: [7e5, 0]  # 当前位置权重为6e6，速度权重为0
+R_pitch: [1.0]  # 当前设置为0.7
+
+#####-----buff_detector参数-----#####
+model: "assets/yolo11_buff_int8.xml"
+
+#####-----buff_aimer参数-----#####
+fire_gap_time: 0.700   # s
+predict_time: 0.120     # s 微调预测时间，可能需要根据实际情况调整
+
+#####-----web_debugger参数-----#####
+show_local: false
+disable_web: false
+web_host: "0.0.0.0"
+web_port: 8090
+web_fps: 30.0
+web_scale: 0.8
+web_jpeg_quality: 55
+web_client_ttl_ms: 1000
+
+#####-----debug_record参数-----#####
+record_raw_video: false
+record_debug_video: false
+record_debug_fps: 30.0
+record_debug_dir: "records"
+
+#####-----仿真链路参数（仅 sim_auto_aim 读取）-----#####
+sim:
+  # 共享内存目录。默认与 simulator 一致；指向别处可对着 FakePublisher 做离线联调。
+  shm_dir: "/tmp"
+  # 是否让 Tracker 按 enemy_color 过滤装甲板。仿真默认 false。
+  #
+  # 实测（--dump-detect，静态位姿、其余条件全不变，只改云台 pitch）：
+  #   pitch=-2.0deg -> color=0(blue) conf=0.93  detected 21/21  tracked 22/22
+  #   pitch=-3.8deg -> color=1(red)  conf=0.94  detected 22/22  tracked  0
+  #   pitch=-5.4deg -> color=2(灭)   conf=0.89  detected 22/22  tracked  0
+  # 同一块装甲板在画面里只挪了 38~70 像素，编号一直是 one、置信度一直 0.9+、
+  # 单帧 PnP 一直是 (-0.016,1.49,0.09)（真值 (-0.023,1.481,0.033)，误差约 1cm），
+  # 只有颜色类别在 blue/red/灭 之间乱跳；换曝光(ev100=7.5)则三个位姿全判成 red。
+  # 也就是说合成图像对颜色分类头是分布外的，而 Tracker 会用颜色直接清空整帧结果，
+  # 于是闭环表现为 detecting->tracking->temp_lost->lost 反复循环。
+  # 关掉这道门之后仍保留编号、几何与 NIS 校验。实车入口不走这里，默认值仍是 true。
+  use_enemy_color: false
+  # 帧龄与心跳门限。
+  # 这两个门限原来按"理想低延迟管线"取值（100ms / 200ms），在本机不可能满足：
+  # 渲染->GPU 回读->共享内存->消费这一路实测 frame_age p50≈208ms、p95≈306ms、
+  # p99≈342ms、max≈399ms（20s 闭环，153 帧）。后果是
+  #   max_frame_age_ms=100  -> 每帧都被判过期，闭环根本跑不起来（一直靠 CLI 覆盖）
+  #   state_timeout_ms=200  -> 同帧位姿一到手就已 stale，faults 恒含 state_stale，
+  #                            而 fire_allowed() 要求 faults()==FAULT_NONE，
+  #                            于是 --allow-fire 也永远打不出一发（实测
+  #                            plan_fire 0 / fire 0 / suppressed_fire 152）。
+  # 现在取"实测 p99 之上、心跳超时 500ms 之下"的 450ms：仍然是真实的过期保护
+  # （断流 450ms 即禁火并安全停止），只是把判据对齐到本机真实延迟。
+  # 帧率/回读延迟改善后应当同步调回。
+  max_frame_age_ms: 450.0
+  heartbeat_timeout_ms: 500.0
+  read_timeout_ms: 1000.0
+  # 命令角度映射。这四个数已由 probe 模式单轴实测确认，判据是"下发角 == 反馈角"。
+  #   simulator: yaw = radians(yaw_deg), pitch = radians(-pitch_deg - 90)
+  #   本侧:      yaw_deg = yaw_scale*deg(yaw) + yaw_offset_deg
+  #              pitch_deg = pitch_scale*deg(pitch) + pitch_offset_deg
+  # 注意 pitch 不是解码式的直接逆变换，多了一次取反，原因见下面的注释。
+  # 单轴标定实验只应该改这四个数，不要改代码。
+  yaw_scale: 1.0
+  yaw_offset_deg: 0.0
+  # 实测：Bevy 的 YXZ pitch 绕 +X 抬头，ROS 的 ZYX pitch 绕 +Y 低头，两者反向，
+  # 所以编码要取 +1 才能让 fb_pitch == cmd_pitch（probe --axis=pitch 实测确认）。
+  pitch_scale: 1.0
+  pitch_offset_deg: -90.0
+  # 同帧姿态过期门限、空闲重发安全停止周期
+  # 反馈四元数的坐标系修正：仿真端 capture.rs 发布前多乘了一个绕枪口 X 轴的
+  # 90° 滚转，经 to_ros_quat 之后等价于在 ROS 系右乘 Ry(-90°)。这里右乘回
+  # Ry(+90°) 还原。不修正会同时踩两个坑：ZYX 欧拉角万向锁（pitch 恰好 -90°，
+  # yaw 解不出来）以及 solver 的世界系整体偏 90°。除非仿真端改了发布式，别动。
+  feedback_pitch_fix_deg: 90.0
+  state_timeout_ms: 450.0
+  safe_stop_period_ms: 20.0
+  # 目标丢失多久后置 FAULT_TARGET_LOST
+  target_lost_ms: 300.0
+  # 外参自检：观测到的 camera 相对平移与 t_camera2gimbal 的允许偏差
+  extrinsic_tol_m: 0.01
+  # 内参自检：与共享内存 CameraInfo 的允许偏差
+  intrinsic_tol_px: 0.5

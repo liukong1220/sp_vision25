@@ -42,6 +42,11 @@ private:
   int temp_lost_count_;
   int outpost_max_temp_lost_count_;
   int normal_temp_lost_count_;
+  // 判定“相机离线”的帧间隔上限(秒)。超过就把状态打回 lost。
+  // 默认 0.1 是按实车流水线速度定的；仿真里 CPU 上跑 YOLO 单帧就要 110ms 以上，
+  // dt 恒大于 0.1，tracker 每帧都会被打回 lost，永远确认不了目标。
+  // 所以做成可配置(configs/simulation.yaml: tracker_max_dt)，实车默认值不变。
+  double max_dt_;
   double outpost_radius_;
   double outpost_spin_speed_lock_;
   bool outpost_fixed_center_rotation_model_;
