@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,6 +22,7 @@
 
 #include "simulation/io/sim_camera.hpp"
 #include "simulation/io/sim_gimbal.hpp"
+#include "simulation/io/sim_ground_truth.hpp"
 #include "simulation/io/testing/fake_publisher.hpp"
 
 namespace
@@ -81,12 +83,19 @@ struct RgbPattern
 
 // 与 capture.rs 一致：gimbal 四元数以 [w,x,y,z] 发布。
 //
-// capture.rs 发布前会多乘一个绕枪口自身 X 轴的 90° 滚转，经 to_ros_quat 之后
-// 等价于在 ROS 系里右乘 Ry(-90°)。这里必须照抄这个约定，否则回环测试测的是一个
-// 现实中不存在的生产者，SimGimbal 的坐标系修正就永远测不到。
+// capture.rs 里的 Rx(90°) 不是额外滚转，而正是把 Bevy 的枪管前向（局部 +Y）
+// 对齐到 Bevy 前向（-Z）的那一步；经 to_ros_quat 之后，发布出来的四元数的
+// ROS +X 就是出膛方向。已解析验证：对任意 R_muzzle_bevy，
+//     A·(R·Rx(90°))·A⁻¹ · x_ros  ==  A·(R·y_bevy)
+// （A = M_ALIGN_MAT3，右端是 projectile.rs 真正用于 spawn 弹丸的方向），
+// 残差 <=5.6e-17。所以生产者发布的就是标准 world<-gimbal，这里不加任何额外
+// 旋转；对应地 SimGimbal 的 feedback_pitch_fix_deg 必须是 0。
+//
+// 这个函数曾经右乘 Ry(-90°) 来模拟"发布端多转了 90°"，那是个现实中不存在的
+// 生产者：它让测试与 feedback_pitch_fix_deg=90 互相自证，而真实链路两者都错。
 const Eigen::Quaterniond & simulator_feedback_roll()
 {
-  static const Eigen::Quaterniond q(Eigen::AngleAxisd(-M_PI / 2.0, Eigen::Vector3d::UnitY()));
+  static const Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
   return q;
 }
 
@@ -110,9 +119,14 @@ void quat_wxyz_from_yaw_pitch(double yaw, double pitch, float out[4])
 
 // 仿真端 process_subscription 的原始解码公式，直接抄 plugin.rs，用来交叉验证编码。
 double simulator_decode_yaw_rad(float yaw_deg) { return static_cast<double>(yaw_deg) * M_PI / 180.0; }
+// 仿真端 process_subscription: gimbal_data.pitch = (-cmd.pitch_deg - 90).to_radians()
+// 这是 Bevy YXZ 内部量，不是 ROS pitch；两者关系由下面的 sim_formula 检查约束。
 double simulator_decode_pitch_rad(float pitch_deg)
 {
-  return static_cast<double>(-pitch_deg - 90.0f) * M_PI / 180.0;
+  // 先转 double 再做减法。写成 `-pitch_deg - 90.0f` 会在 float 里算，
+  // 与 sim_internal_pitch_rad 的 double 运算差约 3e-8，逐位比较（==）必然失败，
+  // 那道检查就只是在测浮点舍入，而不是在测两侧公式是否一致。
+  return (-static_cast<double>(pitch_deg) - 90.0) * M_PI / 180.0;
 }
 }  // namespace
 
@@ -392,12 +406,16 @@ int main()
       sim_io::SimGimbal::sim_internal_pitch_rad(cmd) !=
       simulator_decode_pitch_rad(cmd.pitch_deg))
       sim_formula_ok = false;
-    // pitch：仿真端把解码值塞进 Quat::from_euler(YXZ, yaw, pitch, 0)，绕 Bevy +X
-    // 正转是抬头；而我们下发/反馈用的是 ROS ZYX 约定，绕 +Y 正转是低头。两个约定
-    // 天生反向，所以仿真端内部的 pitch 必须是我们下发值的相反数——这正是
-    // pitch_scale=+1 的由来（probe --axis=pitch 实测：scale=-1 时 fb=-cmd）。
-    if (std::abs(simulator_decode_pitch_rad(cmd.pitch_deg) + probe_pitch[i]) > 1e-4)
-      sim_formula_ok = false;
+    // pitch：仿真端把解码值塞进 Quat::from_euler(YXZ, yaw, pitch_bevy, 0)，绕
+    // Bevy +X 正转是抬头，且它的零位是"垂直朝天"（因为解码里减了 90°）。我们
+    // 下发/反馈用 ROS ZYX 约定，绕 +Y 正转是低头。两者的关系是
+    //     pitch_bevy = -cmd_pitch_deg - 90    (deg)
+    // 而 cmd_pitch_deg 就等于我们要的 ROS pitch（identity 映射），于是
+    //     pitch_bevy = -ros_pitch - 90
+    // 等价地 ros_pitch = -(pitch_bevy + 90)。检查这个恒等式，而不是检查
+    // "内部量 == 下发值的相反数"（那个式子少了 90° 的零位，只在 0 附近碰巧接近）。
+    const double pitch_bevy = simulator_decode_pitch_rad(cmd.pitch_deg);
+    if (std::abs(-(pitch_bevy + M_PI / 2.0) - probe_pitch[i]) > 1e-4) sim_formula_ok = false;
     if (cmd.distance_m < 0.0f) roundtrip_ok = false;
   }
   check(roundtrip_ok, "编码/解码往返一致（5 组角度）");
@@ -467,6 +485,325 @@ int main()
     check(pub.recv_gimbal_cmd(&cy), "收到允许开火的命令");
     check(cy.fire_advice == 1, "无故障且 allow_fire=true 时确实开火");
     check(g2.fire_commands() == 1, "fire_commands 计数正确");
+  }
+
+  // ---- 7. 时钟跳变注入 -------------------------------------------------------
+  std::printf("--- 时钟跳变 --------------------------------------------------------\n");
+  {
+    // 注入 500ms 的 realtime<->steady 偏移变化（等价于一次 NTP 跳表）。
+    // 走的是与生产完全相同的判定路径：resample_if_due() 比较新采样与已记录
+    // offset 之差，超过阈值即判跳变。
+    const int jumps_before = cam.clock().jump_count();
+    const std::uint64_t jump_frames_before = cam.clock_jump_frames();
+    cam.clock_for_test().debug_shift_offset_ns(500000000);
+
+    std::uint64_t nn = realtime_now_ns();
+    pub.publish_pose_bundle(30, nn, quat);
+    pub.publish_image(pattern.data.data(), 30, nn);
+    st = cam.try_read(img, ts);
+    check(st == sim_io::ReadStatus::ClockJump, "偏移跳变后首次读取报 ClockJump");
+    check(cam.clock().jump_count() > jumps_before, "ClockBridge 记录到跳变");
+    check(cam.clock_jump_frames() == jump_frames_before + 1, "clock_jump_frames 计数 +1");
+    check(img.empty(), "跳变帧不返回图像");
+
+    // 跳变必须进 fault 位，并因此禁止开火。这是评审指出的核心问题：
+    // 原来入口里 set_fault(FAULT_CLOCK_JUMP, false) 是硬编码的，跳变只被计数。
+    sim_io::SimGimbalConfig armed = gim_cfg;
+    armed.allow_fire = true;
+    sim_io::SimGimbal gj(cam.client(), armed);
+    gj.update(cam.last_bundle(), std::chrono::steady_clock::now());
+    gj.set_fault(sim_io::FAULT_CLOCK_JUMP, st == sim_io::ReadStatus::ClockJump);
+    check(
+      (gj.faults() & sim_io::FAULT_CLOCK_JUMP) != 0, "ClockJump 映射进 FAULT_CLOCK_JUMP");
+    check(!gj.fire_allowed(), "时钟跳变帧禁止开火");
+    gj.send(true, true, 0.1, 0.02, 3.0);
+    sim_io::GimbalCmd cj{};
+    check(pub.recv_gimbal_cmd(&cj) && cj.fire_advice == 0, "跳变帧的开火请求被抑制");
+
+    // 跳变之后恢复：下一帧应当正常可用（跳变只丢一帧）。
+    nn = realtime_now_ns();
+    pub.publish_pose_bundle(31, nn, quat);
+    pub.publish_image(pattern.data.data(), 31, nn);
+    st = cam.try_read(img, ts);
+    check(st == sim_io::ReadStatus::Ok, "跳变之后下一帧恢复可用");
+    check(cam.clock_jump_frames() == jump_frames_before + 1, "恢复帧不再计入跳变");
+  }
+
+  // ---- 8. 位姿输入校验 -------------------------------------------------------
+  std::printf("--- 位姿输入校验 ----------------------------------------------------\n");
+  {
+    sim_io::SimGimbal gv(cam.client(), gim_cfg);
+    const auto now_sp = std::chrono::steady_clock::now();
+
+    // 先喂一帧好的，建立基准（也验证正常路径返回 Ok）。
+    sim_io::FrameBundle good = cam.last_bundle();
+    good.timestamp_ns = realtime_now_ns();
+    check(gv.update(good, now_sp) == sim_io::PoseValidity::Ok, "合法位姿返回 Ok");
+    const double yaw_good = gv.yaw();
+    const std::uint64_t invalid_before = gv.invalid_poses();
+
+    // timestamp_ns == 0：未初始化槽位的典型表现。
+    sim_io::FrameBundle b0 = good;
+    b0.timestamp_ns = 0;
+    check(
+      gv.update(b0, now_sp) == sim_io::PoseValidity::BadTimestamp,
+      "timestamp_ns=0 被拒 (BadTimestamp)");
+
+    // 时间戳倒退。
+    sim_io::FrameBundle bb = good;
+    bb.timestamp_ns = good.timestamp_ns - 1000000ull;
+    check(
+      gv.update(bb, now_sp) == sim_io::PoseValidity::BadTimestamp,
+      "时间戳倒退被拒 (BadTimestamp)");
+
+    // NaN 位置。
+    sim_io::FrameBundle bn = good;
+    bn.timestamp_ns = good.timestamp_ns + 10000000ull;
+    bn.poses[static_cast<int>(sim_io::PoseIndex::Odom)].position[1] = std::nanf("");
+    check(
+      gv.update(bn, now_sp) == sim_io::PoseValidity::NonFinite, "NaN 位置被拒 (NonFinite)");
+
+    // inf 四元数分量。
+    sim_io::FrameBundle bi = good;
+    bi.timestamp_ns = good.timestamp_ns + 11000000ull;
+    bi.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[2] =
+      std::numeric_limits<float>::infinity();
+    check(
+      gv.update(bi, now_sp) == sim_io::PoseValidity::NonFinite, "inf 四元数被拒 (NonFinite)");
+
+    // 全零四元数（未初始化槽位）：模长 0。
+    sim_io::FrameBundle bz = good;
+    bz.timestamp_ns = good.timestamp_ns + 12000000ull;
+    for (int i = 0; i < 4; ++i)
+      bz.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[i] = 0.0f;
+    check(
+      gv.update(bz, now_sp) == sim_io::PoseValidity::QuaternionNorm,
+      "全零四元数被拒 (QuaternionNorm)");
+
+    // 模长明显偏离 1。
+    sim_io::FrameBundle bs = good;
+    bs.timestamp_ns = good.timestamp_ns + 13000000ull;
+    for (int i = 0; i < 4; ++i)
+      bs.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[i] *= 3.0f;
+    check(
+      gv.update(bs, now_sp) == sim_io::PoseValidity::QuaternionNorm,
+      "四元数模长异常被拒 (QuaternionNorm)");
+
+    // 关键不变量：被拒的帧一律不得改动任何状态。
+    check_near(gv.yaw(), yaw_good, 1e-12, "被拒帧未改动 yaw");
+    check(gv.invalid_poses() == invalid_before + 6, "invalid_poses 累计 6 次拒绝");
+    check((gv.faults() & sim_io::FAULT_POSE_INVALID) != 0, "被拒后置 FAULT_POSE_INVALID");
+    check(!gv.fire_allowed(), "位姿不合法时禁止开火");
+
+    // 恢复：合法帧应当清掉该故障位。
+    sim_io::FrameBundle bok = good;
+    bok.timestamp_ns = good.timestamp_ns + 20000000ull;
+    check(gv.update(bok, now_sp) == sim_io::PoseValidity::Ok, "恢复帧返回 Ok");
+    check((gv.faults() & sim_io::FAULT_POSE_INVALID) == 0, "合法帧清掉 FAULT_POSE_INVALID");
+  }
+
+  // ---- 9. 发布端重启（正常退出 / SIGKILL） -----------------------------------
+  std::printf("--- 发布端重启 ------------------------------------------------------\n");
+  {
+    // 场景 A：**正常退出**。仿真端退出时会 unlink 掉 /tmp/talos_ipc_*，重启后是
+    // 新 inode。消费端手里的旧映射既看不到新帧，也看不到新的 created_ns——旧页面
+    // 还挂在已被删除的 inode 上，新发布端写的是另一个文件。所以这条路径只能靠
+    // 复查路径身份 (dev,ino) 发现，不能靠 created_ns。
+    pub.update_heartbeat();  // 心跳还在有效窗口内，走的正是"心跳未超时"那一路
+    const std::uint64_t remaps_before = cam.client().remaps();
+    const std::uint64_t reconnects_before = cam.reconnects();
+
+    pub.destroy();
+    pub.unlink_files();
+
+    sim_io::testing::FakePublisher pub2(pub_opt);
+    std::string e2;
+    check(pub2.create(&e2), "正常退出后重建共享内存（新 inode）");
+    check(cam.client().paths_changed(), "paths_changed() 检出文件身份变化");
+    pub2.update_heartbeat();
+
+    // 路径身份复查是按 remap_check_ms 周期做的（默认 200ms），不是每次
+    // try_read 都查 —— stat() 在热路径上每帧跑一次是浪费。前面几个小节
+    // 加起来远不到一个周期，所以这里必须等满，否则拿到的是 Timeout。
+    // 等待量必须小于 heartbeat_timeout_ms(500)，否则会先走心跳超时那一路。
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    st = cam.try_read(img, ts);
+    check(
+      st == sim_io::ReadStatus::Reconnected, "正常退出重启后报 Reconnected",
+      sim_io::to_string(st));
+    check(cam.client().remaps() == remaps_before + 1, "remaps 计数 +1");
+    check(cam.reconnects() == reconnects_before + 1, "reconnects 计数 +1");
+    check(img.empty(), "重连的那一次不返回图像");
+    check(!cam.has_bundle(), "重连后旧帧束已作废");
+
+    // 重连必须重新挡住开火：入口把 Reconnected 映射进 FAULT_FRAME_FAULT，
+    // 并置 FAULT_REARM_PENDING 直到连续确认若干帧目标。
+    {
+      sim_io::SimGimbalConfig armed = gim_cfg;
+      armed.allow_fire = true;
+      sim_io::SimGimbal gr(cam.client(), armed);
+      gr.set_fault(sim_io::FAULT_FRAME_FAULT, st == sim_io::ReadStatus::Reconnected);
+      gr.set_fault(sim_io::FAULT_REARM_PENDING, true);
+      check(!gr.fire_allowed(), "重连后禁止开火 (frame_fault|rearm_pending)");
+      check(
+        sim_io::describe_faults(gr.faults()).find("rearm_pending") != std::string::npos,
+        "故障描述里能看到 rearm_pending");
+    }
+
+    // 新纪元的帧号从 1 重新开始，不能再被旧水位线判成倒退。
+    std::uint64_t nn = realtime_now_ns();
+    pub2.publish_pose_bundle(1, nn, quat);
+    pub2.publish_image(pattern.data.data(), 1, nn);
+    st = cam.try_read(img, ts);
+    check(st == sim_io::ReadStatus::Ok, "重连后新纪元第一帧可用");
+    check(!img.empty() && cam.last_frame_seq() == 1, "新纪元帧号 1 被接受而非判倒退");
+
+    // 场景 B：**SIGKILL 后重启**。文件没被 unlink（inode 不变），但新发布端
+    // 会写入新的 created_ns。这条路径由 consume_frame 的 created_ns 比对捕获，
+    // 与 paths_changed() 无关——两条路径都必须存在。
+    const std::uint64_t restarts_before = cam.client().publisher_restarts();
+    const std::uint64_t reconnects_b = cam.reconnects();
+    const std::uint64_t remaps_b = cam.client().remaps();
+
+    pub2.destroy();  // 相当于进程被 KILL：文件残留
+    sim_io::testing::FakePublisher pub3(pub_opt);
+    std::string e3;
+    check(pub3.create(&e3), "SIGKILL 后原地重建共享内存（inode 不变）");
+    check(!cam.client().paths_changed(), "inode 未变，paths_changed()=false");
+    pub3.update_heartbeat();
+
+    nn = realtime_now_ns();
+    pub3.publish_pose_bundle(1, nn, quat);
+    pub3.publish_image(pattern.data.data(), 1, nn);
+    st = cam.try_read(img, ts);
+    check(
+      st == sim_io::ReadStatus::Reconnected, "created_ns 变化报 Reconnected",
+      sim_io::to_string(st));
+    check(cam.client().publisher_restarts() == restarts_before + 1, "publisher_restarts +1");
+    check(cam.reconnects() == reconnects_b + 1, "reconnects 再 +1");
+    check(cam.client().remaps() == remaps_b, "SIGKILL 路径不需要重映射，remaps 不变");
+    check(!cam.has_bundle(), "换代后旧帧束已作废");
+
+    // 被换代丢弃的那一帧仍留在三缓冲里，下一次读取应当正常拿到它。
+    st = cam.try_read(img, ts);
+    check(st == sim_io::ReadStatus::Ok, "换代后紧接着的一帧可用");
+    check(cam.last_frame_seq() == 1, "换代后帧号从 1 重新计数且被接受");
+
+    // ---- 10. 真值 seqlock 与同标签匹配 --------------------------------------
+    std::printf("--- 真值 seqlock 与匹配 ---------------------------------------------\n");
+    {
+      // 红蓝三号步兵共用 armor label=3（场景里 INFANTRY_THREE_CONFIG 被两队复用）。
+      // targets[0] 故意放红方，这样"只按 label 取第一个命中"必然配错车。
+      sim_io::GroundTruthBatch b{};
+      b.frame_seq = 1;
+      b.timestamp_ns = nn;
+      b.target_count = 2;
+      b.targets[0].frame_seq = 1;
+      b.targets[0].team = sim_io::GT_TEAM_RED;
+      b.targets[0].armor_label = 3;
+      b.targets[0].position[0] = 1.0f;
+      b.targets[0].position[2] = 0.2f;
+      b.targets[0].armor_position[0] = 1.2f;
+      b.targets[0].armor_position[2] = 0.26f;
+      b.targets[0].armor_position_valid = 1;
+      b.targets[1].frame_seq = 1;
+      b.targets[1].team = sim_io::GT_TEAM_BLUE;
+      b.targets[1].armor_label = 3;
+      b.targets[1].position[0] = 3.0f;
+      b.targets[1].position[1] = 0.5f;
+      b.targets[1].position[2] = 0.2f;
+      b.targets[1].armor_position[0] = 2.8f;
+      b.targets[1].armor_position[1] = 0.5f;
+      b.targets[1].armor_position[2] = 0.26f;
+      b.targets[1].armor_position_valid = 1;
+      pub3.set_ground_truth(b);
+
+      const Eigen::Vector3d est(2.9, 0.45, 0.2);
+
+      sim_io::GroundTruthEvaluator ev_blue(cam.client(), sim_io::GT_TEAM_BLUE);
+      check(ev_blue.fetch(1), "seqlock 正常提交后真值可读");
+      check(ev_blue.target_count() == 2, "读到 2 个目标");
+      const auto err_blue = ev_blue.evaluate(auto_aim::three, est, 0.0, 0.0);
+      check(err_blue.valid, "蓝方评估命中");
+      check(err_blue.team == sim_io::GT_TEAM_BLUE, "队伍过滤生效：匹配蓝方而非红方");
+      check(!err_blue.matched_by_nearest, "按 (team,label) 命中，未退化成最近邻");
+      check(!err_blue.ambiguous, "同队仅一个 label=3，无歧义");
+      check(err_blue.has_armor_position, "板心真值随之带回");
+      check_near(err_blue.gt_armor_position.x(), 2.8, 1e-5, "板心真值 x 正确");
+      check_near(err_blue.gt_position.x(), 3.0, 1e-5, "整车中心真值 x 正确");
+
+      // 反向验证：指定红方时必须匹配红方，即使估计值离蓝方近得多。
+      // 这条能区分"真的按队伍过滤"和"恰好选了最近的一个"。
+      sim_io::GroundTruthEvaluator ev_red(cam.client(), sim_io::GT_TEAM_RED);
+      check(ev_red.fetch(1), "红方评估器读到同一批真值");
+      const auto err_red = ev_red.evaluate(auto_aim::three, est, 0.0, 0.0);
+      check(err_red.valid && err_red.team == sim_io::GT_TEAM_RED, "指定红方时匹配红方");
+      check_near(err_red.gt_position.x(), 1.0, 1e-5, "红方真值位置正确（未被蓝方抢走）");
+
+      // 同队同标签两辆车：允许取最近的一个继续出数，但必须上报歧义。
+      sim_io::GroundTruthBatch dup = b;
+      dup.frame_seq = 2;
+      dup.targets[0].frame_seq = 2;
+      dup.targets[0].team = sim_io::GT_TEAM_BLUE;
+      dup.targets[1].frame_seq = 2;
+      pub3.set_ground_truth(dup);
+      sim_io::GroundTruthEvaluator ev_dup(cam.client(), sim_io::GT_TEAM_BLUE);
+      check(ev_dup.fetch(2), "重复标签批次可读");
+      const auto err_dup = ev_dup.evaluate(auto_aim::three, est, 0.0, 0.0);
+      check(err_dup.valid, "重复标签仍给出结果");
+      check(err_dup.ambiguous, "同队重复 label 上报 ambiguous");
+      check(ev_dup.ambiguous_matches() == 1, "ambiguous_matches 计数 +1");
+      check_near(err_dup.gt_position.x(), 3.0, 1e-5, "歧义时取距估计值最近的那辆");
+
+      // 帧号不一致必须拒绝：不能拿别的帧的真值评估这一帧的估计。
+      check(!ev_dup.fetch(999), "帧号不匹配的真值被拒");
+      check(ev_dup.seq_mismatches() >= 1, "seq_mismatches 计数增加");
+
+      // 撕裂注入。这是评审第 4 条的核心：原来消费端靠"memcpy 前后 frame_seq
+      // 相等"近似判断整块稳定，而同一帧号内重发时 frame_seq 根本不变、body 却在
+      // 被改写，那种判据会把撕裂当成完好数据。现在区域停在"正在写"（seqlock 为
+      // 奇数），读端必须拒绝，而不是返回半份。
+      sim_io::GroundTruthBatch torn = b;
+      torn.frame_seq = 3;
+      torn.targets[0].frame_seq = 3;
+      torn.targets[1].frame_seq = 3;
+      torn.targets[1].position[0] = 9.0f;  // 与 b 同帧号语义不同的 body 内容
+      pub3.begin_torn_ground_truth(torn);
+      sim_io::GroundTruthBatch out{};
+      check(!cam.client().read_ground_truth(&out), "seqlock 为奇数时拒绝读取");
+      sim_io::GroundTruthEvaluator ev_torn(cam.client(), sim_io::GT_TEAM_BLUE);
+      check(!ev_torn.fetch(3), "撕裂期间 fetch 失败而不是返回半份数据");
+
+      // 收尾提交后恢复可读，且读回的是完整的新内容。
+      pub3.set_ground_truth(torn);
+      check(cam.client().read_ground_truth(&out), "收尾提交后恢复可读");
+      check(out.frame_seq == 3, "读回第 3 帧真值");
+      check_near(out.targets[1].position[0], 9.0, 1e-5, "读回的是撕裂后完整提交的新内容");
+
+      // 板心缺失时必须显式告知，评估端据此不混口径（不拿整车中心充数）。
+      sim_io::GroundTruthBatch noarmor = b;
+      noarmor.frame_seq = 4;
+      noarmor.targets[0].frame_seq = 4;
+      noarmor.targets[1].frame_seq = 4;
+      noarmor.targets[1].armor_position_valid = 0;
+      pub3.set_ground_truth(noarmor);
+      sim_io::GroundTruthEvaluator ev_na(cam.client(), sim_io::GT_TEAM_BLUE);
+      check(ev_na.fetch(4), "无板心批次可读");
+      const auto err_na = ev_na.evaluate(auto_aim::three, est, 0.0, 0.0);
+      check(err_na.valid, "无板心时整车中心评估仍可用");
+      check(!err_na.has_armor_position, "armor_position_valid=0 时不带回板心");
+
+      // GT_TEAM_ANY 只允许诊断用：它会把自家车也纳入匹配，这里显式验证这一点，
+      // 以免有人以为 any 是"更宽松但无害"。
+      sim_io::GroundTruthEvaluator ev_any(cam.client(), sim_io::GT_TEAM_ANY);
+      check(ev_any.fetch(4), "any 评估器可读");
+      const auto err_any = ev_any.evaluate(auto_aim::three, est, 0.0, 0.0);
+      check(err_any.valid && err_any.ambiguous, "GT_TEAM_ANY 下红蓝同号互相污染，报歧义");
+    }
+
+    pub3.destroy();
+    pub3.unlink_files();
   }
 
   std::printf("\n检查项 %d，失败 %d\n", g_checks, g_failures);

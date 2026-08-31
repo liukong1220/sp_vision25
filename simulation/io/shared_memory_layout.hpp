@@ -163,7 +163,13 @@ struct alignas(32) GroundTruthTarget
   float position[3];
   float vyaw;
   float yaw;
-  std::uint8_t pad_[24];
+  // 被选中装甲板板心在 odom 系下的真值位置。整车中心（position）不是算法瞄的点：
+  // 装甲板偏心半径 r 约 0.2m、板心比车心高约 0.06m，在 1.5m 距离上就是 2 度量级，
+  // 拿整车中心算瞄准误差会把这段几何差当成闭环残差。发布端置 valid=0 时该字段
+  // 无意义。占用原 pad_[24] 的前 16 字节，结构体大小和其余偏移不变。
+  float armor_position[3];
+  std::uint8_t armor_position_valid;
+  std::uint8_t pad_[11];
 };
 
 struct alignas(64) GroundTruthRune
@@ -197,7 +203,13 @@ struct alignas(64) GroundTruthBatch
   std::uint32_t rune_count;
   GroundTruthTarget targets[GROUND_TRUTH_MAX_TARGETS];
   GroundTruthRune runes[GROUND_TRUTH_MAX_RUNES];
-  std::uint8_t pad_[64];
+  // seqlock 序号。发布端写前置奇、写完置偶；读端读到奇数或前后不一致就重试。
+  // 原来靠 "memcpy 前后读 frame_seq 相等" 近似判断整块稳定，这不是同步保证：
+  // 覆盖写可能只改了 targets 的中段而 frame_seq 恰好没动（同一帧内重发），
+  // 也可能 frame_seq 先写、body 后写，读端于是拿到半新半旧的一批目标。
+  // 占用原 pad_[64] 的前 4 字节，结构体大小和其余偏移不变。
+  std::uint32_t seqlock;
+  std::uint8_t pad_[60];
 };
 
 struct alignas(64) RuntimeState
@@ -304,6 +316,8 @@ SIM_IO_ASSERT_OFFSET(GroundTruthTarget, is_outpost, 18);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, position, 20);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, vyaw, 32);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, yaw, 36);
+SIM_IO_ASSERT_OFFSET(GroundTruthTarget, armor_position, 40);
+SIM_IO_ASSERT_OFFSET(GroundTruthTarget, armor_position_valid, 52);
 
 SIM_IO_ASSERT_LAYOUT(GroundTruthRune, 128, 64);
 SIM_IO_ASSERT_OFFSET(GroundTruthRune, r_center_odom, 20);
@@ -321,6 +335,7 @@ SIM_IO_ASSERT_OFFSET(GroundTruthBatch, target_count, 16);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, rune_count, 20);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, targets, 32);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, runes, 1088);
+SIM_IO_ASSERT_OFFSET(GroundTruthBatch, seqlock, 1600);
 
 SIM_IO_ASSERT_LAYOUT(RuntimeState, 64, 64);
 SIM_IO_ASSERT_OFFSET(RuntimeState, following, 8);

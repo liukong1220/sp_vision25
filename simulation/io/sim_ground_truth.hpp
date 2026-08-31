@@ -22,10 +22,16 @@ namespace sim_io
 auto_aim::ArmorName armor_label_to_name(std::uint8_t label);
 std::uint8_t armor_name_to_label(auto_aim::ArmorName name);
 
+// 真值里的队伍编码，与仿真端 team_to_u8 一致（Red=0, Blue=1）。
+constexpr std::uint8_t GT_TEAM_RED = 0;
+constexpr std::uint8_t GT_TEAM_BLUE = 1;
+constexpr std::uint8_t GT_TEAM_ANY = 255;  // 不过滤（仅诊断用，正式评估必须指定）
+
 struct GtError
 {
   bool valid = false;
   std::uint8_t armor_label = 0;
+  std::uint8_t team = GT_TEAM_ANY;
   auto_aim::ArmorName name = auto_aim::not_armor;
   double pos_err_m = 0.0;
   double xy_err_m = 0.0;
@@ -34,6 +40,18 @@ struct GtError
   double vyaw_err_radps = 0.0;
   Eigen::Vector3d gt_position{Eigen::Vector3d::Zero()};
   Eigen::Vector3d est_position{Eigen::Vector3d::Zero()};
+
+  // 被选中装甲板板心真值（若发布端提供）。整车中心与板心不是同一个点，
+  // 瞄准误差必须用板心；估计误差（pos_err_m）仍以整车中心为基准，因为
+  // Tracker 的 EKF 状态 (CX,CY,CZ) 估的就是车心。
+  bool has_armor_position = false;
+  Eigen::Vector3d gt_armor_position{Eigen::Vector3d::Zero()};
+
+  // 匹配是否发生了歧义：同一批真值里有多个目标同时满足 (team, label)。
+  // 仿真场景里红蓝三号步兵共用 label=3，只按 label 取第一个命中会随机配错车。
+  bool ambiguous = false;
+  // 退化为最近邻匹配（label 没匹配上）。
+  bool matched_by_nearest = false;
 };
 
 struct GtErrorStats
@@ -53,7 +71,17 @@ struct GtErrorStats
 class GroundTruthEvaluator
 {
 public:
-  explicit GroundTruthEvaluator(SharedMemoryClient & client) : client_(client) {}
+  // enemy_team 必须显式给出：真值里红蓝双方的三号步兵都是 label=3（仿真场景
+  // setup.rs 里 Infantry::new(Team::Red, INFANTRY_THREE_CONFIG) 与
+  // Infantry::new(Team::Blue, INFANTRY_THREE_CONFIG) 共用同一个 armor 配置），
+  // 只按 label 匹配会把自家车当成评估对象。GT_TEAM_ANY 仅供诊断。
+  GroundTruthEvaluator(SharedMemoryClient & client, std::uint8_t enemy_team)
+  : client_(client), enemy_team_(enemy_team)
+  {
+  }
+
+  std::uint8_t enemy_team() const { return enemy_team_; }
+  std::uint64_t ambiguous_matches() const { return ambiguous_matches_; }
 
   // 拉取当前真值批次。仅当真值 frame_seq 与图像 frame_seq 一致时才认为可用，
   // 避免拿上一帧真值评估这一帧估计。
@@ -68,6 +96,16 @@ public:
   std::uint64_t frame_seq() const { return batch_.frame_seq; }
   std::uint32_t target_count() const { return fetched_ ? batch_.target_count : 0; }
   std::uint64_t seq_mismatches() const { return seq_mismatches_; }
+  // 真值帧号减图像帧号的统计，仅在不匹配的样本上累计（见 fetch()）。
+  std::uint64_t seq_skew_samples() const { return seq_skew_samples_; }
+  double seq_skew_mean() const
+  {
+    return seq_skew_samples_ == 0
+             ? 0.0
+             : static_cast<double>(seq_skew_sum_) / static_cast<double>(seq_skew_samples_);
+  }
+  std::int64_t seq_skew_min() const { return seq_skew_min_; }
+  std::int64_t seq_skew_max() const { return seq_skew_max_; }
 
   // 按装甲板标签匹配；标签匹配不到时退化为最近邻匹配（gate_m 以内）。
   // estimate_in_odom 必须已经加上 odom 平移，即与真值同一坐标系。
@@ -84,6 +122,12 @@ private:
   GroundTruthBatch batch_{};
   bool fetched_ = false;
   std::uint64_t seq_mismatches_ = 0;
+  std::uint64_t seq_skew_samples_ = 0;
+  std::int64_t seq_skew_sum_ = 0;
+  std::int64_t seq_skew_min_ = 0;
+  std::int64_t seq_skew_max_ = 0;
+  std::uint8_t enemy_team_ = GT_TEAM_ANY;
+  std::uint64_t ambiguous_matches_ = 0;
 
   std::vector<double> pos_err_;
   std::vector<double> xy_err_;
@@ -91,9 +135,17 @@ private:
   std::vector<double> yaw_err_;
   std::vector<double> vyaw_err_;
 
-  std::optional<GroundTruthTarget> find_by_label(std::uint8_t label) const;
+  // 按 (enemy_team, label) 匹配。命中多于一个时置 *ambiguous 并返回距
+  // reference 最近的那个——但调用方必须把 ambiguous 记进报告，因为这说明
+  // 场景配置或真值内容不足以唯一确定评估对象。
+  std::optional<GroundTruthTarget> find_by_label(
+    std::uint8_t label, const Eigen::Vector3d & reference, bool * ambiguous) const;
   std::optional<GroundTruthTarget> find_nearest(
     const Eigen::Vector3d & position, double gate_m) const;
+  bool team_matches(std::uint8_t team) const
+  {
+    return enemy_team_ == GT_TEAM_ANY || team == enemy_team_;
+  }
 };
 
 }  // namespace sim_io

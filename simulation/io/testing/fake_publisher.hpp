@@ -123,7 +123,38 @@ public:
   {
     meta_->chassis_observation = obs;
   }
-  void set_ground_truth(const GroundTruthBatch & batch) { meta_->ground_truth = batch; }
+  // 与 Rust 侧 TalosPublisher::publish_ground_truth 相同的 seqlock 提交序：
+  // 写前置奇、写后置偶，两端各一道 release 栅栏。消费端读到奇数或前后不等就重试。
+  void set_ground_truth(const GroundTruthBatch & batch)
+  {
+    auto * seq = reinterpret_cast<volatile std::uint32_t *>(&meta_->ground_truth.seqlock);
+    const std::uint32_t begin = (gt_seq_ + 1) | 1u;
+    __atomic_store_n(seq, begin, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    GroundTruthBatch staged = batch;
+    staged.seqlock = begin;
+    std::memcpy(&meta_->ground_truth, &staged, sizeof(GroundTruthBatch));
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    gt_seq_ = begin + 1;
+    __atomic_store_n(seq, gt_seq_, __ATOMIC_RELEASE);
+  }
+
+  // 故意把真值区停在"写一半"的状态：置奇序号并写入 batch，但**不**收尾置偶。
+  // 用来验证消费端的 seqlock 真的会拒绝撕裂数据，而不是靠"memcpy 前后 frame_seq
+  // 相等"这种近似判断——同一帧号内重发时 frame_seq 不变、body 却在改，那种判据
+  // 会把撕裂当成完好。调用之后必须再调一次 set_ground_truth 才能恢复可读。
+  void begin_torn_ground_truth(const GroundTruthBatch & batch)
+  {
+    auto * seq = reinterpret_cast<volatile std::uint32_t *>(&meta_->ground_truth.seqlock);
+    const std::uint32_t begin = (gt_seq_ + 1) | 1u;
+    __atomic_store_n(seq, begin, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    GroundTruthBatch staged = batch;
+    staged.seqlock = begin;
+    std::memcpy(&meta_->ground_truth, &staged, sizeof(GroundTruthBatch));
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    gt_seq_ = begin;  // 停在奇数：区域标记为"正在写"
+  }
 
   void publish_pose(
     PoseIndex index, const float position[3], const float quaternion[4], std::uint64_t frame_seq,
@@ -233,6 +264,7 @@ private:
   std::uint8_t * pool_ = nullptr;
   std::uint8_t current_buffer_id_ = 0;
   std::uint64_t last_sync_seq_ = 0;
+  std::uint32_t gt_seq_ = 0;
   bool has_last_sync_seq_ = false;
 
   static bool make_region(

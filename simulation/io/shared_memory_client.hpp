@@ -30,6 +30,8 @@ enum class ConsumeStatus
   SeqRegressed,     // 帧号未前进（重复或倒退），通常意味着仿真端重启
   ImageInvalid,     // 分辨率/格式/buffer_id 超出协议约定
   Corrupted,        // 三缓冲索引越界，共享内存已不可信
+  EpochChanged,     // header.created_ns 变化：发布端换代，本帧必须丢弃并复位上层状态
+  Remapped,         // 共享内存文件 inode 变化并已重新 mmap，本帧必须丢弃
 };
 
 const char * to_string(ConsumeStatus status);
@@ -82,6 +84,19 @@ public:
   void close();
   bool connected() const { return meta_ != nullptr; }
 
+  // 发布端**正常退出**会 unlink 掉 /tmp 下的两个文件（ShmRegion::Drop ->
+  // remove_file），重新拉起时 create() 用 O_TRUNC 建的是**新 inode**。此时本进程
+  // 手里的旧映射既看不到新帧，也看不到新的 created_ns——created_ns 换代检测只能
+  // 覆盖 SIGKILL（同 inode 被复用）那一路。
+  //
+  // 所以这里记下 open() 时的 (st_dev, st_ino)，由 consume_frame() 在长时间没有
+  // 新帧时比对；真变了就 remap()：重新 mmap 并清空帧号水位线与换代基准，让下一帧
+  // 走全新的 Remapped/EpochChanged 路径。
+  bool paths_changed() const;
+  // 重新映射。成功时返回 true 并把 remaps() 加一；失败时保持未连接。
+  bool remap(std::string * error);
+  std::uint64_t remaps() const { return remaps_; }
+
   // 整帧消费。返回 NoFrame 时 bundle 不被修改。
   ConsumeStatus consume_frame(FrameBundle * bundle);
 
@@ -112,6 +127,8 @@ public:
   std::uint64_t last_seq() const { return last_seq_; }
 
 private:
+  bool stat_ids(const std::string & path, std::uint64_t * dev, std::uint64_t * ino) const;
+
   ShmMetaRegion * meta_ = nullptr;
   std::uint8_t * image_pool_ = nullptr;
   std::size_t meta_bytes_ = 0;
@@ -127,6 +144,12 @@ private:
   bool has_last_seq_ = false;
   std::uint64_t publisher_created_ns_ = 0;
   std::uint64_t publisher_restarts_ = 0;
+  std::uint64_t remaps_ = 0;
+  // open()/remap() 时记录的文件身份，用于发现"文件被删掉又重建"。
+  std::uint64_t meta_dev_ = 0;
+  std::uint64_t meta_ino_ = 0;
+  std::uint64_t pool_dev_ = 0;
+  std::uint64_t pool_ino_ = 0;
 
   // 无论图像是否合法都要排空 pose 通道，否则仿真端背压会锁死。
   ConsumeStatus drain_poses(FrameBundle * bundle, std::uint64_t image_seq);

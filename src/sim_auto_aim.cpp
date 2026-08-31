@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -55,7 +56,63 @@ const std::string keys =
   "{max-frame-age-ms | -1                   | 覆盖配置里的帧龄上限，<0 表示用配置值}"
   "{bias-yaw-deg   | 0.0                   | probe 模式的 yaw 固定偏置(度)，用来把云台指向某个方向}"
   "{bias-pitch-deg | 0.0                   | probe 模式的 pitch 固定偏置(度)，正=低头(ROS 约定)}"
-  "{dump-detect    | 0                     | 打印前 N 帧的检测/跟踪明细(排查为什么检到了却跟不上)}";
+  "{dump-detect    | 0                     | 打印前 N 帧的检测/跟踪明细(排查为什么检到了却跟不上)}"
+  "{enemy-team     |                       | 覆盖真值评估的敌方队伍: red / blue / any}"
+  // 这两个必须是**字符串**键。OpenCV 的 CommandLineParser 解析不了 "nan" 这个
+  // 默认值：get<double>() 会静默返回 0.0（实测），而 has() 对有默认值的键恒为
+  // true，两条路都拿不到"用户没给"这个信息。于是 isfinite(0.0)=true，驻留被当成
+  // 已开启并把云台摆到 yaw=0——而目标在 yaw≈+90，表现是 detected_frames 从 447
+  // 掉到 4，看着像感知坏了。空字符串默认值是这个 parser 唯一可靠的"未给定"标记
+  // （report / dump-frame 也是这么用的）。
+  "{park-yaw-deg   |                       | closed_loop 丢目标时把云台驻留到该 yaw(度)，缺省不驻留}"
+  "{park-pitch-deg |                       | closed_loop 丢目标时的驻留 pitch(度)，正=低头(ROS 约定)}";
+
+// 解析驻留角。空 = 未给定；解析失败或非有限值也算未给定（由调用方报错）。
+bool parse_park_angle(const std::string & text, double * out)
+{
+  if (text.empty()) return false;
+  try {
+    std::size_t used = 0;
+    const double v = std::stod(text, &used);
+    if (used != text.size() || !std::isfinite(v)) return false;
+    *out = v;
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// 真值评估的敌方队伍必须显式确定：仿真场景里红蓝三号步兵共用 armor label=3，
+// 只按 label 匹配会把自家车当评估对象（见 GroundTruthEvaluator 的说明）。
+// "any" 只允许用于诊断，正式评估必须指定一方。
+bool parse_enemy_team(const std::string & text, std::uint8_t * out)
+{
+  if (text == "red") {
+    *out = sim_io::GT_TEAM_RED;
+    return true;
+  }
+  if (text == "blue") {
+    *out = sim_io::GT_TEAM_BLUE;
+    return true;
+  }
+  if (text == "any") {
+    *out = sim_io::GT_TEAM_ANY;
+    return true;
+  }
+  return false;
+}
+
+const char * enemy_team_name(std::uint8_t team)
+{
+  switch (team) {
+    case sim_io::GT_TEAM_RED:
+      return "red";
+    case sim_io::GT_TEAM_BLUE:
+      return "blue";
+    default:
+      return "any";
+  }
+}
 
 double percentile(std::vector<double> v, double q)
 {
@@ -84,6 +141,23 @@ int main(int argc, char * argv[])
   const double period_s = cli.get<double>("period-s");
   const double bias_yaw_deg = cli.get<double>("bias-yaw-deg");
   const double bias_pitch_deg = cli.get<double>("bias-pitch-deg");
+  // 丢目标时的驻留指向。closed_loop 在 lost 状态下只发安全停止（不控制），
+  // 云台会一直停在场景初始位姿；本机场景的初始位姿是 pitch≈+65°（低头看自己
+  // 底盘），而两台敌方步兵在 yaw≈+90°，所以闭环根本无法自举——不是感知问题，
+  // 而是"视野里从来没出现过目标"。真机上这一段由操作手或上层决策负责，仿真里
+  // 没有那一层，于是提供一个显式的驻留指向。缺省 NaN=不驻留，保持原行为不变。
+  // 两个都给且都能解析成有限数才算开启；只给一个视为用法错误，直接退出而不是
+  // 悄悄按半个指向驻留。
+  double park_yaw_deg = 0.0;
+  double park_pitch_deg = 0.0;
+  const bool park_enabled =
+    parse_park_angle(cli.get<std::string>("park-yaw-deg"), &park_yaw_deg) &&
+    parse_park_angle(cli.get<std::string>("park-pitch-deg"), &park_pitch_deg);
+  if (!park_enabled && (!cli.get<std::string>("park-yaw-deg").empty() ||
+                        !cli.get<std::string>("park-pitch-deg").empty())) {
+    tools::logger()->error("[sim] --park-yaw-deg 与 --park-pitch-deg 必须同时给出有限角度");
+    return 2;
+  }
   const int dump_detect = cli.get<int>("dump-detect");
   const double duration_s = cli.get<double>("duration-s");
   const bool allow_fire = cli.has("allow-fire");
@@ -91,6 +165,7 @@ int main(int argc, char * argv[])
   const auto report_path = cli.get<std::string>("report");
   const auto dump_frame_path = cli.get<std::string>("dump-frame");
   const bool dump_truth = cli.has("dump-truth");
+  const auto enemy_team_cli = cli.get<std::string>("enemy-team");
 
   if (mode != "passive" && mode != "probe" && mode != "closed_loop") {
     tools::logger()->error("[sim] 未知 mode: {}", mode);
@@ -117,6 +192,12 @@ int main(int argc, char * argv[])
   }
   cam_cfg.heartbeat_timeout_ms = tools::read_or<double>(sim, "heartbeat_timeout_ms", 500.0);
   cam_cfg.read_timeout_ms = tools::read_or<double>(sim, "read_timeout_ms", 1000.0);
+  // 断流判据与"重连探测"周期。open() 会把这两个值夹进 max_frame_age_ms /
+  // read_timeout_ms 的可行区间，保证"无新帧"看门狗的实际触发时刻落在阈值之内，
+  // 而不是被 read_timeout 拖到几百毫秒之后才报出来（见 SimCamera::open）。
+  cam_cfg.no_new_frame_timeout_ms =
+    tools::read_or<double>(sim, "no_new_frame_timeout_ms", cam_cfg.no_new_frame_timeout_ms);
+  cam_cfg.remap_check_ms = tools::read_or<double>(sim, "remap_check_ms", cam_cfg.remap_check_ms);
   // 共享内存位置可覆盖：便于对着 FakePublisher 或第二个仿真实例跑，不影响默认路径。
   cam_cfg.shm.dir = tools::read_or<std::string>(sim, "shm_dir", cam_cfg.shm.dir);
 
@@ -124,10 +205,12 @@ int main(int argc, char * argv[])
   gim_cfg.yaw_scale = tools::read_or<double>(sim, "yaw_scale", 1.0);
   gim_cfg.yaw_offset_deg = tools::read_or<double>(sim, "yaw_offset_deg", 0.0);
   gim_cfg.pitch_scale = tools::read_or<double>(sim, "pitch_scale", 1.0);
-  gim_cfg.pitch_offset_deg = tools::read_or<double>(sim, "pitch_offset_deg", -90.0);
-  // 剥掉仿真端反馈里多乘的 90° 滚转。改动这个值等于改坐标系，正常不该动。
+  // 回退默认值必须与 SimGimbalConfig 一致：cmd 的角就是 ROS 的角（identity）。
+  // 这里曾经是 -90，配置漏键时会把水平瞄准编码成"垂直朝天"。
+  gim_cfg.pitch_offset_deg = tools::read_or<double>(sim, "pitch_offset_deg", 0.0);
+  // 仿真端发布的 q_raw 已经是 world<-gimbal，不需要修正。改这个值等于改坐标系。
   gim_cfg.feedback_pitch_fix_deg =
-    tools::read_or<double>(sim, "feedback_pitch_fix_deg", 90.0);
+    tools::read_or<double>(sim, "feedback_pitch_fix_deg", 0.0);
   gim_cfg.state_timeout_ms = tools::read_or<double>(sim, "state_timeout_ms", 200.0);
   gim_cfg.safe_stop_period_ms = tools::read_or<double>(sim, "safe_stop_period_ms", 20.0);
   gim_cfg.bullet_speed = tools::read_or<double>(yaml, "bullet_speed_fallback", 25.0);
@@ -135,6 +218,11 @@ int main(int argc, char * argv[])
   gim_cfg.allow_fire = allow_fire && mode == "closed_loop";
 
   const double target_lost_ms = tools::read_or<double>(sim, "target_lost_ms", 300.0);
+  // 重新武装门限：换代/重连/时钟跳变之后，必须连续这么多帧稳定跟上目标才解除
+  // FAULT_REARM_PENDING。1 帧不够——重连后的第一帧只证明"取到了一帧完整同步数据"，
+  // 不证明 Tracker 在新纪元里已经建立起可信的目标状态。
+  const int rearm_confirm_frames =
+    std::max(1, tools::read_or<int>(sim, "rearm_confirm_frames", 5));
   // 合成图像上 YOLO 的颜色分类头不可靠（见 tracker.cpp 里的说明与实测），
   // 而 Tracker 会按 enemy_color 直接清空整帧检测结果。仿真默认关掉这道颜色门，
   // 只保留编号/几何校验；实车入口不受影响（Tracker::track 的默认值仍是 true）。
@@ -186,9 +274,41 @@ int main(int argc, char * argv[])
     tools::logger()->warn("[sim] 共享内存没有 CameraInfo，跳过内参自检");
   }
 
+  // 真值评估的敌方队伍。优先级：命令行 > sim.enemy_team > 默认 blue。
+  //
+  // 为什么默认是 blue 而不是顶层的 enemy_color：场景 setup 里被 Controlled 标记的
+  // 本车是红方，两台敌方步兵都是蓝方，而 configs/simulation.yaml 顶层
+  // enemy_color: "red" 是给实车 Tracker 的颜色门用的，仿真里已经被
+  // sim.use_enemy_color=false 关掉了。两者含义不同，不能互相顶替；下面会在它们
+  // 不一致时打一条 warn，避免以后有人以为改顶层就能改评估对象。
+  std::uint8_t enemy_team = sim_io::GT_TEAM_BLUE;
+  {
+    const auto from_yaml = tools::read_or<std::string>(sim, "enemy_team", "blue");
+    if (!parse_enemy_team(from_yaml, &enemy_team)) {
+      tools::logger()->error("[sim] sim.enemy_team 取值非法: {}（应为 red/blue/any）", from_yaml);
+      return 2;
+    }
+    if (!enemy_team_cli.empty() && !parse_enemy_team(enemy_team_cli, &enemy_team)) {
+      tools::logger()->error("[sim] --enemy-team 取值非法: {}（应为 red/blue/any）", enemy_team_cli);
+      return 2;
+    }
+    const auto top_color = tools::read_or<std::string>(yaml, "enemy_color", std::string());
+    if (!top_color.empty() && top_color != enemy_team_name(enemy_team)) {
+      tools::logger()->warn(
+        "[sim] 真值评估敌方队伍={}，与顶层 enemy_color={} 不一致。顶层键只作用于实车 "
+        "Tracker 的颜色门（仿真已 use_enemy_color=false 关闭），评估对象只看 sim.enemy_team",
+        enemy_team_name(enemy_team), top_color);
+    }
+    if (do_eval && enemy_team == sim_io::GT_TEAM_ANY) {
+      tools::logger()->warn(
+        "[sim] enemy_team=any：红蓝同编号步兵会互相污染匹配，本次评估数据只能当诊断看");
+    }
+    tools::logger()->info("[sim] 真值评估敌方队伍 = {}", enemy_team_name(enemy_team));
+  }
+
   auto_aim::Solver solver(config_path);
   sim_io::SimGimbal gimbal(camera.client(), gim_cfg);
-  sim_io::GroundTruthEvaluator evaluator(camera.client());
+  sim_io::GroundTruthEvaluator evaluator(camera.client(), enemy_team);
 
   // 感知链只在需要时才构造：probe 模式不加载 OpenVINO 模型，启动快且不依赖 assets。
   std::unique_ptr<auto_aim::YOLO> yolo;
@@ -200,9 +320,24 @@ int main(int argc, char * argv[])
     planner = std::make_unique<auto_aim::Planner>(config_path);
   }
 
+  // 重连/换代之后必须把估计状态全部丢掉重建。
+  //
+  // Tracker 和 Planner 都没有 reset() 接口，唯一干净的复位办法就是销毁重建：
+  //   * Tracker 内部持有 EKF、装甲板关联历史和 lost/detecting 状态机，跨纪元
+  //     沿用会把断流前后的位置当成同一条轨迹，差分出巨大的假速度；
+  //   * Planner(TinyMPC) 持有参考轨迹与热启动解，同样会把旧解带进新纪元。
+  // YOLO 是无状态推理，模型重载要几秒，不重建。
+  auto rebuild_estimators = [&](const char * why) {
+    if (mode == "probe") return;
+    tracker = std::make_unique<auto_aim::Tracker>(config_path, solver);
+    planner = std::make_unique<auto_aim::Planner>(config_path);
+    tools::logger()->warn("[sim] {}：已重建 Tracker/Planner，重新武装前禁止控制与开火", why);
+  };
+
   // ---- 运行期统计 -------------------------------------------------------------
   std::vector<double> detect_ms, pipeline_ms;
   std::uint64_t frames = 0, detected_frames = 0, tracked_frames = 0;
+  std::uint64_t park_frames = 0;
   std::uint64_t control_cmds = 0, fire_cmds = 0;
   // 闭环几何瞄准误差：下发角所指方向 与 云台->真值目标方向 的夹角。
   //
@@ -211,12 +346,40 @@ int main(int argc, char * argv[])
   // 靠"打中几发"没法评价闭环。角度误差不依赖碰撞检测，能直接回答
   // "云台到底指对了没有"。
   //
-  // 注意这里的系统偏差是有物理来源的、不该被当成算法误差：
-  //   * 真值是**整车中心**，算法瞄的是被选中的**装甲板**（偏心半径 r≈0.2m，
-  //     实测板心 z 比车心 z 高约 0.06m），1.5m 距离上就是 2 度量级；
-  //   * planner 会做弹道抬枪补偿（25m/s、1.5m 时约 0.7 度）。
-  // 所以真正说明闭环质量的是**离散度**（p50 与 p95/max 的差），系统偏移量另算。
+  // 原点必须是**枪口世界位置**（odom_position + muzzle_offset），不是云台原点：
+  // 枪口相对云台有约 0.1m 量级的前伸/抬高，1.5m 距离上就是度量级的固定偏差。
+  //
+  // 各分量分开量，不做任何反推。此前那份"2.18°(板心-车心) + 0.68°(弹道) = 2.86°"
+  // 的分解是拿几何估算去解释观测值，不是测量：板心偏移是按静态几何算的、弹道量是
+  // 按标称弹速算的，都没有用运行时的真实取值核对过，所以也不能据此声称
+  // "真正的闭环残差在 0.5° 以内"。现在改成：
+  //   * 板心真值由仿真端直接发布（GroundTruthTarget::armor_position），
+  //     瞄准误差直接对着它算，几何差不再进残差；
+  //   * 弹道抬枪量直接取 planner 自己的 debug 量，不用弹速反算；
+  //   * 保留对整车中心的旧口径（center_*），只为和历史数据对比。
+  //
+  // 各分量都要分开量，混在一起的"闭环残差"没有意义：
+  //   aim_*        下发方向 vs 云台->板心真值方向（枪口为原点）
+  //   center_*     下发方向 vs 云台->整车中心真值方向（保留旧口径，便于对比）
+  //   geom_*       算法自己选的瞄准点 vs 板心真值（纯几何/估计误差，不含弹道）
+  //   ballistic_*  planner 的弹道抬枪量（直接取 planner 的 debug 量，不是反推）
   std::vector<double> aim_err_deg, aim_yaw_err_deg, aim_pitch_err_deg;
+  std::vector<double> center_err_deg;
+  std::vector<double> geom_err_deg;
+  std::vector<double> ballistic_pitch_deg;
+  //   parallax_*   云台原点->板心 与 枪口->板心 的夹角
+  //
+  // 为什么要单独量这一项：算法侧的目标坐标是相对**云台原点**的（PnP 出来的相机
+  // 系坐标经 R/t_camera2gimbal 变换过去），tools::Trajectory 也就把弹丸当成从云台
+  // 原点出膛来解；但仿真端真正 spawn 弹丸的位置是枪口（projectile.rs 用
+  // launch_offset.translation），实测枪口相对云台原点 +0.110m（ROS z，见
+  // PoseIndex::Muzzle）。两个原点差 0.11m，在近距离上就是可观的角度差。
+  // 这是真机上同样存在的建模简化（真机靠 pitch_offset 标定吸收），不是本次接入
+  // 引入的缺陷；但本场景目标只有 1.5~2.5m，视差比重力补偿还大，不单独列出来会
+  // 让人把它误当成感知误差。
+  std::vector<double> muzzle_parallax_deg;
+  std::uint64_t aim_no_armor_gt = 0;
+  std::uint64_t pose_invalid_frames = 0;
   std::uint64_t extrinsic_warnings = 0;
   double max_extrinsic_err = 0.0;
   bool extrinsic_checked = false;
@@ -225,6 +388,23 @@ int main(int argc, char * argv[])
   const auto t_t0 = std::chrono::steady_clock::now();
   auto last_target_seen = t_t0;
   bool ever_seen_target = false;
+
+  // 重新武装状态机。启动本身也算一次"待武装"：还没有任何一帧完整同步数据时
+  // 就不该允许开火，这与 FAULT_STARTUP 的语义一致，这里只是把"必须连续确认
+  // 目标"这一条补上。
+  // 仿真端是否真的在消费我们的云台命令。
+  //
+  // 仿真端只在 auto-aim 订阅打开时才 apply gimbal_cmd（交互按 F5/RT，或
+  // DAEDALUS_FORCE_AUTO_AIM=1），并把这个状态写进 RuntimeState::following。
+  // 订阅没开时闭环在视觉侧完全看不出异常：命令照发、统计照涨，云台不动。
+  // 所以 closed_loop 必须主动核对这一位，并在报告里留痕。
+  bool following_seen = false;
+  bool following_warned = false;
+  std::uint64_t not_following_frames = 0;
+
+  bool rearm_pending = true;
+  int rearm_confirmed = 0;
+  std::uint64_t rearm_events = 0;
 
   const auto t_camera2gimbal = tools::read<std::vector<double>>(yaml, "t_camera2gimbal");
 
@@ -246,11 +426,33 @@ int main(int argc, char * argv[])
 
     // 心跳/取流故障统一映射到 fault 位，fault 非空即禁止开火。
     gimbal.set_fault(sim_io::FAULT_HEARTBEAT_LOST, !camera.heartbeat_alive());
-    gimbal.set_fault(sim_io::FAULT_NO_NEW_FRAME, st == sim_io::ReadStatus::Timeout);
+    // 断流看门狗按"距上一帧到达多久"判定，而不是按 read_blocking 是否超时返回。
+    // 后者的触发时刻受 read_timeout_ms 支配，会比 no_new_frame_timeout_ms 晚很多；
+    // 且 Ok 帧之后如果长时间不再有新帧，只看返回值就永远报不出来。
+    gimbal.set_fault(sim_io::FAULT_NO_NEW_FRAME, camera.no_new_frame());
     gimbal.set_fault(
       sim_io::FAULT_FRAME_FAULT,
-      st == sim_io::ReadStatus::Rejected || st == sim_io::ReadStatus::Stale);
-    gimbal.set_fault(sim_io::FAULT_CLOCK_JUMP, false);
+      st == sim_io::ReadStatus::Rejected || st == sim_io::ReadStatus::Stale ||
+        st == sim_io::ReadStatus::Reconnected);
+    // 时钟跳变必须真的进 fault 位。跳变帧的帧龄不可信（realtime<->steady 偏移变了），
+    // 用它做延迟补偿会让 planner 按错误的飞行时间提前量下发；原来这里硬编码 false，
+    // 等于 ClockJump 只被计数、不影响控制与开火。
+    gimbal.set_fault(sim_io::FAULT_CLOCK_JUMP, st == sim_io::ReadStatus::ClockJump);
+
+    // 换代/重连/时钟跳变都要求重新武装：估计器状态作废，且必须重新连续确认目标
+    // 才允许开火，避免旧纪元的目标状态"复活"成新纪元的开火依据。
+    if (st == sim_io::ReadStatus::Reconnected || st == sim_io::ReadStatus::ClockJump) {
+      rebuild_estimators(
+        st == sim_io::ReadStatus::Reconnected ? "发布端换代/重连" : "时钟跳变");
+      rearm_pending = true;
+      rearm_confirmed = 0;
+      ++rearm_events;
+      // 旧目标一律作废：ever_seen_target 置回 false，让 FAULT_TARGET_LOST 立刻生效，
+      // 而不是靠 target_lost_ms 慢慢超时。
+      ever_seen_target = false;
+      gimbal.set_fault(sim_io::FAULT_TARGET_LOST, true);
+    }
+    gimbal.set_fault(sim_io::FAULT_REARM_PENDING, rearm_pending);
 
     if (st != sim_io::ReadStatus::Ok) {
       // 没有可用帧时必须主动重发安全停止，绝不能让旧命令留在三缓冲里被消费。
@@ -305,8 +507,49 @@ int main(int argc, char * argv[])
 
     // 关键：用与这一帧图像严格同帧的姿态，而不是"处理完成时的最新姿态"。
     const auto & bundle = camera.last_bundle();
-    gimbal.update(bundle, t);
+    // 位姿合法性必须在用它之前判。共享内存是外部进程写的：未初始化槽位是全零
+    // （四元数模长 0），NaN 会一路穿过 normalize()/eulers()/set_R_gimbal2world()，
+    // 最后污染 Solver 与 EKF，只在 send() 的 isfinite 门被拦住——那时已经太晚。
+    // update() 在拒绝时不改动任何状态，所以这里直接跳过整帧处理即可。
+    const auto pose_ok = gimbal.update(bundle, t);
+    if (pose_ok != sim_io::PoseValidity::Ok) {
+      ++pose_invalid_frames;
+      --frames;  // frames 表示"真正进入感知的帧"，位姿被拒的帧不算
+      gimbal.set_fault(sim_io::FAULT_POSE_INVALID, true);
+      if (last_read_ok) {
+        gimbal.send_safe_stop();
+      } else {
+        gimbal.tick();
+      }
+      last_read_ok = false;
+      if (pose_invalid_frames <= 5 || pose_invalid_frames % 100 == 0) {
+        tools::logger()->warn(
+          "[sim] 同帧位姿不合法({})，已跳过第 {} 帧 (累计 {})", sim_io::to_string(pose_ok),
+          bundle.frame_seq, pose_invalid_frames);
+      }
+      continue;
+    }
     solver.set_R_gimbal2world(gimbal.q());
+
+    if (mode == "closed_loop") {
+      const auto * rt = camera.client().runtime_state();
+      const bool following = rt != nullptr && rt->following != 0;
+      if (following) {
+        if (!following_seen)
+          tools::logger()->info("[sim] 仿真端已订阅云台命令 (RuntimeState.following=1)");
+        following_seen = true;
+      } else {
+        ++not_following_frames;
+        if (!following_warned) {
+          following_warned = true;
+          tools::logger()->warn(
+            "[sim] 仿真端未订阅云台命令 (RuntimeState.following={})：本次下发的命令不会"
+            "改变云台。请用 scripts/run.sh simulator-auto-aim 启动仿真端，或设"
+            "DAEDALUS_FORCE_AUTO_AIM=1，或交互按 F5",
+            rt != nullptr ? static_cast<int>(rt->following) : -1);
+        }
+      }
+    }
 
     // 打印首个真值批次：确认场景里到底有没有目标、在云台的哪个方向。
     // 真值只用于诊断输出，不进入任何算法输入。
@@ -453,11 +696,27 @@ int main(int argc, char * argv[])
 
     const double lost_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - last_target_seen).count();
-    gimbal.set_fault(
-      sim_io::FAULT_TARGET_LOST, !ever_seen_target || lost_ms > target_lost_ms);
+    const bool target_lost = !ever_seen_target || lost_ms > target_lost_ms;
+    gimbal.set_fault(sim_io::FAULT_TARGET_LOST, target_lost);
+
+    // 重新武装：必须连续 rearm_confirm_frames 帧"这一帧有完整同步数据 + 跟上目标"
+    // 才解除。中途只要断一次就从零重数，防止抖动式的一帧命中把开火放出去。
+    if (rearm_pending) {
+      if (target.has_value() && !target_lost) {
+        if (++rearm_confirmed >= rearm_confirm_frames) {
+          rearm_pending = false;
+          tools::logger()->info(
+            "[sim] 已重新武装（连续确认 {} 帧目标）", rearm_confirmed);
+        }
+      } else {
+        rearm_confirmed = 0;
+      }
+      gimbal.set_fault(sim_io::FAULT_REARM_PENDING, rearm_pending);
+    }
 
     // ---- 真值评估（真值只进评估器，绝不进算法输入）-----------------------------
     std::optional<Eigen::Vector3d> gt_pos_this_frame;
+    std::optional<Eigen::Vector3d> gt_armor_this_frame;
     if (do_eval && target.has_value() && evaluator.fetch(bundle.frame_seq)) {
       const auto x = target->ekf_x();
       // Solver 的输出以云台为原点，真值以 odom 为原点，比较前必须加上同帧的云台平移。
@@ -465,7 +724,14 @@ int main(int argc, char * argv[])
         gimbal.odom_position() + Eigen::Vector3d(x[0], x[2], x[4]);
       const auto err = evaluator.evaluate(target->name, in_odom, x[6], x[7]);
       evaluator.record(err);
-      if (err.valid) gt_pos_this_frame = err.gt_position;
+      if (err.valid) {
+        gt_pos_this_frame = err.gt_position;
+        if (err.has_armor_position) {
+          gt_armor_this_frame = err.gt_armor_position;
+        } else {
+          ++aim_no_armor_gt;
+        }
+      }
     }
 
     // ---- 规划与下发 -----------------------------------------------------------
@@ -480,34 +746,98 @@ int main(int argc, char * argv[])
           plan.pitch * 57.2957795130823, gimbal.yaw() * 57.2957795130823,
           gimbal.pitch() * 57.2957795130823);
       }
-      const bool fired = gimbal.send(
-        plan.control, plan.fire, plan.yaw, plan.pitch,
-        target.has_value() ? Eigen::Vector3d(
-                               target->ekf_x()[0], target->ekf_x()[2], target->ekf_x()[4])
-                               .norm()
-                           : -1.0);
+      // 丢目标且开启驻留时，把云台摆到 park 指向而不是原地不动。
+      // 这是**搜索**行为，不是瞄准：绝不带 fire（park_fire 恒 false），距离仍按
+      // 无目标处理，plan.control 为真（有目标）时一律以规划结果为准，驻留只在
+      // 无控制的空档里生效，因此不会与自瞄争夺控制权。
+      const bool parking = park_enabled && !plan.control;
+      const bool fired = parking
+        ? gimbal.send(
+            true, false, park_yaw_deg / 57.2957795130823,
+            park_pitch_deg / 57.2957795130823, 0.0)
+        : gimbal.send(
+            plan.control, plan.fire, plan.yaw, plan.pitch,
+            target.has_value() ? Eigen::Vector3d(
+                                   target->ekf_x()[0], target->ekf_x()[2], target->ekf_x()[4])
+                                   .norm()
+                               : -1.0);
+      if (parking) ++park_frames;
       (void)fired;
       // 几何瞄准误差。ROS 约定 R = Rz(yaw)Ry(pitch)，机体 x 轴前向，
       // 于是下发方向的单位向量是 (cos p cos y, cos p sin y, -sin p)。
       if (plan.control && gt_pos_this_frame.has_value()) {
+        // 射线原点 = 枪口世界位置。muzzle_offset() 是仿真端每帧发布的
+        // PoseIndex::Muzzle（枪口相对云台的平移），与图像同帧，不需要标定常数。
+        const Eigen::Vector3d muzzle_world = gimbal.odom_position() + gimbal.muzzle_offset();
         const Eigen::Vector3d cmd_dir(
           std::cos(plan.pitch) * std::cos(plan.yaw), std::cos(plan.pitch) * std::sin(plan.yaw),
           -std::sin(plan.pitch));
-        const Eigen::Vector3d to_gt = *gt_pos_this_frame - gimbal.odom_position();
-        if (to_gt.norm() > 1e-6) {
-          const Eigen::Vector3d gt_dir = to_gt.normalized();
-          const double dot = std::clamp(cmd_dir.dot(gt_dir), -1.0, 1.0);
-          aim_err_deg.push_back(std::acos(dot) * 57.2957795130823);
-          // 分轴看：pitch 那一路本来就带"板心 vs 车心 + 弹道补偿"的系统偏移，
-          // 和 yaw 混在一起会掩盖 yaw 的真实精度。
-          const double cmd_yaw = plan.yaw;
-          const double gt_yaw = std::atan2(gt_dir.y(), gt_dir.x());
-          double dyaw = cmd_yaw - gt_yaw;
+
+        // ROS 约定下"下发角 vs 目标方向"的分轴误差。pitch 正 = 低头。
+        auto push_axis_errors = [&](const Eigen::Vector3d & dir) {
+          const double gt_yaw = std::atan2(dir.y(), dir.x());
+          double dyaw = plan.yaw - gt_yaw;
           while (dyaw > M_PI) dyaw -= 2 * M_PI;
           while (dyaw < -M_PI) dyaw += 2 * M_PI;
           aim_yaw_err_deg.push_back(dyaw * 57.2957795130823);
-          const double gt_pitch = -std::asin(std::clamp(gt_dir.z(), -1.0, 1.0));
+          const double gt_pitch = -std::asin(std::clamp(dir.z(), -1.0, 1.0));
           aim_pitch_err_deg.push_back((plan.pitch - gt_pitch) * 57.2957795130823);
+        };
+        auto angle_between = [](const Eigen::Vector3d & a, const Eigen::Vector3d & b) {
+          return std::acos(std::clamp(a.dot(b), -1.0, 1.0)) * 57.2957795130823;
+        };
+
+        // 主口径：枪口 -> 被选中装甲板板心真值。板心真值不可用时（发布端没给，
+        // 例如场景资产缺 CENTER 节点）不退化成整车中心充数，直接不记这一帧的
+        // aim_*，只在 aim_no_armor_gt 里计数——否则统计里会混进两种口径。
+        if (gt_armor_this_frame.has_value()) {
+          const Eigen::Vector3d to_armor = *gt_armor_this_frame - muzzle_world;
+          if (to_armor.norm() > 1e-6) {
+            const Eigen::Vector3d armor_dir = to_armor.normalized();
+            aim_err_deg.push_back(angle_between(cmd_dir, armor_dir));
+            push_axis_errors(armor_dir);
+          }
+        }
+
+        // 旧口径：枪口 -> 整车中心真值。保留只为和改动前的数据对齐比较，
+        // 它天然含板心-车心的几何差，不代表闭环精度。
+        {
+          const Eigen::Vector3d to_center = *gt_pos_this_frame - muzzle_world;
+          if (to_center.norm() > 1e-6)
+            center_err_deg.push_back(angle_between(cmd_dir, to_center.normalized()));
+        }
+
+        // 几何/估计误差与弹道补偿分离，两者都取 planner 自己的量，不做反推：
+        //   debug_xyza[0..2] 是 planner 实际选中并加过抬枪补偿的瞄准点
+        //   （云台原点、ROS 系，见 Planner::update_debug_selection）。
+        //   geom_err  = 该瞄准点方向 vs 板心真值方向 —— 纯几何+估计误差；
+        //   ballistic = 下发 pitch 减去"指向该瞄准点的几何俯仰"
+        //               —— planner 加进去的抬枪量与 pitch_offset_ 之和。
+        // 枪口视差：同一块板心，分别从云台原点和枪口看过去的方向夹角。
+        // 纯几何量，只用真值和仿真端同帧发布的位姿，不回灌算法。
+        if (gt_armor_this_frame.has_value()) {
+          const Eigen::Vector3d from_pivot = *gt_armor_this_frame - gimbal.odom_position();
+          const Eigen::Vector3d from_muzzle = *gt_armor_this_frame - muzzle_world;
+          if (from_pivot.norm() > 1e-6 && from_muzzle.norm() > 1e-6) {
+            muzzle_parallax_deg.push_back(
+              angle_between(from_pivot.normalized(), from_muzzle.normalized()));
+          }
+        }
+
+        if (gt_armor_this_frame.has_value()) {
+          const Eigen::Vector3d aim_world =
+            gimbal.odom_position() +
+            Eigen::Vector3d(planner->debug_xyza[0], planner->debug_xyza[1],
+                            planner->debug_xyza[2]);
+          const Eigen::Vector3d to_aim = aim_world - muzzle_world;
+          const Eigen::Vector3d to_armor = *gt_armor_this_frame - muzzle_world;
+          if (to_aim.norm() > 1e-6 && to_armor.norm() > 1e-6) {
+            geom_err_deg.push_back(
+              angle_between(to_aim.normalized(), to_armor.normalized()));
+            const double aim_pitch =
+              -std::asin(std::clamp(to_aim.normalized().z(), -1.0, 1.0));
+            ballistic_pitch_deg.push_back((plan.pitch - aim_pitch) * 57.2957795130823);
+          }
         }
       }
       if (plan.control) ++control_cmds;
@@ -546,11 +876,16 @@ int main(int argc, char * argv[])
      << ", \"regressed\": " << client.regressed_frames()
      << ", \"corrupted\": " << client.corrupted_events()
      << ", \"publisher_restarts\": " << client.publisher_restarts()
-     << ", \"last_seq\": " << client.last_seq() << "},\n";
+     << ", \"remaps\": " << client.remaps() << ", \"last_seq\": " << client.last_seq()
+     << "},\n";
   js << "  \"camera\": {\"stale\": " << camera.stale_frames()
      << ", \"rejected\": " << camera.rejected_frames()
      << ", \"future\": " << camera.future_frames()
      << ", \"clock_jumps\": " << camera.clock_jumps()
+     << ", \"clock_jump_frames\": " << camera.clock_jump_frames()
+     << ", \"reconnects\": " << camera.reconnects()
+     << ", \"no_new_frame_timeout_ms\": " << camera.effective_no_new_frame_timeout_ms()
+     << ", \"read_timeout_ms\": " << camera.effective_read_timeout_ms()
      << ", \"fps\": " << camera.camera_fps() << "},\n";
   js << "  \"detect_ms\": {\"p50\": " << percentile(detect_ms, 0.50)
      << ", \"p95\": " << percentile(detect_ms, 0.95) << ", \"p99\": " << percentile(detect_ms, 0.99)
@@ -558,6 +893,10 @@ int main(int argc, char * argv[])
   js << "  \"pipeline_ms\": {\"p50\": " << percentile(pipeline_ms, 0.50)
      << ", \"p95\": " << percentile(pipeline_ms, 0.95)
      << ", \"p99\": " << percentile(pipeline_ms, 0.99) << "},\n";
+  js << "  \"park\": {\"enabled\": " << (park_enabled ? "true" : "false")
+     << ", \"frames\": " << park_frames << ", \"yaw_deg\": "
+     << (park_enabled ? park_yaw_deg : 0.0) << ", \"pitch_deg\": "
+     << (park_enabled ? park_pitch_deg : 0.0) << "},\n";
   js << "  \"perception\": {\"detected_frames\": " << detected_frames
      << ", \"tracked_frames\": " << tracked_frames << "},\n";
   js << "  \"gimbal\": {\"sent\": " << gimbal.sent_commands()
@@ -565,6 +904,12 @@ int main(int argc, char * argv[])
      << ", \"fire\": " << gimbal.fire_commands()
      << ", \"suppressed_fire\": " << gimbal.suppressed_fires()
      << ", \"safe_stops\": " << gimbal.safe_stops()
+     << ", \"invalid_poses\": " << gimbal.invalid_poses()
+     << ", \"pose_invalid_frames\": " << pose_invalid_frames
+     << ", \"rearm_events\": " << rearm_events
+     << ", \"rearm_pending\": " << (rearm_pending ? "true" : "false")
+     << ", \"sim_following_seen\": " << (following_seen ? "true" : "false")
+     << ", \"sim_not_following_frames\": " << not_following_frames
      << ", \"final_faults\": \"" << sim_io::describe_faults(gimbal.faults()) << "\"},\n";
   js << "  \"extrinsic\": {\"max_err_m\": " << max_extrinsic_err
      << ", \"warnings\": " << extrinsic_warnings << "}";
@@ -575,26 +920,63 @@ int main(int argc, char * argv[])
        << ", \"pos_mean_m\": " << gt.pos_mean_m << ", \"xy_mean_m\": " << gt.xy_mean_m
        << ", \"z_mean_m\": " << gt.z_mean_m << ", \"yaw_p50_rad\": " << gt.yaw_p50_rad
        << ", \"yaw_p95_rad\": " << gt.yaw_p95_rad << ", \"vyaw_mean_radps\": " << gt.vyaw_mean_radps
-       << ", \"seq_mismatches\": " << evaluator.seq_mismatches() << "}";
-    // 闭环几何瞄准误差。mean 里含"板心 vs 车心 + 弹道补偿"的系统偏移，
-    // 判闭环稳不稳看 p95/max 与 p50 的差以及分轴的取值范围。
+       << ", \"seq_mismatches\": " << evaluator.seq_mismatches()
+       << ", \"seq_skew_mean\": " << evaluator.seq_skew_mean()
+       << ", \"seq_skew_min\": " << evaluator.seq_skew_min()
+       << ", \"seq_skew_max\": " << evaluator.seq_skew_max()
+       << ", \"ambiguous_matches\": " << evaluator.ambiguous_matches()
+       << ", \"enemy_team\": \"" << enemy_team_name(evaluator.enemy_team()) << "\"}";
+    // 闭环瞄准误差。各口径分开发布，不做合并、不做反推：
+    //   aim_*        枪口 -> 板心真值（主口径，仍含弹道抬枪量与预测提前量）
+    //   center_*     枪口 -> 整车中心真值（旧口径，仅供与改动前对比）
+    //   geom_*       planner 选中的瞄准点 -> 板心真值（几何+估计误差）
+    //   ballistic_*  planner 实际加进 pitch 的抬枪量（含 pitch_offset_）
+    // 无论哪个口径都不能单独当成"闭环精度"：aim_* 含弹道，geom_* 不含控制误差，
+    // 而选板逻辑本身在评估端只是几何代理（取距相机最近的板），换板瞬间会不一致。
+    auto mean = [](const std::vector<double> & v) {
+      if (v.empty()) return 0.0;
+      double s = 0.0;
+      for (double x : v) s += x;
+      return s / static_cast<double>(v.size());
+    };
     if (!aim_err_deg.empty()) {
-      auto mean = [](const std::vector<double> & v) {
-        double s = 0.0;
-        for (double x : v) s += x;
-        return s / static_cast<double>(v.size());
-      };
       const auto yaw_mm = std::minmax_element(aim_yaw_err_deg.begin(), aim_yaw_err_deg.end());
       const auto pitch_mm =
         std::minmax_element(aim_pitch_err_deg.begin(), aim_pitch_err_deg.end());
       js << ",\n  \"aim_error_deg\": {\"count\": " << aim_err_deg.size()
+         << ", \"reference\": \"muzzle_world_to_gt_armor_center\""
          << ", \"p50\": " << percentile(aim_err_deg, 0.50)
          << ", \"p95\": " << percentile(aim_err_deg, 0.95)
          << ", \"max\": " << percentile(aim_err_deg, 1.0) << ", \"mean\": " << mean(aim_err_deg)
          << ", \"yaw_mean\": " << mean(aim_yaw_err_deg) << ", \"yaw_min\": " << *yaw_mm.first
          << ", \"yaw_max\": " << *yaw_mm.second << ", \"pitch_mean\": " << mean(aim_pitch_err_deg)
          << ", \"pitch_min\": " << *pitch_mm.first << ", \"pitch_max\": " << *pitch_mm.second
-         << "}";
+         << ", \"missing_armor_gt\": " << aim_no_armor_gt << "}";
+    }
+    if (!center_err_deg.empty()) {
+      js << ",\n  \"aim_error_vehicle_center_deg\": {\"count\": " << center_err_deg.size()
+         << ", \"p50\": " << percentile(center_err_deg, 0.50)
+         << ", \"p95\": " << percentile(center_err_deg, 0.95)
+         << ", \"mean\": " << mean(center_err_deg) << "}";
+    }
+    if (!geom_err_deg.empty()) {
+      js << ",\n  \"aim_point_geometry_err_deg\": {\"count\": " << geom_err_deg.size()
+         << ", \"p50\": " << percentile(geom_err_deg, 0.50)
+         << ", \"p95\": " << percentile(geom_err_deg, 0.95)
+         << ", \"mean\": " << mean(geom_err_deg) << "}";
+    }
+    if (!muzzle_parallax_deg.empty()) {
+      js << ",\n  \"muzzle_parallax_deg\": {\"count\": " << muzzle_parallax_deg.size()
+         << ", \"p50\": " << percentile(muzzle_parallax_deg, 0.50)
+         << ", \"p95\": " << percentile(muzzle_parallax_deg, 0.95)
+         << ", \"mean\": " << mean(muzzle_parallax_deg) << "}";
+    }
+    if (!ballistic_pitch_deg.empty()) {
+      const auto mm =
+        std::minmax_element(ballistic_pitch_deg.begin(), ballistic_pitch_deg.end());
+      js << ",\n  \"ballistic_pitch_deg\": {\"count\": " << ballistic_pitch_deg.size()
+         << ", \"mean\": " << mean(ballistic_pitch_deg) << ", \"min\": " << *mm.first
+         << ", \"max\": " << *mm.second << "}";
     }
   }
   js << "\n}\n";

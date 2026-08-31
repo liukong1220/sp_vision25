@@ -28,6 +28,8 @@ enum class ReadStatus
   Stale,         // 帧龄超过阈值，已丢弃
   Rejected,      // 帧号倒退 / pose 不同帧 / 图像不合约，已丢弃
   Disconnected,  // 心跳超时或共享内存不可用
+  ClockJump,     // 本帧跨越了 realtime<->steady 偏移跳变，帧龄不可信，已丢弃
+  Reconnected,   // 发布端换代（换 inode 或 created_ns 变化），已重连，上层必须复位
 };
 
 const char * to_string(ReadStatus status);
@@ -40,6 +42,15 @@ struct SimCameraConfig
   double poll_interval_us = 200.0;      // 轮询间隔
   double clock_resample_ms = 1000.0;    // realtime<->steady 偏移重采样周期
   bool convert_rgb_to_bgr = true;       // 仿真端发布 RGB8，OpenCV 默认 BGR
+
+  // "多久没有新帧就算断流"。必须**不大于** max_frame_age_ms，否则看门狗比帧龄
+  // 门限还慢：原来 read_timeout_ms=1000ms 而 max_frame_age_ms/state_timeout_ms
+  // 都是 450ms，断流后有 550ms 的窗口里 FAULT_NO_NEW_FRAME 还没置起来。
+  // open() 会按 max_frame_age_ms 收紧这两个值并在 effective_* 里报告实际生效值。
+  double no_new_frame_timeout_ms = 250.0;
+
+  // 共享内存文件身份（inode）复查周期。只在没有新帧时才复查，正常出图时不做 stat。
+  double remap_check_ms = 200.0;
 
   // 共享内存位置。默认与 simulator 一致；测试可指向临时目录以避免与真实仿真进程互相干扰。
   SharedMemoryClient::Options shm{};
@@ -84,6 +95,8 @@ public:
   const SharedMemoryClient & client() const { return client_; }
   ClockBridge & clock() { return clock_; }
   const ClockBridge & clock() const { return clock_; }
+  // 测试用：注入时钟跳变（见 ClockBridge::debug_shift_offset_ns）。
+  ClockBridge & clock_for_test() { return clock_; }
 
   bool heartbeat_alive() const;
   double heartbeat_age_ms() const;
@@ -94,6 +107,19 @@ public:
   std::uint64_t ok_frames() const { return ok_frames_; }
   std::uint64_t future_frames() const { return future_frames_; }
   std::uint64_t clock_jumps() const { return clock_.jump_count(); }
+  // 因跨越时钟跳变而被丢弃的帧数。与 clock_jumps() 不同：一次跳变最多丢一帧。
+  std::uint64_t clock_jump_frames() const { return clock_jump_frames_; }
+  // 观测到的发布端换代次数（inode 变化 + created_ns 变化，两路合计）。
+  std::uint64_t reconnects() const { return reconnects_; }
+
+  // 距最近一次 Ok 帧的毫秒数；从未取到过帧时返回 +inf。看门狗用这个，不要等
+  // read_blocking 超时。
+  double frame_gap_ms() const;
+  // 断流判据：frame_gap_ms() 超过 no_new_frame_timeout_ms 的生效值。
+  bool no_new_frame() const;
+  double effective_no_new_frame_timeout_ms() const { return config_.no_new_frame_timeout_ms; }
+  double effective_read_timeout_ms() const { return config_.read_timeout_ms; }
+
   void reset_stats();
 
 private:
@@ -109,10 +135,24 @@ private:
   std::uint64_t stale_frames_ = 0;
   std::uint64_t rejected_frames_ = 0;
   std::uint64_t future_frames_ = 0;
+  std::uint64_t clock_jump_frames_ = 0;
+  std::uint64_t reconnects_ = 0;
 
   std::chrono::steady_clock::time_point last_ok_steady_{};
   bool has_last_ok_ = false;
   double fps_ = 0.0;
+
+  // 最近一次 Ok 帧到手的**本地 steady 时刻**。last_ok_steady_ 是帧的时间戳映射值，
+  // 会被时钟跳变污染，不能用来做看门狗。
+  std::chrono::steady_clock::time_point last_ok_arrival_{};
+  bool has_arrival_ = false;
+
+  // resample 报了跳变、但还没有据此丢掉一帧。
+  bool jump_pending_ = false;
+  std::chrono::steady_clock::time_point last_remap_check_{};
+
+  // 换代/重连后清掉与旧发布端相关的本地状态（同帧位姿、帧龄基准、fps）。
+  void invalidate_after_epoch_change();
 };
 
 }  // namespace sim_io

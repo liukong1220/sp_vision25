@@ -91,6 +91,16 @@ bool GroundTruthEvaluator::fetch(std::uint64_t image_frame_seq)
 
   if (batch.frame_seq != image_frame_seq) {
     ++seq_mismatches_;
+    // 记下偏差方向与幅度。只有计数的话看不出这是"历史深度不够"还是"发布时序
+    // 竞争"：前者表现为真值比图像**旧很多**（已被挤掉），后者只差一两帧且真值
+    // 恒**旧于**图像（发布端要等图像落地才发同帧真值，晚一个 Bevy 帧）。
+    // 两种成因的修法完全不同，所以必须分开量。
+    const std::int64_t d = static_cast<std::int64_t>(batch.frame_seq) -
+                           static_cast<std::int64_t>(image_frame_seq);
+    if (seq_skew_samples_ == 0 || d < seq_skew_min_) seq_skew_min_ = d;
+    if (seq_skew_samples_ == 0 || d > seq_skew_max_) seq_skew_max_ = d;
+    seq_skew_sum_ += d;
+    ++seq_skew_samples_;
     return false;
   }
   if (batch.target_count > GROUND_TRUTH_MAX_TARGETS) return false;
@@ -111,13 +121,35 @@ bool GroundTruthEvaluator::fetch_latest_diagnostic_only()
   return true;
 }
 
-std::optional<GroundTruthTarget> GroundTruthEvaluator::find_by_label(std::uint8_t label) const
+std::optional<GroundTruthTarget> GroundTruthEvaluator::find_by_label(
+  std::uint8_t label, const Eigen::Vector3d & reference, bool * ambiguous) const
 {
+  if (ambiguous) *ambiguous = false;
   if (!fetched_) return std::nullopt;
+
+  // 先按 (队伍, 标签) 过滤。原来只比 armor_label 并返回第一个命中，
+  // 而仿真场景里红蓝三号步兵共用 label=3，谁先被写进 targets[] 就评估谁——
+  // 这会让"估计 vs 真值"的误差里混进另一辆车的位置。
+  std::optional<GroundTruthTarget> best;
+  double best_dist = 0.0;
+  std::uint32_t hits = 0;
   for (std::uint32_t i = 0; i < batch_.target_count; ++i) {
-    if (batch_.targets[i].armor_label == label) return batch_.targets[i];
+    const GroundTruthTarget & t = batch_.targets[i];
+    if (t.armor_label != label) continue;
+    if (!team_matches(t.team)) continue;
+    ++hits;
+    const Eigen::Vector3d p(t.position[0], t.position[1], t.position[2]);
+    const double d = (p - reference).norm();
+    if (!best.has_value() || d < best_dist) {
+      best_dist = d;
+      best = t;
+    }
   }
-  return std::nullopt;
+
+  // 过滤后仍有多个命中：场景里存在同队同编号的多辆车，真值内容不足以唯一
+  // 确定评估对象。这里取最近的一个以便继续出数，但必须把歧义上报。
+  if (hits > 1 && ambiguous) *ambiguous = true;
+  return best;
 }
 
 std::optional<GroundTruthTarget> GroundTruthEvaluator::find_nearest(
@@ -129,6 +161,8 @@ std::optional<GroundTruthTarget> GroundTruthEvaluator::find_nearest(
   double best_dist = gate_m;
   for (std::uint32_t i = 0; i < batch_.target_count; ++i) {
     const GroundTruthTarget & t = batch_.targets[i];
+    // 最近邻退化路径同样必须过滤队伍，否则自家车正好更近时就会被选中。
+    if (!team_matches(t.team)) continue;
     const Eigen::Vector3d p(t.position[0], t.position[1], t.position[2]);
     const double d = (p - position).norm();
     if (d < best_dist) {
@@ -147,16 +181,29 @@ GtError GroundTruthEvaluator::evaluate(
   out.name = name;
   out.est_position = estimate_in_odom;
 
-  std::optional<GroundTruthTarget> gt = find_by_label(armor_name_to_label(name));
-  if (!gt.has_value()) gt = find_nearest(estimate_in_odom, gate_m);
+  bool ambiguous = false;
+  std::optional<GroundTruthTarget> gt =
+    find_by_label(armor_name_to_label(name), estimate_in_odom, &ambiguous);
+  if (!gt.has_value()) {
+    gt = find_nearest(estimate_in_odom, gate_m);
+    if (gt.has_value()) out.matched_by_nearest = true;
+  }
   if (!gt.has_value()) return out;
+  if (ambiguous) ++ambiguous_matches_;
 
   const Eigen::Vector3d p(gt->position[0], gt->position[1], gt->position[2]);
   const Eigen::Vector3d d = estimate_in_odom - p;
 
   out.valid = true;
+  out.ambiguous = ambiguous;
   out.armor_label = gt->armor_label;
+  out.team = gt->team;
   out.gt_position = p;
+  if (gt->armor_position_valid != 0) {
+    out.has_armor_position = true;
+    out.gt_armor_position =
+      Eigen::Vector3d(gt->armor_position[0], gt->armor_position[1], gt->armor_position[2]);
+  }
   out.pos_err_m = d.norm();
   out.xy_err_m = d.head<2>().norm();
   out.z_err_m = std::abs(d.z());
@@ -201,6 +248,11 @@ void GroundTruthEvaluator::reset()
   yaw_err_.clear();
   vyaw_err_.clear();
   seq_mismatches_ = 0;
+  seq_skew_samples_ = 0;
+  seq_skew_sum_ = 0;
+  seq_skew_min_ = 0;
+  seq_skew_max_ = 0;
+  ambiguous_matches_ = 0;
   fetched_ = false;
 }
 

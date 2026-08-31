@@ -29,6 +29,10 @@ const char * to_string(ConsumeStatus status)
       return "ImageInvalid";
     case ConsumeStatus::Corrupted:
       return "Corrupted";
+    case ConsumeStatus::EpochChanged:
+      return "EpochChanged";
+    case ConsumeStatus::Remapped:
+      return "Remapped";
   }
   return "Unknown";
 }
@@ -39,6 +43,8 @@ struct MapResult
 {
   void * addr = nullptr;
   std::size_t bytes = 0;
+  std::uint64_t dev = 0;
+  std::uint64_t ino = 0;
 };
 
 bool map_region(
@@ -78,6 +84,8 @@ bool map_region(
 
   out->addr = addr;
   out->bytes = required_bytes;
+  out->dev = static_cast<std::uint64_t>(st.st_dev);
+  out->ino = static_cast<std::uint64_t>(st.st_ino);
   return true;
 }
 }  // namespace
@@ -130,6 +138,50 @@ bool SharedMemoryClient::open(std::string * error)
   meta_bytes_ = meta_map.bytes;
   image_pool_ = static_cast<std::uint8_t *>(pool_map.addr);
   image_pool_bytes_ = pool_map.bytes;
+  meta_dev_ = meta_map.dev;
+  meta_ino_ = meta_map.ino;
+  pool_dev_ = pool_map.dev;
+  pool_ino_ = pool_map.ino;
+  return true;
+}
+
+bool SharedMemoryClient::stat_ids(
+  const std::string & path, std::uint64_t * dev, std::uint64_t * ino) const
+{
+  struct stat st{};
+  if (::stat(path.c_str(), &st) != 0) return false;
+  *dev = static_cast<std::uint64_t>(st.st_dev);
+  *ino = static_cast<std::uint64_t>(st.st_ino);
+  return true;
+}
+
+bool SharedMemoryClient::paths_changed() const
+{
+  if (!connected()) return false;
+
+  std::uint64_t dev = 0;
+  std::uint64_t ino = 0;
+  // 文件当前不存在（发布端已退出、还没重建）不算变化：此时旧映射仍然是我们唯一
+  // 的真相来源，且里面不会再有新帧，上层按心跳超时处理即可。只有"存在且身份不同"
+  // 才说明发布端已经重建过文件。
+  if (stat_ids(options_.dir + "/" + options_.meta_name, &dev, &ino)) {
+    if (dev != meta_dev_ || ino != meta_ino_) return true;
+  }
+  if (stat_ids(options_.dir + "/" + options_.image_pool_name, &dev, &ino)) {
+    if (dev != pool_dev_ || ino != pool_ino_) return true;
+  }
+  return false;
+}
+
+bool SharedMemoryClient::remap(std::string * error)
+{
+  // open() 内部先 close()，失败时保持未连接，由上层重试。
+  if (!open(error)) return false;
+  // 换了文件就等于换了发布端：帧号水位线、换代基准全部作废。
+  has_last_seq_ = false;
+  last_seq_ = 0;
+  publisher_created_ns_ = 0;
+  ++remaps_;
   return true;
 }
 
@@ -192,7 +244,7 @@ ConsumeStatus SharedMemoryClient::consume_frame(FrameBundle * bundle)
   //
   // 这里在换代时清掉水位线即可。注意**只清水位线**：不清 frame_age / 时钟映射
   // 之外的任何状态，也不把旧命令或旧帧当成有效数据。
-  const std::uint64_t created_ns = meta_->header.created_ns;
+  const std::uint64_t created_ns = __atomic_load_n(&meta_->header.created_ns, __ATOMIC_ACQUIRE);
   if (publisher_created_ns_ == 0) {
     publisher_created_ns_ = created_ns;
   } else if (created_ns != publisher_created_ns_) {
@@ -200,6 +252,11 @@ ConsumeStatus SharedMemoryClient::consume_frame(FrameBundle * bundle)
     ++publisher_restarts_;
     has_last_seq_ = false;
     last_seq_ = 0;
+    // 换代必须显式上报，不能悄悄清掉水位线就继续。上层要据此把 Tracker/EKF/
+    // Planner 的锁定、上一帧位姿、上一条命令全部作废，并在拿到新的完整同步帧
+    // 且目标重新连续确认之前禁止开火。本帧丢弃：pose 通道大概率还是旧发布端
+    // 留下的残留，同帧一致性无从谈起。
+    return ConsumeStatus::EpochChanged;
   }
 
   bool corrupted = false;
@@ -313,16 +370,20 @@ bool SharedMemoryClient::read_ground_truth(GroundTruthBatch * out) const
 {
   if (!connected() || out == nullptr) return false;
 
-  // ground truth 是整块覆盖写、没有三缓冲保护，读取可能撕裂。
-  // 用 frame_seq 前后一致来近似判断整块稳定；仅评估器使用，代价可以接受。
-  for (int attempt = 0; attempt < 4; ++attempt) {
-    const std::uint64_t before =
-      __atomic_load_n(&meta_->ground_truth.frame_seq, __ATOMIC_ACQUIRE);
+  // seqlock 读端：奇数表示发布端正在写；前后两次读到同一个偶数才说明这份拷贝
+  // 完整。发布端在 publish_ground_truth 里 odd -> body -> even，配对的 release/
+  // acquire 保证 body 的写入不会被重排到序号之后。
+  //
+  // 不再用 frame_seq 是否为 0 判断"有没有数据"：frame_seq==0 是合法帧号（仿真端
+  // FRAME_SEQ 从 0 开始），把它当哨兵会丢掉第一帧的真值。改用 seqlock != 0 —
+  // 发布端至少提交过一次，seqlock 才会离开初始的 0。
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const std::uint32_t before = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
+    if ((before & 1u) != 0u) continue;  // 写入进行中
     std::memcpy(out, &meta_->ground_truth, sizeof(GroundTruthBatch));
-    const std::uint64_t after = __atomic_load_n(&meta_->ground_truth.frame_seq, __ATOMIC_ACQUIRE);
-    if (before == after && out->frame_seq == before) {
-      return before != 0 || out->timestamp_ns != 0;
-    }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const std::uint32_t after = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
+    if (before == after) return before != 0u;
   }
   return false;
 }

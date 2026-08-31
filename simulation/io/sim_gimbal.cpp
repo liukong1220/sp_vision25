@@ -6,6 +6,21 @@
 
 namespace sim_io
 {
+const char * to_string(PoseValidity validity)
+{
+  switch (validity) {
+    case PoseValidity::Ok:
+      return "Ok";
+    case PoseValidity::NonFinite:
+      return "NonFinite";
+    case PoseValidity::QuaternionNorm:
+      return "QuaternionNorm";
+    case PoseValidity::BadTimestamp:
+      return "BadTimestamp";
+  }
+  return "Unknown";
+}
+
 std::string describe_faults(std::uint32_t faults)
 {
   if (faults == FAULT_NONE) return "none";
@@ -24,6 +39,8 @@ std::string describe_faults(std::uint32_t faults)
     {FAULT_FRAME_FAULT, "frame_fault"},
     {FAULT_FIRE_DISABLED, "fire_disabled"},
     {FAULT_STATE_STALE, "state_stale"},
+    {FAULT_POSE_INVALID, "pose_invalid"},
+    {FAULT_REARM_PENDING, "rearm_pending"},
   };
 
   std::string out;
@@ -45,10 +62,60 @@ SimGimbal::SimGimbal(SharedMemoryClient & client, SimGimbalConfig config)
     config_.feedback_pitch_fix_deg * M_PI / 180.0, Eigen::Vector3d::UnitY()));
 }
 
-void SimGimbal::update(
+namespace
+{
+bool finite3(const float v[3])
+{
+  return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
+bool finite4(const float v[4])
+{
+  return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]) &&
+         std::isfinite(v[3]);
+}
+}  // namespace
+
+PoseValidity SimGimbal::update(
   const FrameBundle & bundle, std::chrono::steady_clock::time_point steady_ts)
 {
   const PoseMeta & gimbal = bundle.gimbal();
+
+  // 输入校验先行。共享内存是外部进程写的，不能假定它一定合法：
+  // 未初始化的槽位是全零（四元数模长 0），NaN 会一路穿过 normalize()、
+  // tools::eulers()、solver.set_R_gimbal2world()，最后表现为目标位置 NaN、
+  // planner 下发 NaN——只有 send() 里那道 isfinite 门能拦住，而那时 EKF
+  // 已经被污染了。所以在这里就把不合法的帧挡掉，并且**不更新任何状态**。
+  auto reject = [&](PoseValidity why) {
+    last_validity_ = why;
+    ++invalid_poses_;
+    faults_ |= static_cast<std::uint32_t>(FAULT_POSE_INVALID);
+    return why;
+  };
+
+  if (bundle.timestamp_ns == 0) return reject(PoseValidity::BadTimestamp);
+  // 时间戳必须严格前进。相等或倒退意味着上游重复发布或换代，速度差分会得到
+  // 无意义的结果（dt<=0）。第一帧（has_prev_ == false）没有比较基准，放过。
+  if (has_prev_ && bundle.timestamp_ns <= prev_timestamp_ns_) {
+    return reject(PoseValidity::BadTimestamp);
+  }
+
+  for (int i = 0; i < static_cast<int>(POSE_CHANNEL_COUNT); ++i) {
+    if (!finite3(bundle.poses[i].position) || !finite4(bundle.poses[i].quaternion)) {
+      return reject(PoseValidity::NonFinite);
+    }
+  }
+
+  {
+    const double n = std::sqrt(
+      static_cast<double>(gimbal.quaternion[0]) * gimbal.quaternion[0] +
+      static_cast<double>(gimbal.quaternion[1]) * gimbal.quaternion[1] +
+      static_cast<double>(gimbal.quaternion[2]) * gimbal.quaternion[2] +
+      static_cast<double>(gimbal.quaternion[3]) * gimbal.quaternion[3]);
+    if (std::abs(n - 1.0) > config_.quaternion_norm_tol) {
+      return reject(PoseValidity::QuaternionNorm);
+    }
+  }
 
   // Rust 侧发布顺序是 [w,x,y,z]，Eigen 构造函数也是 (w,x,y,z)。
   q_raw_ = Eigen::Quaterniond(
@@ -96,7 +163,10 @@ void SimGimbal::update(
   frame_seq_ = bundle.frame_seq;
   state_steady_ = steady_ts;
   has_state_ = true;
+  last_validity_ = PoseValidity::Ok;
   faults_ &= ~static_cast<std::uint32_t>(FAULT_STARTUP);
+  faults_ &= ~static_cast<std::uint32_t>(FAULT_POSE_INVALID);
+  return PoseValidity::Ok;
 }
 
 io::GimbalState SimGimbal::state() const

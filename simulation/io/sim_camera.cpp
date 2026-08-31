@@ -20,6 +20,10 @@ const char * to_string(ReadStatus status)
       return "Rejected";
     case ReadStatus::Disconnected:
       return "Disconnected";
+    case ReadStatus::ClockJump:
+      return "ClockJump";
+    case ReadStatus::Reconnected:
+      return "Reconnected";
   }
   return "Unknown";
 }
@@ -44,7 +48,21 @@ SimCamera::SimCamera(SimCameraConfig config) : config_(config), client_(config_.
 
 bool SimCamera::open(std::string * error)
 {
+  // 看门狗必须比帧龄门限更早触发，否则断流后存在一段"帧已过期但 FAULT_NO_NEW_FRAME
+  // 还没置起来"的窗口。这里在 open() 时把它收紧到 max_frame_age_ms 以内，
+  // read_timeout_ms 也不允许超过它（阻塞读返回得比看门狗还晚就没有意义）。
+  if (
+    config_.no_new_frame_timeout_ms <= 0.0 ||
+    config_.no_new_frame_timeout_ms > config_.max_frame_age_ms) {
+    config_.no_new_frame_timeout_ms = config_.max_frame_age_ms;
+  }
+  if (config_.read_timeout_ms > config_.no_new_frame_timeout_ms) {
+    config_.read_timeout_ms = config_.no_new_frame_timeout_ms;
+  }
+
   if (!client_.open(error)) return false;
+
+  last_remap_check_ = std::chrono::steady_clock::now();
 
   // 先建立时钟映射，再读第一帧，否则第一帧的帧龄没有意义。
   clock_.resample();
@@ -70,6 +88,32 @@ bool SimCamera::open(std::string * error)
 
 void SimCamera::close() { client_.close(); }
 
+void SimCamera::invalidate_after_epoch_change()
+{
+  // 换代之后旧发布端的一切都不再可信：同帧位姿、帧龄基准、fps 滑动平均。
+  // 统计计数器（ok/stale/rejected/...）保留，报告需要看到跨换代的累计值。
+  has_bundle_ = false;
+  bundle_ = FrameBundle{};
+  has_last_ok_ = false;
+  has_arrival_ = false;
+  fps_ = 0.0;
+  jump_pending_ = false;
+  ++reconnects_;
+}
+
+double SimCamera::frame_gap_ms() const
+{
+  if (!has_arrival_) return std::numeric_limits<double>::infinity();
+  return std::chrono::duration<double, std::milli>(
+           std::chrono::steady_clock::now() - last_ok_arrival_)
+    .count();
+}
+
+bool SimCamera::no_new_frame() const
+{
+  return frame_gap_ms() > config_.no_new_frame_timeout_ms;
+}
+
 bool SimCamera::heartbeat_alive() const
 {
   const std::uint64_t hb = client_.heartbeat_ns();
@@ -90,10 +134,23 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
 
   if (!client_.connected()) return ReadStatus::Disconnected;
 
-  // wall clock 会被 NTP 调整。周期性重采样并在跳变时清掉帧龄基准。
+  // wall clock 会被 NTP 调整。跳变一旦发生，帧龄基准就不可信：本函数下面用
+  // clock_.to_steady() 把源端 wall clock 映射到本地 steady clock，偏移刚被改过
+  // 就意味着"跳变前发布、跳变后消费"的那一帧算出来的帧龄含有整个跳变量。
+  // 所以跳变必须作为 ReadStatus 上报，由上层置 FAULT_CLOCK_JUMP 并在该帧禁止
+  // 控制与开火，而不是只记一个计数器。
   if (clock_.resample_if_due(
         std::chrono::nanoseconds(static_cast<std::int64_t>(config_.clock_resample_ms * 1e6)))) {
-    // 跳变本身不丢帧，但跨越跳变的帧龄不可信，交由上层按 clock_jumps() 降级。
+    jump_pending_ = true;
+  }
+  if (jump_pending_) {
+    // 跳变后的第一次读取直接丢弃：这一帧的帧龄跨越了跳变点。清掉帧龄基准和
+    // fps 滑动平均，避免把跳变量算进统计。
+    jump_pending_ = false;
+    ++clock_jump_frames_;
+    has_last_ok_ = false;
+    fps_ = 0.0;
+    return ReadStatus::ClockJump;
   }
 
   FrameBundle bundle;
@@ -102,11 +159,41 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
   switch (status) {
     case ConsumeStatus::NotConnected:
       return ReadStatus::Disconnected;
-    case ConsumeStatus::NoFrame:
-      return heartbeat_alive() ? ReadStatus::Timeout : ReadStatus::Disconnected;
+    case ConsumeStatus::NoFrame: {
+      if (!heartbeat_alive()) return ReadStatus::Disconnected;
+      // 心跳还在但长时间没有新帧：可能是发布端**正常退出**后又被拉起——它会
+      // unlink 掉共享内存文件，重建时是新 inode，本进程手里的旧映射既看不到
+      // 新帧也看不到新的 created_ns（心跳同样停在旧值上，所以先走 heartbeat
+      // 那一路；这里覆盖的是心跳尚未超时的窗口）。按周期复查文件身份。
+      const auto now = std::chrono::steady_clock::now();
+      const double since_check =
+        std::chrono::duration<double, std::milli>(now - last_remap_check_).count();
+      if (since_check >= config_.remap_check_ms) {
+        last_remap_check_ = now;
+        if (client_.paths_changed()) {
+          std::string err;
+          if (client_.remap(&err)) {
+            invalidate_after_epoch_change();
+            return ReadStatus::Reconnected;
+          }
+          // 重映射失败（文件正在被重建、长度还没设好）：保持断开语义，下个周期重试。
+          return ReadStatus::Disconnected;
+        }
+      }
+      return ReadStatus::Timeout;
+    }
     case ConsumeStatus::Corrupted:
       ++rejected_frames_;
       return ReadStatus::Disconnected;
+    case ConsumeStatus::EpochChanged:
+      // 同一个 inode 被新发布端复用（SIGKILL 后重启）。丢弃本帧并复位。
+      ++rejected_frames_;
+      invalidate_after_epoch_change();
+      return ReadStatus::Reconnected;
+    case ConsumeStatus::Remapped:
+      ++rejected_frames_;
+      invalidate_after_epoch_change();
+      return ReadStatus::Reconnected;
     case ConsumeStatus::ImageInvalid:
     case ConsumeStatus::PoseMissing:
     case ConsumeStatus::PoseSeqMismatch:
@@ -166,6 +253,8 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
   }
   last_ok_steady_ = steady_ts;
   has_last_ok_ = true;
+  last_ok_arrival_ = now;
+  has_arrival_ = true;
 
   return ReadStatus::Ok;
 }
@@ -180,6 +269,8 @@ ReadStatus SimCamera::read_blocking(
   for (;;) {
     const ReadStatus status = try_read(img, timestamp);
     if (status != ReadStatus::Timeout) return status;
+    // 断流看门狗在阻塞读内部就要生效，不能等 read_timeout_ms 才报。
+    if (no_new_frame()) return ReadStatus::Timeout;
     if (std::chrono::steady_clock::now() >= deadline) return ReadStatus::Timeout;
     std::this_thread::sleep_for(
       std::chrono::nanoseconds(static_cast<std::int64_t>(config_.poll_interval_us * 1e3)));
@@ -222,7 +313,9 @@ void SimCamera::reset_stats()
   stale_frames_ = 0;
   rejected_frames_ = 0;
   future_frames_ = 0;
+  clock_jump_frames_ = 0;
   has_last_ok_ = false;
+  has_arrival_ = false;
   fps_ = 0.0;
 }
 

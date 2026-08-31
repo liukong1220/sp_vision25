@@ -46,6 +46,19 @@ public:
   std::int64_t last_jump_ns() const { return last_jump_ns_; }
   bool initialized() const { return initialized_; }
 
+  // 测试钩子：人为把已记录的 offset 挪开 delta，并把上次采样时刻推到过去，
+  // 使下一次 resample_if_due() 必然重采样、并观测到 delta 大小的偏移变化。
+  //
+  // 为什么需要它：真正的 realtime<->steady 偏移跳变来自 NTP/settimeofday，
+  // 测试进程既不该、通常也无权改系统时钟。改 offset_ns_ 与改系统时钟对本类
+  // 完全等价——resample() 比较的就是"新采样 offset 与 offset_ns_ 之差"，
+  // 所以这条注入路径走的是与生产完全相同的判定与上报逻辑，不是旁路。
+  void debug_shift_offset_ns(std::int64_t delta)
+  {
+    offset_ns_ += delta;
+    last_sample_ = std::chrono::steady_clock::time_point{};
+  }
+
   // 单次紧密采样：steady, realtime, steady 三次读取，取 steady 中点，
   // 并在多次尝试中挑选读取间隔最小的一组，把采样自身误差压到最低。
   static std::int64_t sample_offset_ns(int attempts = 8);

@@ -12,7 +12,7 @@ min_confidence: 0.8
 use_traditional: true
 
 #####-----ROI-----#####
-roi: 
+roi:
   x: 420
   y: 50
   width: 600
@@ -84,11 +84,30 @@ outpost_fire_z_compensation: [0.0, -0.012, 0.0]
 #####-----aimer参数----
 # 仿真里没有真实机械零偏，先归零；单轴标定实验确认后再填。
 yaw_offset: 0.0
+# 保持 0：这是**真机标定量**，不该按仿真单场景的距离去拟合。
+#
+# 实测（闭环 60s，目标 1.48m / 2.50m，真值口径 = 枪口 -> 板心）：
+#   pitch_offset: 0.0  -> aim_error p50=7.58 mean=7.26  pitch_mean=-7.02
+#   pitch_offset:-7.0  -> aim_error p50=1.07 mean=1.55  pitch_mean=-0.98
+# 误差几乎全是系统性的 pitch 偏高，yaw 本来就是居中的（mean=-0.47，±3.8）。
+#
+# 成因不是感知：把残差拆开后
+#   muzzle_parallax_deg mean=4.99  枪口相对云台原点 +0.110m(ROS z)，而算法把
+#                                  弹丸当成从云台原点出膛解弹道（tools::Trajectory
+#                                  的 d/h 是相对云台原点的）
+#   重力抬枪            约 0.7~1.1  25m/s 打 1.5~2.5m，本来就只需要这么点
+#   geom_err mean=1.57            纯几何/估计误差（选板+EKF），与弹道无关
+# 三项之和正好是那 7.26。
+#
+# 所以这是"炮塔枢轴 vs 出膛点"的建模简化，真机上同样存在，靠 pitch_offset 标定
+# 吸收；本场景目标只有 1.5~2.5m，视差比重力补偿还大，才显得离谱。视差随距离变化
+# （2.50m 时 2.53deg，1.48m 时 4.27deg），因此 -7.0 只对这个场景成立，不能当成
+# 通用值写进来。要真正修掉得让弹道解算以枪口为原点，那属于算法侧改动，本次不做。
 pitch_offset: 0.0
 coming_angle: 50
 leaving_angle: 25
 decision_speed: 8
-high_speed_delay_time: 0.07  # 略微减少高速延迟，进一步提高响应速度 
+high_speed_delay_time: 0.07  # 略微减少高速延迟，进一步提高响应速度
 low_speed_delay_time: 0.10  # 略微减少低速延迟
 
 #####-----shooter参数-----#####
@@ -211,24 +230,60 @@ sim:
   max_frame_age_ms: 450.0
   heartbeat_timeout_ms: 500.0
   read_timeout_ms: 1000.0
-  # 命令角度映射。这四个数已由 probe 模式单轴实测确认，判据是"下发角 == 反馈角"。
-  #   simulator: yaw = radians(yaw_deg), pitch = radians(-pitch_deg - 90)
-  #   本侧:      yaw_deg = yaw_scale*deg(yaw) + yaw_offset_deg
-  #              pitch_deg = pitch_scale*deg(pitch) + pitch_offset_deg
-  # 注意 pitch 不是解码式的直接逆变换，多了一次取反，原因见下面的注释。
+  # 断流看门狗：距上一帧到达超过这个时间就置 FAULT_NO_NEW_FRAME。
+  # 必须小于 max_frame_age_ms，否则"帧龄已经超限"会比"断流"先发生，看门狗
+  # 形同虚设；SimCamera::open() 会做这个夹取并打 warn。
+  no_new_frame_timeout_ms: 250.0
+  # 探测发布端是否换过共享内存文件（正常退出会 unlink，重启后是新 inode）的周期。
+  remap_check_ms: 200.0
+  # 换代/重连/时钟跳变之后，连续确认多少帧目标才解除 FAULT_REARM_PENDING。
+  rearm_confirm_frames: 5
+  # 真值评估的敌方队伍(red/blue/any)。场景里本车(Controlled)是红方，两台敌方
+  # 步兵是蓝方；红蓝三号步兵共用 armor label=3，不指定队伍会匹配错车。
+  # 顶层 enemy_color 只作用于实车 Tracker 的颜色门，与这里无关。
+  enemy_team: "blue"
+  # 命令角度映射：本侧下发 pitch_deg = pitch_scale*deg(pitch) + pitch_offset_deg。
+  #
+  # 结论：cmd.pitch_deg 就是算法侧的 ROS pitch 本身（正 = 低头，见
+  # aimer.cpp:122 "世界坐标系下pitch向上为负"），所以正确映射是 identity。
+  #
+  # 共享内存探针实测（对着运行中的 simulator 下发单一角度，读回同一帧发布的
+  # gimbal 四元数，取 q_raw*(1,0,0) 作为枪口在 ROS 系的指向）：
+  #   cmd pitch=  0 -> fwd=(1.0000, 0, -0.0001)  elev= -0.01deg  水平
+  #   cmd pitch=-20 -> fwd=(0.9409, 0,  0.3387)  elev=+19.80deg  抬头
+  #   cmd pitch=+20 -> fwd=(0.9359, 0, -0.3523)  elev=-20.63deg  低头
+  #   cmd pitch=-90 -> fwd=(0,      0,  1.0000)  elev=+90.00deg  垂直朝天
+  # 同时 fb(raw) 的 ZYX pitch 在每个采样点都恒等于 cmd.pitch_deg
+  # （0/-30/-90/+30 四点逐一吻合）。
+  #
+  # 之前这里填 -90.0 是错的：算法瞄一个水平目标时 ROS pitch≈0，编码成
+  # cmd.pitch_deg=-90，仿真端就把枪口抬到 elev=+90（垂直朝天）。表现正是
+  # "发弹总数在涨、但看不到弹丸和轨迹"（弹丸直上飞出画面）以及"云台不跟随目标"。
+  #
+  # 旧注释声称这是 probe 单轴实测确认的，判据是"下发角 == 反馈角"。该判据本身
+  # 是满足的（identity 映射下它同样满足），但它只能验证映射自洽，**验证不了绝对
+  # 指向**：任何 pitch_offset_deg 都能让 fb==cmd 成立。所以标定判据必须是枪口的
+  # 绝对指向（elev），不能只看下发角与反馈角是否相等。
   # 单轴标定实验只应该改这四个数，不要改代码。
   yaw_scale: 1.0
   yaw_offset_deg: 0.0
-  # 实测：Bevy 的 YXZ pitch 绕 +X 抬头，ROS 的 ZYX pitch 绕 +Y 低头，两者反向，
-  # 所以编码要取 +1 才能让 fb_pitch == cmd_pitch（probe --axis=pitch 实测确认）。
   pitch_scale: 1.0
-  pitch_offset_deg: -90.0
-  # 同帧姿态过期门限、空闲重发安全停止周期
-  # 反馈四元数的坐标系修正：仿真端 capture.rs 发布前多乘了一个绕枪口 X 轴的
-  # 90° 滚转，经 to_ros_quat 之后等价于在 ROS 系右乘 Ry(-90°)。这里右乘回
-  # Ry(+90°) 还原。不修正会同时踩两个坑：ZYX 欧拉角万向锁（pitch 恰好 -90°，
-  # yaw 解不出来）以及 solver 的世界系整体偏 90°。除非仿真端改了发布式，别动。
-  feedback_pitch_fix_deg: 90.0
+  pitch_offset_deg: 0.0
+  # 反馈四元数的坐标系修正。
+  #
+  # 实测结论：不需要修正，取 0。仿真端 capture.rs 发布的是
+  #   gimbal_rot = R_gimbal * R_muzzle_local * Rx(90deg)，再过 to_ros_quat。
+  # Bevy 里枪管前向是该帧的局部 +Y，Rx(90deg) 把 +Y 送到 -Z（Bevy 的前向约定），
+  # 于是 to_ros_quat 之后 ROS 的 +X 恰好就是出膛方向 —— 也就是说发布出来的
+  # q_raw 已经是标准的 world<-gimbal（x 前 y 左 z 上），与 avian 实际用来
+  # spawn 弹丸的方向逐点吻合（见上面 elev 一列）。
+  #
+  # 再右乘 Ry(+90°) 反而把姿态又转掉 90°：那样 cmd pitch=0（水平）会解出
+  # fb(fix90) pitch=90°、roll/yaw 一起退化，看着像"万向锁"，其实是被这次多余
+  # 的修正推到奇点上的。取 0 之后 cmd pitch=0 的反馈是
+  # yaw=0.000 pitch=0.000 roll=0.000，远离奇点。
+  # 除非仿真端改了发布式，别动。
+  feedback_pitch_fix_deg: 0.0
   state_timeout_ms: 450.0
   safe_stop_period_ms: 20.0
   # 目标丢失多久后置 FAULT_TARGET_LOST
