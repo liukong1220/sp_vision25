@@ -499,7 +499,7 @@ flowchart TD
 
 1. 命令不能突变太大
 2. 当前云台角要接近上一帧命令
-3. `debug_aim_point` 必须有效
+3. `debug_aim_point` 建议有效
 
 这样可以减少“命令刚跳变就误击发”。
 

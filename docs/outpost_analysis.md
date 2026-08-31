@@ -177,7 +177,7 @@ YOLOV5 网络检测
 与前哨直接相关的点有三个：
 
 1. `outpost` 在类别系统里是合法目标；
-2. `check_type()` 会禁止 `outpost` 走大装甲板类型；
+2. `check_type()` 会阻止 `outpost` 走大装甲板类型；
 3. 传统检测器在这里承担的是“角点优化”或独立传统检测，不是前哨专用识别器。
 
 ### 3.4 识别层对 outpost 的真实作用
@@ -664,7 +664,7 @@ outpost_fire_z_compensation[physical_armor_id]
 
 ### 5.6 开火门控
 
-这部分必须按入口区分。
+这部分建议按入口区分。
 
 #### `standard.cpp`
 
@@ -692,10 +692,10 @@ outpost_fire_z_compensation[physical_armor_id]
 
 1. 先计算轨迹跟踪误差 `tracking_error`
 2. 普通目标只看 `tracking_error < fire_thresh`
-3. 前哨目标还必须同时满足：
+3. 前哨目标还建议同时满足：
    - `hit_solution.converged == true`
    - 选中板命中时刻的相位角落入更紧的击打窗口
-   - 如果目标已经 `jumped`，则必须是真正通过 `spin gate` 选中的板，而不是 fallback 板
+   - 如果目标已经 `jumped`，则建议是真正通过 `spin gate` 选中的板，而不是 fallback 板
 
 当前前哨击打窗口的推导规则是：
 
@@ -806,9 +806,9 @@ fire_phase_limit =
 2. 画面边缘
 3. 角点退化
 
-这几种工况下，如果需要放宽或收紧门限，就必须改代码，而不能只靠网页调参。
+这几种工况下，如果需要放宽或收紧门限，就建议改代码，而不能只靠网页调参。
 
-### 7.5 `outpost_armor_z_offsets` 与 `outpost_fire_z_compensation` 必须配套看
+### 7.5 `outpost_armor_z_offsets` 与 `outpost_fire_z_compensation` 建议配套看
 
 这两个量解决的是不同问题：
 
@@ -933,7 +933,7 @@ fire_phase_limit =
 1. 跟踪层设计已经比较像真正面向前哨的方案；
 2. `Planner` 分支的火控闭环已经具备前哨专用相位控制雏形；
 3. 但不同入口之间前哨能力仍不完全一致；
-4. 实车验收时必须优先确认入口，并用调试量去拆分问题来源。
+4. 实车验收时建议优先确认入口，并用调试量去拆分问题来源。
 
 ## 11. 2026-04-22 前哨实车补充分析与代码修改记录
 
@@ -995,7 +995,7 @@ fire_phase_limit =
 修复后：
 
 1. 前哨在开火前除了要满足 `tracking_error < fire_thresh`
-2. 还必须满足命中时刻的 `|delta_angle|` 落入更紧的击打窗口
+2. 还建议满足命中时刻的 `|delta_angle|` 落入更紧的击打窗口
 3. 这个窗口由 `outpost_leaving_angle` 推导：
    `leaving_angle * 0.5`
    并限制在 `4° ~ 12°`
