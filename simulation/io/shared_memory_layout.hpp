@@ -8,7 +8,7 @@
 // 而不是一个显式的错误。因此这里对每个结构体都做 sizeof / alignof / offsetof
 // 编译期断言，不允许只靠“字段名看起来一样”来判定 ABI 兼容。
 //
-// 上游基线：SHM_MAGIC = 0x54414C05，SHM_VERSION = 2。
+// 上游基线：SHM_MAGIC = 0x54414C05，SHM_VERSION = 3。
 //
 // 三缓冲的 `state` 在 Rust 侧是 `AtomicU8`。这里刻意用裸 `std::uint8_t` 保持
 // 结构体是纯 POD（可 offsetof、可 static_assert 标准布局），原子语义由
@@ -27,7 +27,29 @@ namespace sim_io
 // ---------------------------------------------------------------- 协议常量 --
 
 constexpr std::uint32_t SHM_MAGIC = 0x54414C05u;
-constexpr std::uint32_t SHM_VERSION = 2u;
+// 协议版本。v2 -> v3：poses[Muzzle] 由“云台局部平移 + 单位四元数”改为**完整世界
+// 位姿**（见 PoseIndex 的注释），并启用 ShmHeader::capabilities 能力位。
+//
+// 字节布局没有变，所以这次升版号纯粹为了拦住语义不兼容：旧发布端 + 新消费端能
+// mmap 成功、能读出数字，只是把局部偏移当世界坐标用，得到的是一个静默的错误答案。
+constexpr std::uint32_t SHM_VERSION = 3u;
+
+// ShmHeader::capabilities 的位定义。
+//
+// 版本号表达“协议第几代”，表达不了“这一代的发布端实际填了哪些可选区域”。真值区
+// 就是典型：布局里一直有 ground_truth，但只有仿真器本体会填，测试用的精简发布端
+// 不会。不看能力位就只能靠“读出来是否全零”去猜，而全零同样是合法数据，于是
+// **新消费端对着不发真值的发布端会静默失去真值**。
+constexpr std::uint32_t CAP_GROUND_TRUTH = 1u << 0;
+// poses[Muzzle] 是世界位姿（v3 语义）。未置位表示 v2 的局部平移语义。
+constexpr std::uint32_t CAP_MUZZLE_WORLD_POSE = 1u << 1;
+constexpr std::uint32_t CAP_CHASSIS_OBSERVATION = 1u << 2;
+constexpr std::uint32_t CAP_RUNTIME_STATE = 1u << 3;
+
+// 仿真器本体（TalosPlugin）声明的全集，镜像 talos-ipc 的 SIMULATOR_CAPABILITIES。
+// 测试用的精简发布端可以只声明其中一部分。
+constexpr std::uint32_t SIMULATOR_CAPABILITIES =
+  CAP_GROUND_TRUTH | CAP_MUZZLE_WORLD_POSE | CAP_CHASSIS_OBSERVATION | CAP_RUNTIME_STATE;
 
 constexpr std::uint32_t IMAGE_WIDTH = 1440u;
 constexpr std::uint32_t IMAGE_HEIGHT = 1080u;
@@ -54,6 +76,25 @@ constexpr std::size_t GROUND_TRUTH_MAX_TARGETS = 16;
 constexpr std::size_t GROUND_TRUTH_MAX_RUNES = 4;
 
 // PoseIndex，对应 Rust `#[repr(u8)] enum PoseIndex`。
+//
+// 全部已转到 ROS 约定（x 前、y 左、z 上），四元数按 [w, x, y, z] 存放。
+//
+// **各通道参考系不同，混用会静默出错**，逐条写明：
+//
+//   Gimbal : position 恒为 [0,0,0]（占位，不是坐标）
+//            quaternion = 云台/枪管的**世界**姿态 world <- gimbal
+//   Odom   : position  = 云台回转中心的**世界**位置；quaternion = 单位四元数（占位）
+//   Muzzle : position  = 枪口的**世界**位置；quaternion = 枪口的**世界**姿态（同 Gimbal）
+//   Camera : position  = 相机相对云台的**局部**平移；quaternion = 单位四元数（占位）
+//
+// Camera 刻意保持局部：消费端拿它和自己配置里的 t_camera2gimbal 外参做自检，
+// 那本来就是一个局部量（见 sim_auto_aim.cpp 的外参自检）。
+//
+// Muzzle 在 v2 里也是局部平移，v3 起改为世界位姿，能力位 CAP_MUZZLE_WORLD_POSE。
+// 改的原因是局部量太容易被误用：消费端看到 Odom 是世界位置、Muzzle 是“偏移”，
+// 最自然的写法就是 odom + muzzle，而那是把一个**未经云台旋转**的局部平移直接加到
+// 世界坐标上。yaw=90° 时 0.11 m 的局部 +X 实际指向世界 +Y，误差等于偏移量全长且
+// 随姿态变化，在报表上看起来就像闭环残差。直接发世界量让消费端无从误用。
 enum class PoseIndex : std::uint8_t
 {
   Gimbal = 0,
@@ -149,7 +190,10 @@ struct alignas(64) ShmHeader
   std::uint64_t heartbeat_ns;
   std::uint32_t image_width;
   std::uint32_t image_height;
-  std::uint8_t pad_[32];
+  // 可选区域能力位，见 CAP_* 常量。占用原 pad_[32] 的前 4 字节，
+  // 结构体大小与其余偏移不变。
+  std::uint32_t capabilities;
+  std::uint8_t pad_[28];
 };
 
 struct alignas(32) GroundTruthTarget
@@ -211,6 +255,14 @@ struct alignas(64) GroundTruthBatch
   std::uint32_t seqlock;
   std::uint8_t pad_[60];
 };
+
+// seqlock 标记之前的 payload 字节数，即整块里“真正的数据”。
+//
+// 两端拷贝 payload 时都只拷这段前缀，标记本身只用 __atomic_* 访问。整块 memcpy
+// 会连带碰到那 4 字节标记：读端等于用非原子读去读一个正在被并发修改的原子变量，
+// 写端等于用非原子写踩自己的同步变量。标记之后只有 pad_，所以这段前缀已覆盖
+// 全部有效字段。
+constexpr std::size_t GROUND_TRUTH_PAYLOAD_BYTES = 1600;
 
 struct alignas(64) RuntimeState
 {
@@ -308,6 +360,7 @@ SIM_IO_ASSERT_OFFSET(ShmHeader, created_ns, 8);
 SIM_IO_ASSERT_OFFSET(ShmHeader, heartbeat_ns, 16);
 SIM_IO_ASSERT_OFFSET(ShmHeader, image_width, 24);
 SIM_IO_ASSERT_OFFSET(ShmHeader, image_height, 28);
+SIM_IO_ASSERT_OFFSET(ShmHeader, capabilities, 32);
 
 SIM_IO_ASSERT_LAYOUT(GroundTruthTarget, 64, 32);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, team, 16);
@@ -336,6 +389,9 @@ SIM_IO_ASSERT_OFFSET(GroundTruthBatch, rune_count, 20);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, targets, 32);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, runes, 1088);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, seqlock, 1600);
+static_assert(
+  GROUND_TRUTH_PAYLOAD_BYTES == offsetof(GroundTruthBatch, seqlock),
+  "GROUND_TRUTH_PAYLOAD_BYTES 必须正好等于 seqlock 的偏移");
 
 SIM_IO_ASSERT_LAYOUT(RuntimeState, 64, 64);
 SIM_IO_ASSERT_OFFSET(RuntimeState, following, 8);

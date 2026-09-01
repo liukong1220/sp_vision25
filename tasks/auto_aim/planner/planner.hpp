@@ -45,10 +45,44 @@ struct AimSelection
   std::vector<double> delta_angle_list;
 };
 
+// 某一次瞬时瞄准解算的完整分解，供评估端使用。
+//
+// 存在的理由是让"弹道补偿量"有一个可验证的定义。原来评估端用
+// `plan.pitch - atan2(选中点)` 反推抬枪量，这个差里同时含三样东西：MPC 半时域输出
+// 与瞬时解的差、不同时刻的目标状态、以及（在枪口契约修正前）不同的参考原点。三者
+// 混在一起，得出的数不是弹道补偿。
+//
+// 这里的每个量都出自**同一次** solve_aim_command 调用：同一预测时刻、同一选中瞄准
+// 点、同一参考原点（云台原点，tools::Trajectory 就是按这个原点解的）。恒等式
+//
+//     pitch == geometric_pitch - gravity_lift - pitch_offset
+//
+// 精确成立（不是近似），可由评估端直接断言。符号约定：pitch 正 = 低头（ROS），
+// gravity_lift 正 = 相对纯几何视线抬枪。
+struct AimCommandDebug
+{
+  bool valid = false;
+  // 实际送进弹道解算的瞄准点，云台原点 ROS 系。注意它 = xyza.head<3>() 再加上
+  // z 方向的 aim_z_compensation，与 debug_xyza 本身**不相等**。
+  Eigen::Vector3d aim_xyz = Eigen::Vector3d::Zero();
+  double dist_xy = 0.0;
+  // 瞬时（未经 MPC）的下发角，即 solve_aim_command 的返回值。
+  double yaw = 0.0;
+  double pitch = 0.0;
+  // 指向 aim_xyz 的纯几何俯仰（无重力、无标定偏置）。
+  double geometric_pitch = 0.0;
+  // 重力抬枪量：tools::Trajectory 解出的抬头角减去纯几何仰角。
+  double gravity_lift = 0.0;
+  // 标定俯仰偏置 pitch_offset_，与重力抬枪量分开报告。
+  double pitch_offset = 0.0;
+};
+
 class Planner
 {
 public:
   Eigen::Vector4d debug_xyza;
+  // 当前决策时刻这一次瞄准解算的分解，见 AimCommandDebug。
+  AimCommandDebug debug_aim_command;
   int debug_armor_id = -1;
   int debug_physical_armor_id = -1;
   bool debug_used_spin_gate = false;
@@ -100,9 +134,12 @@ private:
   void setup_yaw_solver();
   void setup_pitch_solver();
 
+  // dbg 非空时填入这一次解算的完整分解。注意本函数在 get_trajectory() 里会被沿
+  // 整条参考轨迹反复调用，只有"当前决策时刻"那一次才应该传 dbg。
   Eigen::Matrix<double, 2, 1> solve_aim_command(
     const Target & target, double bullet_speed, int & lock_id,
-    AimSelection * selection = nullptr, Eigen::Vector3d * aim_xyz = nullptr) const;
+    AimSelection * selection = nullptr, Eigen::Vector3d * aim_xyz = nullptr,
+    AimCommandDebug * dbg = nullptr) const;
   void update_debug_selection(const Target & target, const AimSelection & selection);
   std::pair<double, double> resolve_angle_window(const Target & target) const;
   double resolve_delay_time(const Target & target) const;

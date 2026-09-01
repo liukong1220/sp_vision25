@@ -87,14 +87,18 @@ bool GroundTruthEvaluator::fetch(std::uint64_t image_frame_seq)
 {
   fetched_ = false;
   GroundTruthBatch batch{};
-  if (!client_.read_ground_truth(&batch)) return false;
+  // 只认 consume_frame() 在事务窗口里拷下来的那一份，绝不在这里现读槽位。
+  // 本函数在检测/解算之后调用，距 consume_frame() 已有 ~250 ms，那时背压早已放开，
+  // 槽位可能已经被后面若干帧覆盖——现读必然读到更新的批次，同帧校验恒不命中。
+  if (!client_.frame_ground_truth(&batch)) return false;
 
   if (batch.frame_seq != image_frame_seq) {
     ++seq_mismatches_;
-    // 记下偏差方向与幅度。只有计数的话看不出这是"历史深度不够"还是"发布时序
-    // 竞争"：前者表现为真值比图像**旧很多**（已被挤掉），后者只差一两帧且真值
-    // 恒**旧于**图像（发布端要等图像落地才发同帧真值，晚一个 Bevy 帧）。
-    // 两种成因的修法完全不同，所以必须分开量。
+    // 协议 v3 规定图像、同帧姿态、同帧真值三者 frame_seq 严格相等，没有任何允许
+    // 的偏移，所以这里任何一次计数都是协议违例，而不是"正常的一两帧延迟"。
+    // 保留 skew 的方向与幅度是为了区分违例来源：
+    //   d < 0（真值更旧）= 发布端没把真值放进图像那次事务；
+    //   d > 0（真值更新）= 消费端取的不是事务窗口里的那一份（背压已放开后现读）。
     const std::int64_t d = static_cast<std::int64_t>(batch.frame_seq) -
                            static_cast<std::int64_t>(image_frame_seq);
     if (seq_skew_samples_ == 0 || d < seq_skew_min_) seq_skew_min_ = d;

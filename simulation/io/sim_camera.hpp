@@ -90,6 +90,11 @@ public:
   std::uint64_t last_frame_seq() const { return bundle_.frame_seq; }
   std::uint64_t last_timestamp_ns() const { return bundle_.timestamp_ns; }
 
+  // 最近一次 Ok 帧的源端采样时刻与本地接收时刻。两者都必须交给 SimGimbal，
+  // 由它分别用于"世界观测年龄"与"本地状态保有时长"这两个语义不同的判据。
+  FrameStamps last_stamps() const { return FrameStamps{last_ok_steady_, last_ok_arrival_}; }
+  bool has_stamps() const { return has_last_ok_ && has_arrival_; }
+
   const CameraInfo * camera_info() const { return client_.camera_info(); }
   SharedMemoryClient & client() { return client_; }
   const SharedMemoryClient & client() const { return client_; }
@@ -153,6 +158,17 @@ private:
 
   // 换代/重连后清掉与旧发布端相关的本地状态（同帧位姿、帧龄基准、fps）。
   void invalidate_after_epoch_change();
+
+  // 尝试恢复与发布端的连接，按 remap_check_ms 节流。
+  //
+  // 返回 true 表示这一拍已有结论，*out 有效（Reconnected 或 Disconnected）；
+  // 返回 false 表示没到检查周期、或文件身份没变，调用方继续原有判断。
+  //
+  // 必须能从**心跳已超时**和**完全未连接**两种状态进入：发布端正常退出会 unlink
+  // 掉文件，隔很久才重新拉起（人工重启、脚本串行跑两段），这段时间心跳早就超时了。
+  // 原来 NoFrame 分支里 `if (!heartbeat_alive()) return Disconnected;` 挡在文件身份
+  // 复查之前，而 try_read 的第一行又在未连接时直接返回，于是"慢重启"永远恢复不了。
+  bool try_recover_publisher(ReadStatus * out);
 };
 
 }  // namespace sim_io

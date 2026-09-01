@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 
 namespace sim_io
@@ -92,10 +93,41 @@ bool map_region(
 
 SharedMemoryClient::~SharedMemoryClient() { close(); }
 
+std::string describe_capabilities(std::uint32_t caps)
+{
+  if (caps == 0u) return "none";
+  static const struct
+  {
+    std::uint32_t bit;
+    const char * name;
+  } NAMES[] = {
+    {CAP_GROUND_TRUTH, "ground_truth"},
+    {CAP_MUZZLE_WORLD_POSE, "muzzle_world_pose"},
+    {CAP_CHASSIS_OBSERVATION, "chassis_observation"},
+    {CAP_RUNTIME_STATE, "runtime_state"},
+  };
+
+  std::string out;
+  std::uint32_t rest = caps;
+  for (const auto & e : NAMES) {
+    if ((rest & e.bit) == 0u) continue;
+    if (!out.empty()) out += "|";
+    out += e.name;
+    rest &= ~e.bit;
+  }
+  if (rest != 0u) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "0x%08X", rest);
+    if (!out.empty()) out += "|";
+    out += buf;
+  }
+  return out;
+}
+
 bool SharedMemoryClient::open(std::string * error)
 {
-  close();
-
+  // 注意：这里**不能**先 close()。见头文件里对事务化的说明——先拆旧映射会把
+  // "meta 已建好、pool 还没定长" 这个瞬时窗口里的一次失败变成永久失联。
   const std::string meta_path = options_.dir + "/" + options_.meta_name;
   const std::string pool_path = options_.dir + "/" + options_.image_pool_name;
 
@@ -125,6 +157,16 @@ bool SharedMemoryClient::open(std::string * error)
     reason = "图像分辨率不匹配: 期望 " + std::to_string(IMAGE_WIDTH) + "x" +
              std::to_string(IMAGE_HEIGHT) + ", 实际 " + std::to_string(meta->header.image_width) +
              "x" + std::to_string(meta->header.image_height);
+  } else if (
+    (meta->header.capabilities & options_.required_capabilities) !=
+    options_.required_capabilities) {
+    // 必需能力位缺失只能在连接时拒绝。见 Options::required_capabilities：
+    // 这些通道缺位时读出来的零值与合法读数在形状上完全一样，放过去就会被当成
+    // 真实的 v3 世界量一路用下去。
+    const std::uint32_t missing = options_.required_capabilities & ~meta->header.capabilities;
+    reason = "缺少必需能力位 " + describe_capabilities(missing) + "（发布端声明 " +
+             describe_capabilities(meta->header.capabilities) + "，本消费端要求 " +
+             describe_capabilities(options_.required_capabilities) + "）";
   }
 
   if (!reason.empty()) {
@@ -133,6 +175,9 @@ bool SharedMemoryClient::open(std::string * error)
     ::munmap(pool_map.addr, pool_map.bytes);
     return false;
   }
+
+  // 校验全部通过，到这一步才允许动现有映射。
+  close();
 
   meta_ = meta;
   meta_bytes_ = meta_map.bytes;
@@ -175,8 +220,12 @@ bool SharedMemoryClient::paths_changed() const
 
 bool SharedMemoryClient::remap(std::string * error)
 {
-  // open() 内部先 close()，失败时保持未连接，由上层重试。
-  if (!open(error)) return false;
+  // open() 是事务化的：失败时现有映射原样保留，connected() 不变，上层下个周期
+  // 可以继续重试。
+  if (!open(error)) {
+    ++remap_failures_;
+    return false;
+  }
   // 换了文件就等于换了发布端：帧号水位线、换代基准全部作废。
   has_last_seq_ = false;
   last_seq_ = 0;
@@ -197,6 +246,8 @@ void SharedMemoryClient::close()
     image_pool_ = nullptr;
     image_pool_bytes_ = 0;
   }
+  // 断开后手里那份同帧真值不再属于任何一帧图像。
+  has_frame_ground_truth_ = false;
 }
 
 ConsumeStatus SharedMemoryClient::drain_poses(FrameBundle * bundle, std::uint64_t image_seq)
@@ -259,6 +310,10 @@ ConsumeStatus SharedMemoryClient::consume_frame(FrameBundle * bundle)
     return ConsumeStatus::EpochChanged;
   }
 
+  // 上一帧的同帧真值到此作废。放在这里（而不是拷到新批次的地方）是为了让所有
+  // 提前 return 的分支都不会把旧真值留给下一帧当"同帧"数据。
+  has_frame_ground_truth_ = false;
+
   bool corrupted = false;
   const ImageMeta * image = triple_buffer_consume(meta_->image, &corrupted);
   if (corrupted) {
@@ -278,6 +333,26 @@ ConsumeStatus SharedMemoryClient::consume_frame(FrameBundle * bundle)
       regressed = true;
     } else {
       skipped_frames_ += meta.seq - last_seq_ - 1;
+    }
+  }
+
+  // 同帧真值必须在这里拷走，窗口的两个边界都不是随手挑的：
+  //   上界：triple_buffer_consume(meta_->image) 刚刚清掉图像的 FLAG_NEW；
+  //   下界：drain_poses() 才会清掉 poses[0..=Camera] 的 FLAG_NEW。
+  // 发布端的 synchronized_frame_consumed() 要求这两组标记**全部**清掉才允许发下
+  // 一帧，所以在这中间它一定还堵在第 meta.seq 帧上，真值槽位里就是这一帧的批次。
+  // 发布端那侧把真值放进图像提交前的 before_commit 回调里（事务化发布），保证
+  // "图像 seq=k 可见"时真值已经就位。
+  //
+  // 以前是让评估器在流水线后段自己去 read_ground_truth()：检测一帧 ~250 ms，
+  // 那时 pose 通道早已排空、背压放开，槽位已被后面若干帧覆盖，于是同帧校验恒不
+  // 命中。这是 seq_mismatches 的第二个来源（第一个在发布端的时序）。
+  {
+    GroundTruthBatch captured{};
+    if (read_ground_truth(&captured)) {
+      frame_ground_truth_ = captured;
+      has_frame_ground_truth_ = true;
+      ++ground_truth_captures_;
     }
   }
 
@@ -348,6 +423,11 @@ std::uint32_t SharedMemoryClient::version() const
   return connected() ? meta_->header.version : 0;
 }
 
+std::uint32_t SharedMemoryClient::capabilities() const
+{
+  return connected() ? meta_->header.capabilities : 0u;
+}
+
 const CameraInfo * SharedMemoryClient::camera_info() const
 {
   return connected() ? &meta_->camera_info : nullptr;
@@ -355,20 +435,48 @@ const CameraInfo * SharedMemoryClient::camera_info() const
 
 const RuntimeState * SharedMemoryClient::runtime_state() const
 {
-  return connected() ? &meta_->runtime_state : nullptr;
+  if (!connected()) return nullptr;
+  // 缺位时返回 nullptr，不返回恒零的 RuntimeState。理由见头文件：零值会把
+  // "发布端不报这个字段"误诊成"仿真端没订阅云台命令"。
+  if (!has_capability(CAP_RUNTIME_STATE)) {
+    ++runtime_state_unsupported_;
+    return nullptr;
+  }
+  return &meta_->runtime_state;
 }
 
 bool SharedMemoryClient::read_chassis_observation(ChassisObservation * out) const
 {
   if (!connected() || out == nullptr) return false;
+  // 全零的底盘观测是合法读数（车停着，v=0、w=0），所以"读出来是零"区分不了
+  // "确实静止"和"发布端根本不填这个区"。只能看能力位。
+  if (!has_capability(CAP_CHASSIS_OBSERVATION)) {
+    ++chassis_observation_unsupported_;
+    return false;
+  }
   if (meta_->chassis_observation.timestamp_ns == 0) return false;
   *out = meta_->chassis_observation;
+  return true;
+}
+
+bool SharedMemoryClient::frame_ground_truth(GroundTruthBatch * out) const
+{
+  if (out == nullptr || !has_frame_ground_truth_) return false;
+  *out = frame_ground_truth_;
   return true;
 }
 
 bool SharedMemoryClient::read_ground_truth(GroundTruthBatch * out) const
 {
   if (!connected() || out == nullptr) return false;
+
+  // 发布端必须显式声明自己发真值。全零的 GroundTruthBatch 是一份合法数据
+  // （target_count = 0，"这一帧没看见任何目标"），所以"读出来是空的"区分不了
+  // "确实没目标"和"这个发布端根本不填真值"。不看能力位就会静默失去真值。
+  if (!has_capability(CAP_GROUND_TRUTH)) {
+    ++ground_truth_unsupported_;
+    return false;
+  }
 
   // seqlock 读端：奇数表示发布端正在写；前后两次读到同一个偶数才说明这份拷贝
   // 完整。发布端在 publish_ground_truth 里 odd -> body -> even，配对的 release/
@@ -377,13 +485,21 @@ bool SharedMemoryClient::read_ground_truth(GroundTruthBatch * out) const
   // 不再用 frame_seq 是否为 0 判断"有没有数据"：frame_seq==0 是合法帧号（仿真端
   // FRAME_SEQ 从 0 开始），把它当哨兵会丢掉第一帧的真值。改用 seqlock != 0 —
   // 发布端至少提交过一次，seqlock 才会离开初始的 0。
+  //
+  // 只拷 GROUND_TRUTH_PAYLOAD_BYTES 字节的前缀，绝不整块 memcpy：标记正被发布端
+  // 并发修改，用非原子读去读它本身就是数据竞争（UB），编译器也可以把这次读与下面
+  // 那次 __atomic_load_n 合并或重排。标记之后只有 pad_，前缀已覆盖全部有效字段。
   for (int attempt = 0; attempt < 8; ++attempt) {
     const std::uint32_t before = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
     if ((before & 1u) != 0u) continue;  // 写入进行中
-    std::memcpy(out, &meta_->ground_truth, sizeof(GroundTruthBatch));
+    std::memcpy(out, &meta_->ground_truth, GROUND_TRUTH_PAYLOAD_BYTES);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     const std::uint32_t after = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
-    if (before == after) return before != 0u;
+    if (before != after) continue;
+    // out 是调用方的私有内存，这里补齐标记与填充，让整块自洽。
+    out->seqlock = before;
+    std::memset(out->pad_, 0, sizeof(out->pad_));
+    return before != 0u;
   }
   return false;
 }

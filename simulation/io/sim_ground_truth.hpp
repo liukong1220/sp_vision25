@@ -83,8 +83,10 @@ public:
   std::uint8_t enemy_team() const { return enemy_team_; }
   std::uint64_t ambiguous_matches() const { return ambiguous_matches_; }
 
-  // 拉取当前真值批次。仅当真值 frame_seq 与图像 frame_seq 一致时才认为可用，
-  // 避免拿上一帧真值评估这一帧估计。
+  // 取本帧真值批次。数据来自 SharedMemoryClient::frame_ground_truth()，即
+  // consume_frame() 在发布事务窗口里拷下来的那一份；仅当其 frame_seq 与图像
+  // frame_seq 相等时才认为可用。协议 v3 规定两者严格相等，所以 seq_mismatches
+  // 的期望值是 0，任何非零都是协议违例。
   bool fetch(std::uint64_t image_frame_seq);
 
   // 只读最新一批真值，不校验帧号。**仅供人看的诊断输出**（例如确认场景里目标
@@ -96,7 +98,7 @@ public:
   std::uint64_t frame_seq() const { return batch_.frame_seq; }
   std::uint32_t target_count() const { return fetched_ ? batch_.target_count : 0; }
   std::uint64_t seq_mismatches() const { return seq_mismatches_; }
-  // 真值帧号减图像帧号的统计，仅在不匹配的样本上累计（见 fetch()）。
+  // 真值帧号减图像帧号的统计，仅在违例样本上累计（见 fetch()）。
   std::uint64_t seq_skew_samples() const { return seq_skew_samples_; }
   double seq_skew_mean() const
   {

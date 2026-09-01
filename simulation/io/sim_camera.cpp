@@ -101,6 +101,43 @@ void SimCamera::invalidate_after_epoch_change()
   ++reconnects_;
 }
 
+bool SimCamera::try_recover_publisher(ReadStatus * out)
+{
+  const auto now = std::chrono::steady_clock::now();
+  const double since_check =
+    std::chrono::duration<double, std::milli>(now - last_remap_check_).count();
+  if (since_check < config_.remap_check_ms) return false;
+  last_remap_check_ = now;
+
+  std::string err;
+
+  if (!client_.connected()) {
+    // 手里一张映射都没有：只能直接尝试建立。此时 paths_changed() 没有比较基准
+    // （它以 connected() 为前提，未连接时恒为 false），必须走 open()。
+    if (!client_.open(&err)) {
+      *out = ReadStatus::Disconnected;
+      return true;
+    }
+    invalidate_after_epoch_change();
+    *out = ReadStatus::Reconnected;
+    return true;
+  }
+
+  // 仍有旧映射：只有文件身份真的变了才换，否则旧映射依然是唯一真相来源。
+  if (!client_.paths_changed()) return false;
+
+  if (client_.remap(&err)) {
+    invalidate_after_epoch_change();
+    *out = ReadStatus::Reconnected;
+    return true;
+  }
+
+  // 重映射失败（文件刚被重建、长度还没设好）。remap() 是事务化的，旧映射仍在，
+  // 下个检查周期继续重试。
+  *out = ReadStatus::Disconnected;
+  return true;
+}
+
 double SimCamera::frame_gap_ms() const
 {
   if (!has_arrival_) return std::numeric_limits<double>::infinity();
@@ -132,7 +169,11 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
 {
   img.release();
 
-  if (!client_.connected()) return ReadStatus::Disconnected;
+  if (!client_.connected()) {
+    ReadStatus recovered = ReadStatus::Disconnected;
+    if (try_recover_publisher(&recovered)) return recovered;
+    return ReadStatus::Disconnected;
+  }
 
   // wall clock 会被 NTP 调整。跳变一旦发生，帧龄基准就不可信：本函数下面用
   // clock_.to_steady() 把源端 wall clock 映射到本地 steady clock，偏移刚被改过
@@ -160,26 +201,16 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
     case ConsumeStatus::NotConnected:
       return ReadStatus::Disconnected;
     case ConsumeStatus::NoFrame: {
+      // 没有新帧：可能是发布端**正常退出**后又被拉起——它会 unlink 掉共享内存
+      // 文件，重建时是新 inode，本进程手里的旧映射既看不到新帧也看不到新的
+      // created_ns（心跳同样停在旧值上）。按周期复查文件身份。
+      //
+      // 这一步必须排在心跳判断**之前**：重启可以发生在心跳超时很久之后，把
+      // `!heartbeat_alive()` 的早退放在前面，等于心跳一超时就再也不检查新
+      // inode，慢重启永远恢复不了。
+      ReadStatus recovered = ReadStatus::Disconnected;
+      if (try_recover_publisher(&recovered)) return recovered;
       if (!heartbeat_alive()) return ReadStatus::Disconnected;
-      // 心跳还在但长时间没有新帧：可能是发布端**正常退出**后又被拉起——它会
-      // unlink 掉共享内存文件，重建时是新 inode，本进程手里的旧映射既看不到
-      // 新帧也看不到新的 created_ns（心跳同样停在旧值上，所以先走 heartbeat
-      // 那一路；这里覆盖的是心跳尚未超时的窗口）。按周期复查文件身份。
-      const auto now = std::chrono::steady_clock::now();
-      const double since_check =
-        std::chrono::duration<double, std::milli>(now - last_remap_check_).count();
-      if (since_check >= config_.remap_check_ms) {
-        last_remap_check_ = now;
-        if (client_.paths_changed()) {
-          std::string err;
-          if (client_.remap(&err)) {
-            invalidate_after_epoch_change();
-            return ReadStatus::Reconnected;
-          }
-          // 重映射失败（文件正在被重建、长度还没设好）：保持断开语义，下个周期重试。
-          return ReadStatus::Disconnected;
-        }
-      }
       return ReadStatus::Timeout;
     }
     case ConsumeStatus::Corrupted:

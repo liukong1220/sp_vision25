@@ -189,6 +189,21 @@ target_link_libraries(sim_ipc_contract_test sim_io)
 add_executable(sim_io_loopback_test tests/sim_io_loopback_test.cpp)
 target_link_libraries(sim_io_loopback_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
 
+# seqlock 真并发压力测试：写线程与读线程同时跑，验证无奇数提交、无半新半旧载荷。
+# 需要 std::thread，故显式链接 Threads。
+find_package(Threads REQUIRED)
+add_executable(sim_shm_stress_test tests/sim_shm_stress_test.cpp)
+target_link_libraries(sim_shm_stress_test
+  ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io Threads::Threads)
+
+# 命令行参数解析单测：park 角度与阵营字符串。
+add_executable(sim_cli_args_test tests/sim_cli_args_test.cpp)
+target_link_libraries(sim_cli_args_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
+
+# 单轴几何单测：yaw=90 度时枪口视差必须落在世界 Y 方向上。
+add_executable(sim_geometry_test tests/sim_geometry_test.cpp)
+target_link_libraries(sim_geometry_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
+
 # 入口级端到端冒烟测试：fork 出真正的 sim_auto_aim，本进程当生产者。
 add_executable(sim_entry_smoke_test tests/sim_entry_smoke_test.cpp)
 target_link_libraries(sim_entry_smoke_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
@@ -198,12 +213,18 @@ list(APPEND SP_VISION_RUNTIME_TARGETS
   sim_auto_aim
   sim_ipc_contract_test
   sim_io_loopback_test
+  sim_shm_stress_test
+  sim_cli_args_test
+  sim_geometry_test
   sim_entry_smoke_test
 )
 
 if(BUILD_TESTING)
   add_test(NAME sim_ipc_contract_test COMMAND sim_ipc_contract_test)
   add_test(NAME sim_io_loopback_test COMMAND sim_io_loopback_test)
+  add_test(NAME sim_shm_stress_test COMMAND sim_shm_stress_test)
+  add_test(NAME sim_cli_args_test COMMAND sim_cli_args_test)
+  add_test(NAME sim_geometry_test COMMAND sim_geometry_test)
   add_test(
     NAME sim_entry_smoke_test
     COMMAND sim_entry_smoke_test $<TARGET_FILE:sim_auto_aim>

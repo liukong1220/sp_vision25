@@ -1,6 +1,7 @@
 #include "sim_gimbal.hpp"
 
 #include <cmath>
+#include <limits>
 
 #include "tools/math_tools.hpp"
 
@@ -41,6 +42,8 @@ std::string describe_faults(std::uint32_t faults)
     {FAULT_STATE_STALE, "state_stale"},
     {FAULT_POSE_INVALID, "pose_invalid"},
     {FAULT_REARM_PENDING, "rearm_pending"},
+    {FAULT_COMMAND_AGE, "command_age"},
+    {FAULT_CAPABILITY_MISSING, "capability_missing"},
   };
 
   std::string out;
@@ -76,8 +79,7 @@ bool finite4(const float v[4])
 }
 }  // namespace
 
-PoseValidity SimGimbal::update(
-  const FrameBundle & bundle, std::chrono::steady_clock::time_point steady_ts)
+PoseValidity SimGimbal::update(const FrameBundle & bundle, const FrameStamps & stamps)
 {
   const PoseMeta & gimbal = bundle.gimbal();
 
@@ -132,7 +134,8 @@ PoseValidity SimGimbal::update(
   const PoseMeta & muzzle = bundle.muzzle();
   const PoseMeta & camera = bundle.camera();
   odom_position_ = Eigen::Vector3d(odom.position[0], odom.position[1], odom.position[2]);
-  muzzle_offset_ = Eigen::Vector3d(muzzle.position[0], muzzle.position[1], muzzle.position[2]);
+  // 协议 v3：Muzzle 通道就是枪口的世界位置，直接取用，不再与 odom 相加。
+  muzzle_position_ = Eigen::Vector3d(muzzle.position[0], muzzle.position[1], muzzle.position[2]);
   camera_offset_ = Eigen::Vector3d(camera.position[0], camera.position[1], camera.position[2]);
 
   // 与 solver / planner 一致的欧拉角约定：intrinsic ZYX -> [yaw, pitch, roll]
@@ -161,12 +164,23 @@ PoseValidity SimGimbal::update(
   has_prev_ = true;
 
   frame_seq_ = bundle.frame_seq;
-  state_steady_ = steady_ts;
+  state_source_ = stamps.source;
+  state_arrival_ = stamps.arrival;
   has_state_ = true;
   last_validity_ = PoseValidity::Ok;
   faults_ &= ~static_cast<std::uint32_t>(FAULT_STARTUP);
   faults_ &= ~static_cast<std::uint32_t>(FAULT_POSE_INVALID);
   return PoseValidity::Ok;
+}
+
+void SimGimbal::reset_history()
+{
+  has_prev_ = false;
+  prev_yaw_ = 0.0;
+  prev_pitch_ = 0.0;
+  prev_timestamp_ns_ = 0;
+  yaw_vel_ = 0.0;
+  pitch_vel_ = 0.0;
 }
 
 io::GimbalState SimGimbal::state() const
@@ -182,13 +196,40 @@ io::GimbalState SimGimbal::state() const
   return gs;
 }
 
+namespace
+{
+double age_ms_since(std::chrono::steady_clock::time_point t)
+{
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+}  // namespace
+
+double SimGimbal::state_age_ms() const
+{
+  if (!has_state_) return std::numeric_limits<double>::infinity();
+  return age_ms_since(state_arrival_);
+}
+
+double SimGimbal::command_age_ms() const
+{
+  if (!has_state_) return std::numeric_limits<double>::infinity();
+  return age_ms_since(state_source_);
+}
+
 bool SimGimbal::state_stale() const
 {
   if (!has_state_) return true;
-  const double age_ms =
-    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - state_steady_)
-      .count();
-  return age_ms > config_.state_timeout_ms;
+  // 必须用 arrival（本地接收时刻），不能用 source。用 source 量出来的是
+  // "源帧龄 + 本帧处理耗时"，把入口那道 max_frame_age_ms 又算了一遍，还把
+  // 检测耗时算成了"姿态过期"。见 SimGimbalConfig::state_timeout_ms。
+  return state_age_ms() > config_.state_timeout_ms;
+}
+
+bool SimGimbal::command_age_exceeded() const
+{
+  if (config_.max_command_age_ms <= 0.0) return false;
+  if (!has_state_) return false;  // 没状态由 FAULT_STARTUP 负责，不在这里重复
+  return command_age_ms() > config_.max_command_age_ms;
 }
 
 std::uint32_t SimGimbal::faults() const
@@ -196,6 +237,7 @@ std::uint32_t SimGimbal::faults() const
   std::uint32_t f = faults_;
   if (!has_state_) f |= FAULT_STARTUP;
   if (state_stale()) f |= FAULT_STATE_STALE;
+  if (command_age_exceeded()) f |= FAULT_COMMAND_AGE;
   if (!config_.allow_fire) f |= FAULT_FIRE_DISABLED;
   return f;
 }
@@ -271,6 +313,11 @@ double SimGimbal::sim_internal_pitch_rad(const GimbalCmd & cmd)
 bool SimGimbal::send(
   bool control, bool fire, double yaw_rad, double pitch_rad, double distance_m)
 {
+  // 只在真正下发控制的帧上计数。放在 command_age_exceeded() 里会变成"谓词被调用
+  // 了多少次"（faults() 每帧要问好几遍），放在这里量的才是"多少条控制命令是基于
+  // 超预算的世界观测发出的"。安全停止帧不计：它与世界观测无关。
+  if (control && command_age_exceeded()) ++command_age_violations_;
+
   bool fire_out = fire;
   if (fire && !fire_allowed()) {
     ++suppressed_fires_;

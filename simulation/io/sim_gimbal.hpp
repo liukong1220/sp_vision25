@@ -45,6 +45,16 @@ enum SafetyFault : std::uint32_t
   FAULT_STATE_STALE = 1u << 7,    // 同帧姿态过期
   FAULT_POSE_INVALID = 1u << 8,   // 同帧位姿不合法（非有限值 / 四元数模长异常 / 时间戳倒退）
   FAULT_REARM_PENDING = 1u << 9,  // 发布端换代/重连/时钟跳变之后尚未重新确认目标
+  // 命令时刻的**世界观测年龄**（源帧龄 + 本帧全部处理耗时）超出预算。
+  // 与 FAULT_STATE_STALE 是两件事：后者只管"本地状态放了多久"（喂数据的通道是否
+  // 还活着），这一位管"我要据以开火的这份世界观测有多旧"。默认关闭
+  // （max_command_age_ms = 0），必须由运行方按实测分布显式设定，见该配置项。
+  FAULT_COMMAND_AGE = 1u << 10,
+  // 发布端没有声明某个本模式必需的能力位，于是该通道的读数是"不可知"而不是"零"。
+  // 由上层在识别出缺位时置起（例如 closed_loop 拿不到 CAP_RUNTIME_STATE，就无法
+  // 判断仿真端到底有没有订阅云台命令）。缺位期间禁止开火——把"不可知"当成"正常"
+  // 才是真正危险的那一种降级。
+  FAULT_CAPABILITY_MISSING = 1u << 11,
 };
 
 // update() 对输入位姿的校验结果。Ok 之外的一律不更新云台状态：
@@ -77,7 +87,24 @@ struct SimGimbalConfig
   double bullet_speed = 25.0;
 
   bool allow_fire = false;           // 默认禁止开火
-  double state_timeout_ms = 200.0;   // 同帧姿态超过此龄视为过期
+
+  // 本地状态保有时长上限：**从本帧被取到算起**多久没有新帧就视为状态过期。
+  // 这是"喂数据的通道死了"的看门狗，与源帧龄无关。
+  //
+  // 曾经它被拿源端采样时刻去比，于是量到的是"源帧龄 + 本帧全部处理耗时"：
+  // 源帧龄 416ms（仿真端 GPU 回读 + 背压，本机固有）叠加检测 247ms 就是 663ms，
+  // 对 200ms 的门限恒定超出 —— FAULT_STATE_STALE 永久点亮，closed_loop 里
+  // fire 恒为 0 而 suppressed_fire 一路涨，且给出的理由（"姿态过期"）是错的：
+  // 通道一直是活的。两个时间点必须分开，见 FrameStamps。
+  double state_timeout_ms = 200.0;
+
+  // 命令时刻的世界观测年龄上限（毫秒），0 = 不设限。超出即置 FAULT_COMMAND_AGE。
+  //
+  // 默认 0 是有意的：帧龄本身已经在**入口**被 SimCameraConfig::max_frame_age_ms
+  // 拦过一道，这里再默认拦一次只会把刚修掉的"全局静默抑制"换个名字复活。
+  // 报告里始终输出 command_age 的 p50/p95/p99，运行方按实测分布决定要不要设限。
+  double max_command_age_ms = 0.0;
+
   double safe_stop_period_ms = 20.0; // 空闲时重发安全停止命令的周期
   double vel_lpf_alpha = 0.35;       // 角速度低通系数
 
@@ -110,7 +137,22 @@ public:
   // 上一帧的值，state_steady_ 不推进，所以很快会 state_stale），并置起
   // FAULT_POSE_INVALID。调用方必须检查返回值：把 NaN 四元数交给
   // solver.set_R_gimbal2world() 会让整条 PnP 链路静默产出 NaN 目标位置。
-  PoseValidity update(const FrameBundle & bundle, std::chrono::steady_clock::time_point steady_ts);
+  // stamps.source = 源端采样时刻，stamps.arrival = 本帧在本进程被取到的时刻。
+  // 直接传 SimCamera::last_stamps()。两者绝不能用同一个时间点：
+  //   - arrival 决定 state_stale()（通道看门狗）
+  //   - source  决定 command_age_ms()（世界观测年龄，用于 FAULT_COMMAND_AGE）
+  PoseValidity update(const FrameBundle & bundle, const FrameStamps & stamps);
+
+  // 丢弃时间戳水位线与速度历史，但保留 faults 与累计计数。
+  //
+  // 发布端换代/重连、以及本地 realtime<->steady 映射跳变之后必须调用。update() 用
+  // `bundle.timestamp_ns <= prev_timestamp_ns_` 挡重复帧和乱序帧，而这条水位线跨
+  // 换代是无意义的：发布端真的回拨了墙上时钟（重启后系统时间被 NTP 往回校，或换了
+  // 一个时间靠后的发布端再换回来），新帧的时间戳会永远小于旧水位线，于是每一帧都
+  // 判成 BadTimestamp，消费端被永久锁死在 FAULT_POSE_INVALID，只能重启进程。
+  //
+  // 速度历史同理：跨换代/跳变做差分得到的 yaw_vel_/pitch_vel_ 含有整个跳变量。
+  void reset_history();
 
   // 最近一次 update() 的校验结果。
   PoseValidity last_validity() const { return last_validity_; }
@@ -118,6 +160,14 @@ public:
 
   bool has_state() const { return has_state_; }
   std::uint64_t frame_seq() const { return frame_seq_; }
+
+  // 当前状态在本地放了多久（now - arrival）。看门狗量的就是它。
+  double state_age_ms() const;
+  // 当前状态所描述的世界有多旧（now - source）= 源帧龄 + 至今的处理耗时。
+  // 这是开火决策真正关心的量。从未取到状态时两者都返回 +inf。
+  double command_age_ms() const;
+  // command_age_ms() 超出 max_command_age_ms 的帧数（max_command_age_ms=0 时恒 0）。
+  std::uint64_t command_age_violations() const { return command_age_violations_; }
 
   // 同帧云台姿态，Rust 侧发布顺序是 [w,x,y,z]。
   // 已按 feedback_pitch_fix_deg 修正过坐标系，可直接喂 solver。
@@ -133,9 +183,20 @@ public:
   double yaw_vel() const { return yaw_vel_; }
   double pitch_vel() const { return pitch_vel_; }
 
-  // 同帧的其他 pose（世界系原点、枪口/相机相对云台的平移），供评估与外参核对。
+  // 同帧的其他 pose，供评估与外参核对。参考系见 PoseIndex 的注释，各不相同：
+
+  // 云台回转中心的**世界**位置（ROS：x 前 y 左 z 上）。
   const Eigen::Vector3d & odom_position() const { return odom_position_; }
-  const Eigen::Vector3d & muzzle_offset() const { return muzzle_offset_; }
+
+  // 枪口的**世界**位置。协议 v3 起由发布端直接给出世界量。
+  //
+  // 原来这里叫 muzzle_offset()，拿到的是 reparented_to(gimbal) 之后的局部平移，
+  // 而调用方最自然的用法 `odom_position() + muzzle_offset()` 是错的：那是把一个
+  // 未经云台旋转的局部量加到世界坐标上。yaw=90° 时局部 +X 实际指向世界 +Y，
+  // 误差等于偏移量全长。改名是为了让这种误用不再能编译通过。
+  const Eigen::Vector3d & muzzle_position() const { return muzzle_position_; }
+
+  // 相机相对云台的**局部**平移，用于与 t_camera2gimbal 外参自检。
   const Eigen::Vector3d & camera_offset() const { return camera_offset_; }
 
   // 控制输出。fire 只有在 allow_fire 且无任何 fault 时才可能真的置 1。
@@ -180,7 +241,7 @@ private:
   Eigen::Quaterniond q_raw_{1.0, 0.0, 0.0, 0.0};
   Eigen::Quaterniond feedback_fix_{1.0, 0.0, 0.0, 0.0};
   Eigen::Vector3d odom_position_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d muzzle_offset_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d muzzle_position_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d camera_offset_{Eigen::Vector3d::Zero()};
 
   double yaw_ = 0.0;
@@ -193,7 +254,10 @@ private:
   double prev_pitch_ = 0.0;
   std::uint64_t prev_timestamp_ns_ = 0;
   std::uint64_t frame_seq_ = 0;
-  std::chrono::steady_clock::time_point state_steady_{};
+  // 分开保存，语义见 FrameStamps。
+  std::chrono::steady_clock::time_point state_source_{};
+  std::chrono::steady_clock::time_point state_arrival_{};
+  std::uint64_t command_age_violations_ = 0;
 
   std::uint32_t faults_ = FAULT_STARTUP;
   std::chrono::steady_clock::time_point last_send_{};
@@ -207,7 +271,10 @@ private:
   PoseValidity last_validity_ = PoseValidity::Ok;
   std::uint64_t invalid_poses_ = 0;
 
+  // 通道看门狗：state_age_ms() > state_timeout_ms。只看本地保有时长。
   bool state_stale() const;
+  // 世界观测年龄超预算。max_command_age_ms <= 0 时恒 false。
+  bool command_age_exceeded() const;
 };
 
 }  // namespace sim_io

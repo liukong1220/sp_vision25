@@ -39,7 +39,16 @@ int main()
   std::printf("%-52s %10s %10s\n", "item", "actual", "expected");
   std::printf("--- 常量 ---------------------------------------------------------------\n");
   check_u64("SHM_MAGIC", SHM_MAGIC, 0x54414C05ull);
-  check_u64("SHM_VERSION", SHM_VERSION, 2);
+  // v2 -> v3：从 ShmHeader::_pad 划出 capabilities，并把 poses[Muzzle] 由“云台局部
+  // 平移”改为“枪口世界位姿”。两者都是**语义**变更，字节布局没动，所以只有版本号
+  // 能拦住“旧发布端 + 新消费端”这种能 mmap 成功却静默读错语义的组合。
+  check_u64("SHM_VERSION", SHM_VERSION, 3);
+  check_u64("CAP_GROUND_TRUTH", CAP_GROUND_TRUTH, 1);
+  check_u64("CAP_MUZZLE_WORLD_POSE", CAP_MUZZLE_WORLD_POSE, 2);
+  check_u64("CAP_CHASSIS_OBSERVATION", CAP_CHASSIS_OBSERVATION, 4);
+  check_u64("CAP_RUNTIME_STATE", CAP_RUNTIME_STATE, 8);
+  check_u64("SIMULATOR_CAPABILITIES", SIMULATOR_CAPABILITIES, 0b1111);
+  check_u64("GROUND_TRUTH_PAYLOAD_BYTES", GROUND_TRUTH_PAYLOAD_BYTES, 1600);
   check_u64("IMAGE_WIDTH", IMAGE_WIDTH, 1440);
   check_u64("IMAGE_HEIGHT", IMAGE_HEIGHT, 1080);
   check_u64("IMAGE_CHANNELS", IMAGE_CHANNELS, 3);
@@ -117,6 +126,9 @@ int main()
   CHECK_OFFSET(ShmHeader, heartbeat_ns, 16);
   CHECK_OFFSET(ShmHeader, image_width, 24);
   CHECK_OFFSET(ShmHeader, image_height, 28);
+  // capabilities 必须落在原 _pad 的起始处（32），否则 v2 的其余偏移会整体平移，
+  // 与 Rust 侧手写镜像错开。
+  CHECK_OFFSET(ShmHeader, capabilities, 32);
 
   CHECK_OFFSET(CameraInfo, timestamp_ns, 0);
   CHECK_OFFSET(CameraInfo, fx, 8);
@@ -142,6 +154,8 @@ int main()
   CHECK_OFFSET(GroundTruthBatch, rune_count, 20);
   CHECK_OFFSET(GroundTruthBatch, targets, 32);
   CHECK_OFFSET(GroundTruthBatch, runes, 1088);
+  // seqlock 的偏移就是 payload 长度：两端拷贝时都只拷这段前缀，标记本身只做原子访问。
+  CHECK_OFFSET(GroundTruthBatch, seqlock, 1600);
 
   CHECK_OFFSET(RuntimeState, timestamp_ns, 0);
   CHECK_OFFSET(RuntimeState, following, 8);

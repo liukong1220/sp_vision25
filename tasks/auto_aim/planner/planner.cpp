@@ -301,6 +301,7 @@ Plan Planner::plan(Target target, double bullet_speed)
   debug_pitch_solver_status = -1;
   debug_yaw_solver_iterations = 0;
   debug_pitch_solver_iterations = 0;
+  debug_aim_command = AimCommandDebug{};
 
   // 0. Check bullet speed
   // 串口测速可能在启动阶段、切模式阶段或掉线恢复阶段给出异常值。
@@ -334,8 +335,11 @@ Plan Planner::plan(Target target, double bullet_speed)
   try {
     int planning_lock_id =
       hit_solution.selection.armor_id >= 0 ? hit_solution.selection.armor_id : lock_id_;
-    const auto yaw_pitch =
-      solve_aim_command(target, bullet_speed, planning_lock_id, &selection);
+    // 只有这一次调用传 &debug_aim_command。get_trajectory() 内部沿参考轨迹会再调
+    // 十几次 solve_aim_command，若也写进去，评估端读到的就是轨迹末端某个时刻的解，
+    // 而不是"当前决策时刻"的解。
+    const auto yaw_pitch = solve_aim_command(
+      target, bullet_speed, planning_lock_id, &selection, nullptr, &debug_aim_command);
     update_debug_selection(target, selection);
     lock_id_ = planning_lock_id;
     yaw0 = yaw_pitch(0);
@@ -570,7 +574,7 @@ void Planner::setup_pitch_solver()
 
 Eigen::Matrix<double, 2, 1> Planner::solve_aim_command(
   const Target & target, double bullet_speed, int & lock_id, AimSelection * selection,
-  Eigen::Vector3d * aim_xyz) const
+  Eigen::Vector3d * aim_xyz, AimCommandDebug * dbg) const
 {
   const auto [coming_angle, leaving_angle] = resolve_angle_window(target);
   const auto resolved_selection =
@@ -585,7 +589,26 @@ Eigen::Matrix<double, 2, 1> Planner::solve_aim_command(
   auto bullet_traj = tools::Trajectory(bullet_speed, dist_xy, xyz.z());
   if (bullet_traj.unsolvable) throw std::runtime_error("Unsolvable bullet trajectory!");
 
-  return {tools::limit_rad(azim + yaw_offset_), -bullet_traj.pitch - pitch_offset_};
+  const Eigen::Matrix<double, 2, 1> command{
+    tools::limit_rad(azim + yaw_offset_), -bullet_traj.pitch - pitch_offset_};
+
+  if (dbg != nullptr) {
+    // 三个分量都由本次调用的 xyz / dist_xy / bullet_traj 直接算出，因此
+    //   pitch == geometric_pitch - gravity_lift - pitch_offset
+    // 是恒等式而非近似：把下面两行代进去，atan2 项相消，只剩
+    // -bullet_traj.pitch - pitch_offset_，正好是 command(1)。
+    const double elevation = std::atan2(xyz.z(), dist_xy);
+    dbg->valid = true;
+    dbg->aim_xyz = xyz;
+    dbg->dist_xy = dist_xy;
+    dbg->yaw = command(0);
+    dbg->pitch = command(1);
+    dbg->geometric_pitch = -elevation;
+    dbg->gravity_lift = bullet_traj.pitch - elevation;
+    dbg->pitch_offset = pitch_offset_;
+  }
+
+  return command;
 }
 
 void Planner::update_debug_selection(const Target & target, const AimSelection & selection)
