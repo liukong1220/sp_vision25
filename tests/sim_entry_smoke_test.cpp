@@ -7,7 +7,8 @@
 // 它验证三件在真机上代价很高、在这里几乎免费的事：
 //   1. 入口能在完全干净的环境里跑起来并正常退出（不是崩在半路）；
 //   2. 默认（不带 --allow-fire）时 fire_advice 恒为 0，且计入 suppressed；
-//   3. 心跳停掉之后入口不再发控制命令，只发安全停止。
+//   3. closed_loop + --allow-fire 缺世界观测年龄预算时入口拒绝启动；
+//   4. 心跳停掉之后入口不再发控制命令，只发安全停止。
 //
 // 刻意不追求检出率：合成图案里没有装甲板，detected_frames 预期为 0。
 
@@ -56,6 +57,37 @@ bool json_number(const std::string & json, const std::string & key, double * out
   const auto pos = json.find(needle);
   if (pos == std::string::npos) return false;
   return std::sscanf(json.c_str() + pos + needle.size(), " %lf", out) == 1;
+}
+
+std::string json_string(const std::string & json, const std::string & key)
+{
+  const std::string needle = "\"" + key + "\":";
+  auto pos = json.find(needle);
+  if (pos == std::string::npos) return {};
+  pos = json.find('"', pos + needle.size());
+  if (pos == std::string::npos) return {};
+  const auto end = json.find('"', pos + 1);
+  if (end == std::string::npos) return {};
+  return json.substr(pos + 1, end - pos - 1);
+}
+
+// fork 出入口二进制并等它退出，返回退出码（异常终止返回 -1）。
+// argv[0] 就是可执行文件路径本身，不要像 execl 那样再重复一次——重复的那一个会
+// 顶掉位置参数 @config-path，入口会把二进制当 yaml 读，报的是"配置加载失败"。
+int run_entry(const std::vector<std::string> & argv)
+{
+  std::vector<char *> raw;
+  for (const auto & a : argv) raw.push_back(const_cast<char *>(a.c_str()));
+  raw.push_back(nullptr);
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    ::execv(raw[0], raw.data());
+    std::_Exit(127);
+  }
+  if (pid < 0) return -1;
+  int status = 0;
+  ::waitpid(pid, &status, 0);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 }  // namespace
 
@@ -246,6 +278,37 @@ int main(int argc, char * argv[])
   check(p50 >= 0 && p95 >= p50 && p99 >= p95, "帧龄分位数单调",
         "p50=" + std::to_string(p50) + " p95=" + std::to_string(p95) + " p99=" +
           std::to_string(p99));
+
+  std::printf("--- 开火必须带世界观测年龄预算 --------------------------------------\n");
+  // configs/simulation.yaml 没有 max_command_age_ms（默认 0 = 不设限），所以
+  // --allow-fire 必须被拒。这里测的是"缺预算时不会悄悄跑成一次不设限的开火闭环"。
+  {
+    const std::uint64_t fire_before = producer.fire_cmds.load();
+    const std::string no_budget_report = dir + "/no_budget.json";
+    const int code_no_budget = run_entry(
+      {binary, yaml_path, "--mode=closed_loop", "--allow-fire", "--duration-s=2",
+       "--report=" + no_budget_report});
+    check(code_no_budget == 2, "缺预算时 --allow-fire 被拒绝（exit 2）",
+          "exit=" + std::to_string(code_no_budget));
+    check(read_file(no_budget_report).empty(), "被拒的运行没有写出报告");
+    check(producer.fire_cmds.load() == fire_before, "被拒的运行没有发出任何开火命令");
+    ::unlink(no_budget_report.c_str());
+
+    // 给了正预算就能启动，且预算与来源要落在报告里——事后要能区分"设过预算"和
+    // "没设预算"，光看 fire 数字是区分不出来的。
+    const std::string budget_report = dir + "/budget.json";
+    const int code_budget = run_entry(
+      {binary, yaml_path, "--mode=closed_loop", "--allow-fire",
+       "--max-command-age-ms=5000", "--duration-s=2", "--report=" + budget_report});
+    check(code_budget == 0, "给出正预算后能正常跑完", "exit=" + std::to_string(code_budget));
+    const std::string budget_json = read_file(budget_report);
+    double budget_ms = -1;
+    json_number(budget_json, "budget_ms", &budget_ms);
+    check(budget_ms == 5000, "报告记下了生效的预算", std::to_string(budget_ms));
+    check(json_string(budget_json, "budget_source") == "cli", "报告记下了预算来源",
+          json_string(budget_json, "budget_source"));
+    ::unlink(budget_report.c_str());
+  }
 
   std::printf("--- 心跳丢失后不再发控制 --------------------------------------------\n");
   producer.heartbeat = false;

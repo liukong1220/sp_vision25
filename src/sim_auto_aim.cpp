@@ -55,6 +55,7 @@ const std::string keys =
   "{dump-frame     |                       | 把第一帧 Ok 图像存到该路径（排查视野/色序）}"
   "{dump-truth     |                       | 打印首个真值批次里的目标（排查视野里到底有没有目标）}"
   "{max-frame-age-ms | -1                   | 覆盖配置里的帧龄上限，<0 表示用配置值}"
+  "{max-command-age-ms | -1                  | 覆盖配置里的世界观测年龄预算，<0 表示用配置值}"
   "{bias-yaw-deg   | 0.0                   | probe 模式的 yaw 固定偏置(度)，用来把云台指向某个方向}"
   "{bias-pitch-deg | 0.0                   | probe 模式的 pitch 固定偏置(度)，正=低头(ROS 约定)}"
   "{dump-detect    | 0                     | 打印前 N 帧的检测/跟踪明细(排查为什么检到了却跟不上)}"
@@ -183,13 +184,57 @@ int main(int argc, char * argv[])
     tools::read_or<double>(sim, "feedback_pitch_fix_deg", 0.0);
   // 本地状态保有时长看门狗（通道活性），与源帧龄无关。
   gim_cfg.state_timeout_ms = tools::read_or<double>(sim, "state_timeout_ms", 200.0);
-  // 命令时刻的世界观测年龄上限。0 = 不设限（默认）；报告始终输出实测分布，
-  // 运行方据此决定要不要设限。见 SimGimbalConfig::max_command_age_ms。
+  // 命令时刻的世界观测年龄上限（开火决策关心的量）。0 = 不设限；报告始终输出实测
+  // 分布。closed_loop + --allow-fire 时它是**必填**的，见下面那道门。
+  // 见 SimGimbalConfig::max_command_age_ms。
   gim_cfg.max_command_age_ms = tools::read_or<double>(sim, "max_command_age_ms", 0.0);
+  std::string command_age_budget_source = "config";
+  // 命令行覆盖：让"本次运行用的是哪个预算"直接落在命令行与报告里，不必回溯当时
+  // 的 yaml。语义与 --max-frame-age-ms 一致，<0 表示不覆盖。
+  const double max_command_age_override = cli.get<double>("max-command-age-ms");
+  if (max_command_age_override >= 0.0) {
+    if (gim_cfg.max_command_age_ms > 0.0) {
+      tools::logger()->warn(
+        "[sim] 世界观测年龄预算被命令行覆盖为 {:.1f}ms（配置值 {:.1f}ms）",
+        max_command_age_override, gim_cfg.max_command_age_ms);
+    }
+    gim_cfg.max_command_age_ms = max_command_age_override;
+    command_age_budget_source = "cli";
+  }
+  if (gim_cfg.max_command_age_ms <= 0.0 || !std::isfinite(gim_cfg.max_command_age_ms)) {
+    command_age_budget_source = "unset";
+  }
   gim_cfg.safe_stop_period_ms = tools::read_or<double>(sim, "safe_stop_period_ms", 20.0);
   gim_cfg.bullet_speed = tools::read_or<double>(yaml, "bullet_speed_fallback", 25.0);
   // probe 模式永远不开火：这是确认符号/零位的实验，弹道无关。
   gim_cfg.allow_fire = allow_fire && mode == "closed_loop";
+
+  // 开火必须有一个显式的世界观测年龄预算。
+  //
+  // 缺预算时 command_age_exceeded() 恒 false，FAULT_COMMAND_AGE 永不点亮，
+  // fire_allowed() 就少了一条判据：只要姿态通道还活着（state_stale 看的是**本地
+  // 到达时刻**），哪怕这条命令是基于几百毫秒前的世界观测算出来的，也照样发弹。
+  // 这两个量在本机实测里差一整个检测耗时（detect p95 已到 241ms），不是同阶小量。
+  //
+  // 所以这里拒绝启用开火，而不是默默降级成"不设限地开火"：后者的运行记录看起来
+  // 是一次正常的 --allow-fire 闭环，事后无法从报告里区分。
+  // state_timeout_ms 是通道活性看门狗，不能拿来当这个预算——它量的是"上一条姿态
+  // 到本地多久了"，与"这条命令基于多旧的世界观测"是两个不同的量。
+  if (gim_cfg.allow_fire && command_age_budget_source == "unset") {
+    tools::logger()->error(
+      "[sim] closed_loop + --allow-fire 必须给出正的世界观测年龄预算 "
+      "max_command_age_ms，当前为 {:.1f}（未配置或 <=0）", gim_cfg.max_command_age_ms);
+    tools::logger()->error(
+      "[sim] 用 --max-command-age-ms=<正数> 覆盖，或在 {} 的 sim 段里写 "
+      "max_command_age_ms。不要用 state_timeout_ms（{:.1f}ms）代替：那是通道活性"
+      "看门狗，量的不是世界观测年龄。", config_path, gim_cfg.state_timeout_ms);
+    return 2;
+  }
+  if (gim_cfg.allow_fire) {
+    tools::logger()->info(
+      "[sim] 世界观测年龄预算 {:.1f}ms（来源 {}），超预算的帧会点亮 command_age 并"
+      "抑制开火", gim_cfg.max_command_age_ms, command_age_budget_source);
+  }
 
   const double target_lost_ms = tools::read_or<double>(sim, "target_lost_ms", 300.0);
   // 重新武装门限：换代/重连/时钟跳变之后，必须连续这么多帧稳定跟上目标才解除
@@ -984,6 +1029,7 @@ int main(int argc, char * argv[])
      << ", \"p95\": " << percentile(command_age_ms, 0.95)
      << ", \"p99\": " << percentile(command_age_ms, 0.99)
      << ", \"budget_ms\": " << gim_cfg.max_command_age_ms
+     << ", \"budget_source\": \"" << command_age_budget_source << "\""
      << ", \"violations\": " << gimbal.command_age_violations() << "},\n";
   js << "  \"state_age_ms\": {\"count\": " << state_age_ms.size()
      << ", \"p50\": " << percentile(state_age_ms, 0.50)
