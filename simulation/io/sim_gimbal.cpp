@@ -22,15 +22,20 @@ const char * to_string(PoseValidity validity)
   return "Unknown";
 }
 
+namespace
+{
+struct FaultEntry
+{
+  std::uint32_t bit;
+  const char * name;
+};
+}  // namespace
+
 std::string describe_faults(std::uint32_t faults)
 {
   if (faults == FAULT_NONE) return "none";
 
-  struct Entry
-  {
-    std::uint32_t bit;
-    const char * name;
-  };
+  using Entry = FaultEntry;
   static const Entry entries[] = {
     {FAULT_STARTUP, "startup"},
     {FAULT_HEARTBEAT_LOST, "heartbeat_lost"},
@@ -55,6 +60,45 @@ std::string describe_faults(std::uint32_t faults)
   return out;
 }
 
+namespace
+{
+// 与 describe_faults 同一份顺序。放在这里而不是共用一个 static，是为了不改
+// describe_faults 已被多处测试钉住的输出格式。
+const FaultEntry kFaults[] = {
+  {FAULT_STARTUP, "startup"},
+  {FAULT_HEARTBEAT_LOST, "heartbeat_lost"},
+  {FAULT_NO_NEW_FRAME, "no_new_frame"},
+  {FAULT_TARGET_LOST, "target_lost"},
+  {FAULT_CLOCK_JUMP, "clock_jump"},
+  {FAULT_FRAME_FAULT, "frame_fault"},
+  {FAULT_FIRE_DISABLED, "fire_disabled"},
+  {FAULT_STATE_STALE, "state_stale"},
+  {FAULT_POSE_INVALID, "pose_invalid"},
+  {FAULT_REARM_PENDING, "rearm_pending"},
+  {FAULT_COMMAND_AGE, "command_age"},
+  {FAULT_CAPABILITY_MISSING, "capability_missing"},
+};
+constexpr std::size_t fault_table_size() { return sizeof(kFaults) / sizeof(kFaults[0]); }
+}  // namespace
+
+const std::vector<std::uint32_t> & fault_bits()
+{
+  static const std::vector<std::uint32_t> bits = [] {
+    std::vector<std::uint32_t> v;
+    for (std::size_t i = 0; i < fault_table_size(); ++i) v.push_back(kFaults[i].bit);
+    return v;
+  }();
+  return bits;
+}
+
+const char * fault_name(std::uint32_t bit)
+{
+  for (std::size_t i = 0; i < fault_table_size(); ++i) {
+    if (kFaults[i].bit == bit) return kFaults[i].name;
+  }
+  return "unknown";
+}
+
 SimGimbal::SimGimbal(SharedMemoryClient & client, SimGimbalConfig config)
 : client_(client), config_(config)
 {
@@ -63,6 +107,16 @@ SimGimbal::SimGimbal(SharedMemoryClient & client, SimGimbalConfig config)
   // 见 SimGimbalConfig::feedback_pitch_fix_deg 的推导：绕 ROS Y 轴右乘 +90°。
   feedback_fix_ = Eigen::Quaterniond(Eigen::AngleAxisd(
     config_.feedback_pitch_fix_deg * M_PI / 180.0, Eigen::Vector3d::UnitY()));
+  fault_history_.reserve(fault_bits().size());
+  for (std::uint32_t bit : fault_bits()) {
+    FaultHistory h;
+    h.bit = bit;
+    h.name = fault_name(bit);
+    fault_history_.push_back(h);
+  }
+  // 构造时 faults_ 已是 FAULT_STARTUP（外加 allow_fire=false 时的 fire_disabled），
+  // 采一次样，让它们的 first_seen_s = 0 而不是"第一次 set_fault 的时刻"。
+  sample_faults_at(0.0);
 }
 
 namespace
@@ -249,9 +303,52 @@ void SimGimbal::set_fault(std::uint32_t fault, bool active)
   } else {
     faults_ &= ~fault;
   }
+  sample_faults();
 }
 
-void SimGimbal::clear_faults(std::uint32_t mask) { faults_ &= ~mask; }
+void SimGimbal::clear_faults(std::uint32_t mask)
+{
+  faults_ &= ~mask;
+  sample_faults();
+}
+
+double SimGimbal::uptime_s() const
+{
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - created_).count();
+}
+
+void SimGimbal::sample_faults() { sample_faults_at(uptime_s()); }
+
+void SimGimbal::sample_faults_at(double now_s)
+{
+  // 时间必须单调：调用方混用注入时间与真实时钟时，宁可把这一段时长记为 0，
+  // 也不能让 total_s 因为负的 dt 越记越少。
+  if (now_s < fault_sampled_s_) now_s = fault_sampled_s_;
+  const double dt = now_s - fault_sampled_s_;
+  fault_sampled_s_ = now_s;
+
+  const std::uint32_t now = faults();
+  faults_seen_ |= now;
+
+  for (FaultHistory & h : fault_history_) {
+    const bool on = (now & h.bit) != 0;
+    if (h.active) {
+      // 上一段区间的时长归给这一位，无论它这一次是否熄灭。
+      h.total_s += dt;
+      const double episode = now_s - h.last_seen_s;
+      if (episode > h.max_s) h.max_s = episode;
+      if (!on) {
+        h.active = false;
+        h.last_cleared_s = now_s;
+      }
+    } else if (on) {
+      h.active = true;
+      ++h.episodes;
+      h.last_seen_s = now_s;
+      if (h.first_seen_s < 0.0) h.first_seen_s = now_s;
+    }
+  }
+}
 
 GimbalCmd SimGimbal::encode(
   bool control, bool fire, double yaw_rad, double pitch_rad, double distance_m) const
@@ -317,6 +414,10 @@ bool SimGimbal::send(
   // 了多少次"（faults() 每帧要问好几遍），放在这里量的才是"多少条控制命令是基于
   // 超预算的世界观测发出的"。安全停止帧不计：它与世界观测无关。
   if (control && command_age_exceeded()) ++command_age_violations_;
+
+  // 开火判据就是在这里生效的，采一次样保证"抑制开火的那一瞬间点亮了哪些位"
+  // 一定进历史——即使它在本轮循环结束前就被清掉了。
+  sample_faults();
 
   bool fire_out = fire;
   if (fire && !fire_allowed()) {

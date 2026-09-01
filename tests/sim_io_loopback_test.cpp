@@ -841,6 +841,91 @@ int main()
       check(ev_any.fetch(5), "any 评估器可读");
       const auto err_any = ev_any.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_any.valid && err_any.ambiguous, "GT_TEAM_ANY 下红蓝同号互相污染，报歧义");
+
+      // 前哨站真值匹配。仿真端 ArmorLabel::Outpost = 6，C++ 侧 auto_aim::outpost 也是
+      // 6，但两套枚举其余项顺序不同（见 armor_label_to_name 的注释），所以这条要连
+      // 换算一起验：发 label=6 进去，必须能用 auto_aim::outpost 取出来。
+      //
+      // 场景里红蓝各有一座前哨站，label 同为 6，和三号步兵一样构成"同 label 跨队"
+      // 的情形，所以队伍过滤在这里同样是必须的而不是可选的。
+      // is_outpost 只是信息位，匹配不靠它，这一节顺带把它读回来确认没被丢掉。
+      sim_io::GroundTruthBatch op{};
+      op.frame_seq = 6;
+      op.timestamp_ns = realtime_now_ns();
+      op.target_count = 2;
+      // 红方（我方）前哨站，离估计值更近——用来证明队伍过滤不是"恰好最近"。
+      op.targets[0].frame_seq = 6;
+      op.targets[0].team = sim_io::GT_TEAM_RED;
+      op.targets[0].armor_label = sim_io::armor_name_to_label(auto_aim::outpost);
+      op.targets[0].is_outpost = 1;
+      op.targets[0].position[0] = 5.5f;
+      op.targets[0].position[1] = -1.1f;
+      op.targets[0].position[2] = 1.14f;
+      op.targets[0].yaw = 0.30f;
+      op.targets[0].vyaw = 2.5133f;  // 顺时针，+0.8π rad/s
+      op.targets[0].armor_position[0] = 5.32f;
+      op.targets[0].armor_position[1] = -1.1f;
+      op.targets[0].armor_position[2] = 1.14f;
+      op.targets[0].armor_position_valid = 1;
+      // 蓝方（敌方）前哨站。
+      op.targets[1].frame_seq = 6;
+      op.targets[1].team = sim_io::GT_TEAM_BLUE;
+      op.targets[1].armor_label = sim_io::armor_name_to_label(auto_aim::outpost);
+      op.targets[1].is_outpost = 1;
+      op.targets[1].position[0] = -2.21f;
+      op.targets[1].position[1] = 3.06f;
+      op.targets[1].position[2] = 1.14f;
+      op.targets[1].yaw = -0.70f;
+      op.targets[1].vyaw = -2.5133f;  // 逆时针，-0.8π rad/s
+      op.targets[1].armor_position[0] = -2.03f;
+      op.targets[1].armor_position[1] = 3.06f;
+      op.targets[1].armor_position[2] = 1.14f;
+      op.targets[1].armor_position_valid = 1;
+      check(publish_and_consume(&op, 6), "第 6 帧前哨站真值同事务提交");
+
+      check(
+        sim_io::armor_name_to_label(auto_aim::outpost) == 6,
+        "auto_aim::outpost 对应仿真端 ArmorLabel::Outpost = 6");
+      check(
+        sim_io::armor_label_to_name(6) == auto_aim::outpost,
+        "label 6 换算回 auto_aim::outpost");
+
+      // 估计值故意放在红方前哨站附近（距红 0.2 m，距蓝 ~9 m）。
+      const Eigen::Vector3d op_est(5.6, -1.25, 1.20);
+      sim_io::GroundTruthEvaluator ev_op(cam.client(), sim_io::GT_TEAM_BLUE);
+      check(ev_op.fetch(6), "前哨站真值批次可读且同帧");
+      check(ev_op.target_count() == 2, "读到红蓝两座前哨站");
+      const auto err_op = ev_op.evaluate(auto_aim::outpost, op_est, -0.70, -2.5133);
+      check(err_op.valid, "前哨站评估命中");
+      check(err_op.name == auto_aim::outpost, "命中的是 outpost 而不是别的标签");
+      check(err_op.team == sim_io::GT_TEAM_BLUE, "队伍过滤生效：没有匹配到更近的我方前哨站");
+      check(!err_op.matched_by_nearest, "按 (team,label) 命中，未退化成最近邻");
+      check(!err_op.ambiguous, "同队仅一座前哨站，无歧义");
+      check_near(err_op.gt_position.x(), -2.21, 1e-5, "前哨站回转中心真值 x 正确");
+      check_near(err_op.gt_position.z(), 1.14, 1e-5, "前哨站回转中心真值 z 正确");
+      check(err_op.has_armor_position, "前哨站板位真值随之带回");
+      check_near(err_op.gt_armor_position.x(), -2.03, 1e-5, "前哨站板位真值 x 正确");
+      check_near(err_op.yaw_err_rad, 0.0, 1e-5, "yaw 真值与估计一致时误差为 0");
+      check_near(err_op.vyaw_err_radps, 0.0, 1e-4, "vyaw 真值与估计一致时误差为 0");
+      check(ev_op.batch().targets[1].is_outpost == 1, "is_outpost 信息位原样带过来");
+
+      // 反向：指定红方时必须拿到红方那座，且 vyaw 符号相反（顺时针 vs 逆时针）。
+      // 这条同时把"vyaw 是有符号量、不是转速绝对值"钉在协议层。
+      sim_io::GroundTruthEvaluator ev_op_red(cam.client(), sim_io::GT_TEAM_RED);
+      check(ev_op_red.fetch(6), "红方评估器读到同一批前哨站真值");
+      const auto err_op_red = ev_op_red.evaluate(auto_aim::outpost, op_est, 0.30, 2.5133);
+      check(
+        err_op_red.valid && err_op_red.team == sim_io::GT_TEAM_RED, "指定红方时匹配红方前哨站");
+      check_near(err_op_red.gt_position.x(), 5.5, 1e-5, "红方前哨站真值位置正确");
+      check(
+        ev_op.batch().targets[0].vyaw * ev_op.batch().targets[1].vyaw < 0.0f,
+        "红蓝前哨站旋向相反，vyaw 符号相反");
+
+      // 用 label=3 去取前哨站必须取不到同一个点：否则说明 label 根本没参与过滤。
+      const auto err_op_wrong = ev_op.evaluate(auto_aim::three, op_est, 0.0, 0.0);
+      check(
+        !err_op_wrong.valid || err_op_wrong.matched_by_nearest,
+        "本帧没有 label=3 的目标，要么不命中，要么明确标注退化为最近邻");
     }
 
     pub3.destroy();
@@ -1307,6 +1392,116 @@ int main()
     cam15.close();
     pub15.destroy();
     pub15.unlink_files();
+  }
+
+  // ---- 16. 全程故障历史 -------------------------------------------------------
+  std::printf("--- 全程故障历史 ----------------------------------------------------\n");
+  {
+    // 为什么要有这一节：报告里的 `final_faults` 是**退出瞬间**的快照。实测出现过
+    // final_faults="none" 与 suppressed_fire=3 并存（/tmp/closed_loop_v6.json）——
+    // 开火确实被抑制过 3 次，说明运行中点亮过故障位，但退出时刚好都清了，报告里
+    // 看不出是哪一位、点了多久。所以判据必须落在累计历史上。
+    //
+    // 时间用 sample_faults_at() 注入，不用真实时钟：真实时钟下 total_s/max_s 只能
+    // 做区间断言，注入时间可以精确断言，也不会让测试随机变慢。
+    // 注意 set_fault()/clear_faults()/send() 内部会用真实时钟再采一次样，
+    // sample_faults_at 的单调钳位保证那一次的 dt 记为 0，不会污染注入的时间轴。
+    sim_io::SimGimbalConfig g16;
+    g16.allow_fire = false;  // 默认禁止开火：构造时就该点亮 fire_disabled
+    sim_io::SimGimbal gim16(cam.client(), g16);
+
+    auto hist = [&](std::uint32_t bit) {
+      for (const auto & h : gim16.fault_history())
+        if (h.bit == bit) return h;
+      return sim_io::FaultHistory{};
+    };
+
+    check(gim16.fault_history().size() == sim_io::fault_bits().size(), "历史表覆盖全部故障位");
+    check(
+      (gim16.faults_seen() & sim_io::FAULT_STARTUP) != 0,
+      "构造后 startup 已进入 faults_seen", sim_io::describe_faults(gim16.faults_seen()));
+    check(
+      (gim16.faults_seen() & sim_io::FAULT_FIRE_DISABLED) != 0,
+      "allow_fire=false 时 fire_disabled 也进入 faults_seen");
+    // startup / fire_disabled / state_stale 这三位是 faults() **算出来的**，不经过
+    // set_fault，所以历史只能靠采样拿到。这条断言就是在钉这一点。
+    check_near(hist(sim_io::FAULT_STARTUP).first_seen_s, 0.0, 1e-9, "startup 首次点亮记为 t=0");
+    check(hist(sim_io::FAULT_STARTUP).episodes == 1, "startup 只算一次点亮");
+    check(hist(sim_io::FAULT_STARTUP).active, "构造后 startup 处于点亮态");
+    check(
+      hist(sim_io::FAULT_TARGET_LOST).episodes == 0 &&
+        hist(sim_io::FAULT_TARGET_LOST).first_seen_s < 0.0,
+      "没点亮过的位保持 episodes=0 / first_seen_s<0（可与'点亮过但已清除'区分）");
+
+    // t=0 -> 1.0：startup 一直亮着，累计时长应当就是 1.0。
+    gim16.sample_faults_at(1.0);
+    check_near(hist(sim_io::FAULT_STARTUP).total_s, 1.0, 1e-9, "startup 累计时长 1.0 s");
+    check_near(hist(sim_io::FAULT_STARTUP).max_s, 1.0, 1e-9, "startup 单次最长 1.0 s");
+
+    // 一段完整的"点亮 -> 清除"：t=1.0 亮，t=1.5 灭。
+    gim16.set_fault(sim_io::FAULT_HEARTBEAT_LOST, true);
+    gim16.sample_faults_at(1.0);
+    check(hist(sim_io::FAULT_HEARTBEAT_LOST).episodes == 1, "heartbeat_lost 第 1 次点亮");
+    check_near(
+      hist(sim_io::FAULT_HEARTBEAT_LOST).first_seen_s, 1.0, 1e-9, "heartbeat_lost 首次点亮 t=1.0");
+    gim16.sample_faults_at(1.5);
+    gim16.set_fault(sim_io::FAULT_HEARTBEAT_LOST, false);
+    gim16.sample_faults_at(1.5);
+    check(!hist(sim_io::FAULT_HEARTBEAT_LOST).active, "清除后不再处于点亮态");
+    check_near(
+      hist(sim_io::FAULT_HEARTBEAT_LOST).last_cleared_s, 1.5, 1e-9, "记录清除时刻 t=1.5");
+    check_near(hist(sim_io::FAULT_HEARTBEAT_LOST).total_s, 0.5, 1e-9, "第一段持续 0.5 s");
+    check_near(hist(sim_io::FAULT_HEARTBEAT_LOST).max_s, 0.5, 1e-9, "单次最长 0.5 s");
+
+    // 第二段更短：max_s 必须保留更长的那一段，total_s 累加。
+    gim16.sample_faults_at(2.0);
+    gim16.set_fault(sim_io::FAULT_HEARTBEAT_LOST, true);
+    gim16.sample_faults_at(2.0);
+    gim16.sample_faults_at(2.2);
+    gim16.set_fault(sim_io::FAULT_HEARTBEAT_LOST, false);
+    gim16.sample_faults_at(2.2);
+    check(hist(sim_io::FAULT_HEARTBEAT_LOST).episodes == 2, "第 2 次点亮计数为 2");
+    check_near(hist(sim_io::FAULT_HEARTBEAT_LOST).total_s, 0.7, 1e-9, "累计 0.5+0.2 s");
+    check_near(hist(sim_io::FAULT_HEARTBEAT_LOST).max_s, 0.5, 1e-9, "max_s 保留更长的那一段");
+    check_near(
+      hist(sim_io::FAULT_HEARTBEAT_LOST).last_seen_s, 2.0, 1e-9, "last_seen_s 是最近一次点亮时刻");
+
+    // 关键回归：在两次采样之间点亮又清除的故障位，仍然必须留在 faults_seen 里。
+    // 这正是 final_faults="none" + suppressed_fire=3 那种组合的成因。
+    const std::uint32_t seen_before = gim16.faults_seen();
+    check(
+      (seen_before & sim_io::FAULT_TARGET_LOST) == 0, "target_lost 此前从未点亮");
+    gim16.set_fault(sim_io::FAULT_TARGET_LOST, true);
+    gim16.set_fault(sim_io::FAULT_TARGET_LOST, false);
+    check(
+      (gim16.faults() & sim_io::FAULT_TARGET_LOST) == 0, "当前值里 target_lost 已经清了");
+    check(
+      (gim16.faults_seen() & sim_io::FAULT_TARGET_LOST) != 0,
+      "点亮又立刻清除的位仍留在 faults_seen（final_faults 看不见它）",
+      sim_io::describe_faults(gim16.faults_seen()));
+    check(hist(sim_io::FAULT_TARGET_LOST).episodes == 1, "瞬时故障也计一次 episode");
+
+    // clear_faults 不得抹掉历史：它只清当前值。
+    gim16.clear_faults(0xFFFFFFFFu);
+    check(
+      (gim16.faults_seen() & sim_io::FAULT_HEARTBEAT_LOST) != 0,
+      "clear_faults 不清历史（否则严格判据可以被一次 clear 洗白）");
+
+    // 时间必须单调：倒退的时间戳只能被钳位，不能让 total_s 变小。
+    const double total_before = hist(sim_io::FAULT_STARTUP).total_s;
+    gim16.sample_faults_at(0.1);  // 故意回退
+    check(
+      hist(sim_io::FAULT_STARTUP).total_s >= total_before,
+      "注入时间回退时 total_s 不减少（单调钳位生效）");
+
+    // send() 里也要采样：开火被抑制的那一瞬间点亮了哪些位，必须进历史。
+    check(!gim16.fire_allowed(), "allow_fire=false 时不允许开火");
+    gim16.send(true, true, 0.0, 0.0, 3.0);
+    check(gim16.suppressed_fires() >= 1, "被抑制的开火被计数");
+    check(
+      (gim16.faults_seen() & sim_io::FAULT_FIRE_DISABLED) != 0,
+      "抑制开火时生效的 fire_disabled 在历史里");
+    check(gim16.uptime_s() >= 0.0, "uptime_s 可读且非负");
   }
 
   std::printf("\n检查项 %d，失败 %d\n", g_checks, g_failures);

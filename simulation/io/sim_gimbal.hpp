@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "io/gimbal/gimbal.hpp"
 #include "shared_memory_client.hpp"
@@ -70,6 +71,30 @@ enum class PoseValidity
 const char * to_string(PoseValidity validity);
 
 std::string describe_faults(std::uint32_t faults);
+
+// 全部故障位，按 describe_faults 的输出顺序。
+const std::vector<std::uint32_t> & fault_bits();
+const char * fault_name(std::uint32_t bit);
+
+// 一个故障位在**整段运行**里的累计历史。
+//
+// 为什么需要它：`faults()` 只是当前值，报告里那条 `final_faults` 更是退出瞬间的
+// 快照。实测里出现过 `final_faults: "none"` 而同一份报告 `suppressed_fire: 3` 的
+// 组合——开火被抑制过 3 次，说明运行中确实有故障点亮过，但退出时刚好都清了，
+// 报告里看不出是哪一位、点了多久。把"曾经点亮过什么"单独记下来，严格闭环判据才
+// 有可核对的依据。
+struct FaultHistory
+{
+  std::uint32_t bit = 0;
+  const char * name = "";
+  std::uint64_t episodes = 0;    // 点亮次数（灭->亮 的沿）
+  double first_seen_s = -1.0;    // 首次点亮时刻，相对 SimGimbal 构造；<0 = 从未点亮
+  double last_seen_s = -1.0;     // 最近一次点亮时刻
+  double last_cleared_s = -1.0;  // 最近一次清除时刻；<0 = 从未清除
+  double total_s = 0.0;          // 累计点亮时长
+  double max_s = 0.0;            // 单次最长点亮时长
+  bool active = false;           // 最近一次采样时是否点亮
+};
 
 struct SimGimbalConfig
 {
@@ -215,6 +240,22 @@ public:
   std::uint32_t faults() const;
   bool fire_allowed() const { return faults() == FAULT_NONE; }
 
+  // 采样当前 faults() 并推进累计历史。
+  //
+  // set_fault / clear_faults / send / tick 内部已各自调用一次，所以显式置起的位
+  // 一定被记到；但 state_stale / command_age / startup / fire_disabled 这四位是
+  // faults() 现算的，不经过 set_fault，只有采样时才看得到。主循环每帧显式调一次，
+  // 才能把这四位也纳入历史。多调无害：同一状态重复采样只会累加时长。
+  void sample_faults();
+  // 单测注入时间用，单位秒，必须单调不减。
+  void sample_faults_at(double now_s);
+
+  // 整段运行里**曾经**点亮过的位的并集。严格闭环判据看这个，不看 faults()。
+  std::uint32_t faults_seen() const { return faults_seen_; }
+  const std::vector<FaultHistory> & fault_history() const { return fault_history_; }
+  // 距 SimGimbal 构造的秒数（steady_clock）。
+  double uptime_s() const;
+
   // 编码/解码，供 loopback 测试直接核对
   GimbalCmd encode(bool control, bool fire, double yaw_rad, double pitch_rad, double distance_m)
     const;
@@ -260,6 +301,10 @@ private:
   std::uint64_t command_age_violations_ = 0;
 
   std::uint32_t faults_ = FAULT_STARTUP;
+  std::uint32_t faults_seen_ = 0;
+  std::vector<FaultHistory> fault_history_;
+  double fault_sampled_s_ = 0.0;
+  std::chrono::steady_clock::time_point created_{std::chrono::steady_clock::now()};
   std::chrono::steady_clock::time_point last_send_{};
   bool has_sent_ = false;
 

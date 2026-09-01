@@ -7,8 +7,9 @@
 // 它验证三件在真机上代价很高、在这里几乎免费的事：
 //   1. 入口能在完全干净的环境里跑起来并正常退出（不是崩在半路）；
 //   2. 默认（不带 --allow-fire）时 fire_advice 恒为 0，且计入 suppressed；
-//   3. closed_loop + --allow-fire 缺世界观测年龄预算时入口拒绝启动；
-//   4. 心跳停掉之后入口不再发控制命令，只发安全停止。
+//   3. closed_loop + --allow-fire 缺世界观测年龄预算、缺颜色门或颜色门配置错误时入口拒绝启动；
+//   4. 关闭颜色门开火必须显式 --allow-colorblind-fire，并在报告中留下痕迹；
+//   5. 心跳停掉之后入口不再发控制命令，只发安全停止。
 //
 // 刻意不追求检出率：合成图案里没有装甲板，detected_frames 预期为 0。
 
@@ -69,6 +70,23 @@ std::string json_string(const std::string & json, const std::string & key)
   const auto end = json.find('"', pos + 1);
   if (end == std::string::npos) return {};
   return json.substr(pos + 1, end - pos - 1);
+}
+
+bool json_bool(const std::string & json, const std::string & key, bool * out)
+{
+  const std::string needle = "\"" + key + "\":";
+  const auto pos = json.find(needle);
+  if (pos == std::string::npos) return false;
+  const char * value = json.c_str() + pos + needle.size();
+  if (std::strncmp(value, " true", 5) == 0) {
+    *out = true;
+    return true;
+  }
+  if (std::strncmp(value, " false", 6) == 0) {
+    *out = false;
+    return true;
+  }
+  return false;
 }
 
 // fork 出入口二进制并等它退出，返回退出码（异常终止返回 -1）。
@@ -279,7 +297,7 @@ int main(int argc, char * argv[])
         "p50=" + std::to_string(p50) + " p95=" + std::to_string(p95) + " p99=" +
           std::to_string(p99));
 
-  std::printf("--- 开火必须带世界观测年龄预算 --------------------------------------\n");
+  std::printf("--- 开火必须带年龄预算与颜色安全门 ------------------------------------\n");
   // configs/simulation.yaml 没有 max_command_age_ms（默认 0 = 不设限），所以
   // --allow-fire 必须被拒。这里测的是"缺预算时不会悄悄跑成一次不设限的开火闭环"。
   {
@@ -294,20 +312,85 @@ int main(int argc, char * argv[])
     check(producer.fire_cmds.load() == fire_before, "被拒的运行没有发出任何开火命令");
     ::unlink(no_budget_report.c_str());
 
-    // 给了正预算就能启动，且预算与来源要落在报告里——事后要能区分"设过预算"和
-    // "没设预算"，光看 fire 数字是区分不出来的。
+    // 只有年龄预算还不够：默认配置关闭颜色门，必须拒绝，而不是冒着打己方目标的
+    // 风险跑完。此前这里错误地期待 exit=0，等价于把新安全门当成回归。
     const std::string budget_report = dir + "/budget.json";
-    const int code_budget = run_entry(
+    const int code_missing_color_gate = run_entry(
       {binary, yaml_path, "--mode=closed_loop", "--allow-fire",
        "--max-command-age-ms=5000", "--duration-s=2", "--report=" + budget_report});
-    check(code_budget == 0, "给出正预算后能正常跑完", "exit=" + std::to_string(code_budget));
+    check(code_missing_color_gate == 2, "缺颜色门时 --allow-fire 被拒绝（exit 2）",
+          "exit=" + std::to_string(code_missing_color_gate));
+    check(read_file(budget_report).empty(), "颜色门拒绝时不写报告");
+    check(producer.fire_cmds.load() == fire_before, "颜色门拒绝时没有任何开火命令");
+
+    // 无颜色门的开火只能走显式危险 opt-in；报告必须留下可机器读取的痕迹，避免
+    // 事后把这次运行误当成带敌我约束的闭环证据。
+    const int code_colorblind = run_entry(
+      {binary, yaml_path, "--mode=closed_loop", "--allow-fire", "--allow-colorblind-fire",
+       "--max-command-age-ms=5000", "--duration-s=2", "--report=" + budget_report});
+    check(code_colorblind == 0, "显式色盲开火 opt-in 后能正常跑完",
+          "exit=" + std::to_string(code_colorblind));
     const std::string budget_json = read_file(budget_report);
     double budget_ms = -1;
     json_number(budget_json, "budget_ms", &budget_ms);
     check(budget_ms == 5000, "报告记下了生效的预算", std::to_string(budget_ms));
     check(json_string(budget_json, "budget_source") == "cli", "报告记下了预算来源",
           json_string(budget_json, "budget_source"));
+    bool colorblind_opt_in = false;
+    bool fire_without_color_gate = false;
+    check(
+      json_bool(budget_json, "colorblind_fire_opt_in", &colorblind_opt_in) && colorblind_opt_in,
+      "报告记下色盲开火 opt-in");
+    check(
+      json_bool(budget_json, "fire_without_color_gate", &fire_without_color_gate) &&
+        fire_without_color_gate,
+      "报告明确标记开火未受颜色门约束");
     ::unlink(budget_report.c_str());
+
+    // 把颜色门打开但仍指向配置里的 red（评估敌队是 blue）也必须拒绝。这个分支
+    // 防止未来有人只把 use_enemy_color 改成 true，就误以为开火已经安全。
+    const std::string wrong_color_yaml = dir + "/wrong_color.yaml";
+    std::string wrong_color_text = yaml_text;
+    const std::string color_gate_off = "use_enemy_color: false";
+    const auto color_gate_pos = wrong_color_text.find(color_gate_off);
+    check(color_gate_pos != std::string::npos, "测试配置包含 sim.use_enemy_color");
+    if (color_gate_pos != std::string::npos) {
+      wrong_color_text.replace(color_gate_pos, color_gate_off.size(), "use_enemy_color: true");
+      std::ofstream ofs(wrong_color_yaml);
+      ofs << wrong_color_text;
+      ofs.close();
+      const int code_wrong_color = run_entry(
+        {binary, wrong_color_yaml, "--mode=closed_loop", "--allow-fire",
+         "--max-command-age-ms=5000", "--duration-s=2"});
+      check(code_wrong_color == 2, "颜色门指向非敌方队伍时被拒绝（exit 2）",
+            "exit=" + std::to_string(code_wrong_color));
+    }
+    ::unlink(wrong_color_yaml.c_str());
+
+    // Tracker 对缺失 enemy_color 会默认蓝色；旧的一致性判断却把空字符串直接当作
+    // "一致"。即使默认刚好是 blue，也不能让未声明的敌我约束解锁开火。
+    const std::string missing_color_yaml = dir + "/missing_color.yaml";
+    std::string missing_color_text = yaml_text;
+    const std::string enemy_color_red = "enemy_color: \"red\"";
+    const auto enemy_color_pos = missing_color_text.find(enemy_color_red);
+    check(enemy_color_pos != std::string::npos, "测试配置包含顶层 enemy_color");
+    if (enemy_color_pos != std::string::npos) {
+      missing_color_text.replace(enemy_color_pos, enemy_color_red.size(), "enemy_color: \"\"");
+      const auto missing_gate_pos = missing_color_text.find(color_gate_off);
+      check(missing_gate_pos != std::string::npos, "缺颜色配置仍可打开 sim.use_enemy_color");
+      if (missing_gate_pos != std::string::npos) {
+        missing_color_text.replace(missing_gate_pos, color_gate_off.size(), "use_enemy_color: true");
+        std::ofstream ofs(missing_color_yaml);
+        ofs << missing_color_text;
+        ofs.close();
+        const int code_missing_color = run_entry(
+          {binary, missing_color_yaml, "--mode=closed_loop", "--allow-fire",
+           "--max-command-age-ms=5000", "--duration-s=2"});
+        check(code_missing_color == 2, "缺 enemy_color 时开火被拒绝（exit 2）",
+              "exit=" + std::to_string(code_missing_color));
+      }
+    }
+    ::unlink(missing_color_yaml.c_str());
   }
 
   std::printf("--- 心跳丢失后不再发控制 --------------------------------------------\n");

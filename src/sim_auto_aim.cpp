@@ -50,6 +50,7 @@ const std::string keys =
   "{period-s       | 4.0                   | probe 模式扫描周期(秒)}"
   "{duration-s     | 0.0                   | 运行时长(秒)，0 表示直到 Ctrl-C}"
   "{allow-fire     |                       | 允许虚拟开火（默认禁止）}"
+  "{allow-colorblind-fire |                | 显式承认在关闭颜色门的情况下开火（危险，见 --help 说明）}"
   "{eval           |                       | 打开真值评估（真值只进评估器）}"
   "{report         |                       | 指标 JSON 输出路径}"
   "{dump-frame     |                       | 把第一帧 Ok 图像存到该路径（排查视野/色序）}"
@@ -132,6 +133,7 @@ int main(int argc, char * argv[])
   const int dump_detect = cli.get<int>("dump-detect");
   const double duration_s = cli.get<double>("duration-s");
   const bool allow_fire = cli.has("allow-fire");
+  const bool allow_colorblind_fire = cli.has("allow-colorblind-fire");
   const bool do_eval = cli.has("eval");
   const auto report_path = cli.get<std::string>("report");
   const auto dump_frame_path = cli.get<std::string>("dump-frame");
@@ -301,6 +303,9 @@ int main(int argc, char * argv[])
   // sim.use_enemy_color=false 关掉了。两者含义不同，不能互相顶替；下面会在它们
   // 不一致时打一条 warn，避免以后有人以为改顶层就能改评估对象。
   std::uint8_t enemy_team = sim_io::GT_TEAM_BLUE;
+  // 顶层 enemy_color：Tracker 颜色门用的那个颜色（tracker.cpp:151 直接读它）。
+  std::string tracker_enemy_color;
+  bool tracker_enemy_color_valid = false;
   {
     const auto from_yaml = tools::read_or<std::string>(sim, "enemy_team", "blue");
     if (!parse_enemy_team(from_yaml, &enemy_team)) {
@@ -311,12 +316,15 @@ int main(int argc, char * argv[])
       tools::logger()->error("[sim] --enemy-team 取值非法: {}（应为 red/blue/any）", enemy_team_cli);
       return 2;
     }
-    const auto top_color = tools::read_or<std::string>(yaml, "enemy_color", std::string());
-    if (!top_color.empty() && top_color != enemy_team_name(enemy_team)) {
+    tracker_enemy_color = tools::read_or<std::string>(yaml, "enemy_color", std::string());
+    tracker_enemy_color_valid =
+      tracker_enemy_color == "red" || tracker_enemy_color == "blue";
+    if (!tracker_enemy_color.empty() && tracker_enemy_color != enemy_team_name(enemy_team)) {
       tools::logger()->warn(
-        "[sim] 真值评估敌方队伍={}，与顶层 enemy_color={} 不一致。顶层键只作用于实车 "
-        "Tracker 的颜色门（仿真已 use_enemy_color=false 关闭），评估对象只看 sim.enemy_team",
-        enemy_team_name(enemy_team), top_color);
+        "[sim] 真值评估敌方队伍={}，与顶层 enemy_color={} 不一致。顶层键作用于 Tracker "
+        "的颜色门，评估对象只看 sim.enemy_team；两者不一致时是否致命取决于颜色门有没有"
+        "开，见下面的颜色门自检",
+        enemy_team_name(enemy_team), tracker_enemy_color);
     }
     // 真值区必须由发布端明确声明它真的在写。协议 v2 里没有这个声明，新消费端
     // 对着一个不写真值区的发布端只会读到恒 0 的 seqlock，read_ground_truth()
@@ -336,6 +344,68 @@ int main(int argc, char * argv[])
     }
     tools::logger()->info("[sim] 真值评估敌方队伍 = {}", enemy_team_name(enemy_team));
   }
+
+  // ---- 颜色门自检 -------------------------------------------------------------
+  //
+  // Tracker 的颜色门（tracker.cpp:210）是"只打敌方颜色"这条约束在这条链路上**唯一**
+  // 的落点：Planner 和 SimGimbal 都不看颜色，仿真端的开火完全由 fire_advice 决定
+  // （plugin.rs:282），与左键无关。门一关，跟上什么就打什么。
+  //
+  // 实测证据（closed_loop + --dump-detect）：本车是红方，画面里 color=0(red) 的
+  // **我方红方前哨站**被 Tracker 正常跟踪并成为瞄准目标。auto_aim::Color 是
+  // red=0 / blue=1 / extinguish=2（armor.hpp:8），也就是说这不是"颜色读错"，
+  // 而是根本没有人比较过颜色。
+  //
+  // 为什么不直接强制 use_enemy_color=true：合成图像对 YOLO 的颜色分类头是分布外的，
+  // 实测同一块板在画面里挪 38~70 像素就在 red/blue/灭 之间乱跳（见
+  // configs/simulation.yaml 里 use_enemy_color 那段的逐点记录），开门即 tracked=0。
+  // 更糟的是这份配置的顶层 enemy_color 是 "red"，而本车就是红方——照原样开门，
+  // 颜色门会把目标集合精确地限制到**我方**装甲板上，比不设门更危险。
+  //
+  // 所以这里走"显式 opt-in + 默认拒绝"：关门状态下要开火，必须自己写上
+  // --allow-colorblind-fire；开门状态下要开火，颜色必须与评估敌方队伍一致。
+  // 两条都会写进报告的 color_gate 段，事后能从报告区分这次运行到底有没有颜色门。
+  // Tracker 对不等于 "red" 的任何值都退化为 blue（tracker.cpp:151）。开火安全门不能
+  // 把缺失/拼错的配置当作“无所谓”，否则 `--enemy-team=red` + 缺 enemy_color 时实际
+  // 会过滤 blue、报告却说颜色门一致。这里要求明确、有效且与评估敌队一致。
+  const bool color_gate_consistent =
+    tracker_enemy_color_valid && tracker_enemy_color == enemy_team_name(enemy_team);
+  if (gim_cfg.allow_fire && !use_enemy_color && !allow_colorblind_fire) {
+    tools::logger()->error(
+      "[sim] closed_loop + --allow-fire 但 sim.use_enemy_color=false：整条链路没有任何"
+      "颜色判据，跟上我方装甲板就会开火（实测我方红方前哨站 color=0 被正常跟踪）。");
+    tools::logger()->error(
+      "[sim] 二选一：(1) 在 {} 里把 sim.use_enemy_color 置 true 并把顶层 enemy_color 改成"
+      " {}（当前 \"{}\"）；(2) 明确接受风险，加 --allow-colorblind-fire。"
+      "不加参数时拒绝开火，而不是默默地开着火跑完一次看起来正常的闭环。",
+      config_path, enemy_team_name(enemy_team),
+      tracker_enemy_color.empty() ? "未设置" : tracker_enemy_color.c_str());
+    return 2;
+  }
+  if (gim_cfg.allow_fire && use_enemy_color && !tracker_enemy_color_valid) {
+    tools::logger()->error(
+      "[sim] 颜色门已开但顶层 enemy_color 不是明确的 red/blue（当前 \"{}\"）。"
+      "Tracker 会把非 red 值静默当 blue，开火前必须显式配置敌方颜色。",
+      tracker_enemy_color.empty() ? "未设置" : tracker_enemy_color.c_str());
+    return 2;
+  }
+  if (gim_cfg.allow_fire && use_enemy_color && !color_gate_consistent) {
+    tools::logger()->error(
+      "[sim] 颜色门已开但指向错了队伍：Tracker 按顶层 enemy_color=\"{}\" 过滤，而本次"
+      "敌方队伍是 {}。开火会被精确地限制在**非敌方**装甲板上。改配置或改 --enemy-team。",
+      tracker_enemy_color, enemy_team_name(enemy_team));
+    return 2;
+  }
+  if (gim_cfg.allow_fire && !use_enemy_color) {
+    tools::logger()->warn(
+      "[sim] --allow-colorblind-fire 已生效：颜色门关闭，本次运行的开火**不受颜色约束**，"
+      "报告 color_gate.enabled=false。这份数据不能当作带颜色门的闭环结果引用。");
+  }
+  tools::logger()->info(
+    "[sim] 颜色门 enabled={} tracker_enemy_color=\"{}\" valid={} eval_enemy_team={} "
+    "consistent={} colorblind_fire_opt_in={}",
+    use_enemy_color, tracker_enemy_color, tracker_enemy_color_valid, enemy_team_name(enemy_team),
+    color_gate_consistent, allow_colorblind_fire);
 
   auto_aim::Solver solver(config_path);
   sim_io::SimGimbal gimbal(camera.client(), gim_cfg);
@@ -479,6 +549,11 @@ int main(int argc, char * argv[])
     if (duration_s > 0.0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_t0).count() > duration_s)
       break;
+
+    // 每帧采一次故障历史。`faults()` 里的 startup/state_stale/command_age/fire_disabled
+    // 四位是**算出来的**、不经过 set_fault，只挂 set_fault 的钩子会漏掉它们；
+    // 而且它们随时间自行点亮/熄灭，必须靠周期采样才能记到 total_s / episodes。
+    gimbal.sample_faults();
 
     const auto st = camera.read_blocking(img, t);
 
@@ -1055,6 +1130,63 @@ int main(int argc, char * argv[])
      << ", \"sim_not_following_frames\": " << not_following_frames
      << ", \"runtime_state_missing_frames\": " << runtime_state_missing_frames
      << ", \"final_faults\": \"" << sim_io::describe_faults(gimbal.faults()) << "\"},\n";
+  // 颜色门的**实际生效状态**。报告里必须能独立回答"这次运行开火受不受颜色约束"，
+  // 而不是回去翻当时的配置文件和命令行。
+  js << "  \"color_gate\": {\"enabled\": " << (use_enemy_color ? "true" : "false")
+     << ", \"tracker_enemy_color\": \"" << tracker_enemy_color << "\""
+     << ", \"tracker_enemy_color_valid\": "
+     << (tracker_enemy_color_valid ? "true" : "false")
+     << ", \"eval_enemy_team\": \"" << enemy_team_name(enemy_team) << "\""
+     << ", \"consistent\": " << (color_gate_consistent ? "true" : "false")
+     << ", \"colorblind_fire_opt_in\": " << (allow_colorblind_fire ? "true" : "false")
+     << ", \"fire_without_color_gate\": "
+     << ((gim_cfg.allow_fire && !use_enemy_color) ? "true" : "false") << "},\n";
+  // 全程故障历史。`final_faults` 是退出瞬间的快照，实测出现过
+  // final_faults="none" 与 suppressed_fire=3 同时存在（/tmp/closed_loop_v6.json）：
+  // 开火被抑制过 3 次，说明运行中确实点亮过故障位，退出时刚好都清了。
+  // 严格闭环判据看下面的 seen / episodes，不看 final。
+  {
+    const std::uint32_t seen = gimbal.faults_seen();
+    js << "  \"faults\": {\"final\": \"" << sim_io::describe_faults(gimbal.faults())
+       << "\", \"seen\": \"" << sim_io::describe_faults(seen) << "\", \"seen_mask\": " << seen
+       << ", \"observed_s\": " << gimbal.uptime_s() << ",\n";
+    // 用户点名要分开统计的五类。逐位输出，不做合并。
+    js << "    \"by_bit\": {";
+    bool first = true;
+    for (const auto & h : gimbal.fault_history()) {
+      if (h.episodes == 0) continue;
+      if (!first) js << ", ";
+      first = false;
+      js << "\"" << h.name << "\": {\"episodes\": " << h.episodes
+         << ", \"first_seen_s\": " << h.first_seen_s << ", \"last_seen_s\": " << h.last_seen_s
+         << ", \"last_cleared_s\": " << h.last_cleared_s << ", \"total_s\": " << h.total_s
+         << ", \"max_s\": " << h.max_s << ", \"active_at_exit\": "
+         << (h.active ? "true" : "false") << "}";
+    }
+    js << "}},\n";
+    // 严格闭环判据：只允许启动瞬态（startup / rearm_pending）出现过，且
+    // --allow-fire 的运行不允许有被抑制的开火。这里只输出**判据与各项结论**，
+    // 是否算验收通过由运行方结合实车/多次复现判断——单次单机实验不构成验收。
+    const std::uint32_t transient = sim_io::FAULT_STARTUP | sim_io::FAULT_REARM_PENDING |
+                                    (gim_cfg.allow_fire ? 0u : sim_io::FAULT_FIRE_DISABLED);
+    const std::uint32_t offending = seen & ~transient;
+    js << "  \"strict_closed_loop\": {\"criterion\": "
+          "\"faults_seen minus {startup,rearm_pending} is empty AND suppressed_fire==0 AND "
+          "color_gate.enabled AND ground_truth.count>0\""
+       << ", \"offending_faults\": \"" << sim_io::describe_faults(offending) << "\""
+       << ", \"no_offending_faults\": " << (offending == 0 ? "true" : "false")
+       << ", \"no_suppressed_fire\": " << (gimbal.suppressed_fires() == 0 ? "true" : "false")
+       << ", \"color_gate_enabled\": " << (use_enemy_color ? "true" : "false")
+       << ", \"ground_truth_matched\": "
+       << ((do_eval && evaluator.stats().count > 0) ? "true" : "false")
+       << ", \"single_machine_run\": true"
+       << ", \"verdict\": \""
+       << ((offending == 0 && gimbal.suppressed_fires() == 0 && use_enemy_color && do_eval &&
+            evaluator.stats().count > 0)
+             ? "criteria_met_single_run_not_acceptance"
+             : "criteria_not_met")
+       << "\"},\n";
+  }
   js << "  \"extrinsic\": {\"max_err_m\": " << max_extrinsic_err
      << ", \"warnings\": " << extrinsic_warnings << "}";
   if (do_eval) {
