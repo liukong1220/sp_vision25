@@ -205,8 +205,8 @@ sim:
   # 是否让 Tracker 按 enemy_color 过滤装甲板。仿真默认 false。
   #
   # 实测（--dump-detect，静态位姿、其余条件全不变，只改云台 pitch）：
-  #   pitch=-2.0deg -> color=0(blue) conf=0.93  detected 21/21  tracked 22/22
-  #   pitch=-3.8deg -> color=1(red)  conf=0.94  detected 22/22  tracked  0
+  #   pitch=-2.0deg -> color=0(red)  conf=0.93  detected 21/21  tracked 22/22
+  #   pitch=-3.8deg -> color=1(blue) conf=0.94  detected 22/22  tracked  0
   #   pitch=-5.4deg -> color=2(灭)   conf=0.89  detected 22/22  tracked  0
   # 同一块装甲板在画面里只挪了 38~70 像素，编号一直是 one、置信度一直 0.9+、
   # 单帧 PnP 一直是 (-0.016,1.49,0.09)（真值 (-0.023,1.481,0.033)，误差约 1cm），
