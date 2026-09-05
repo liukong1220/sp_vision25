@@ -146,10 +146,18 @@ public:
   }
 
   void set_camera_info(const CameraInfo & info) { meta_->camera_info = info; }
-  void set_runtime_state(const RuntimeState & state) { meta_->runtime_state = state; }
+  void set_runtime_state(const RuntimeState & state)
+  {
+    std::uint8_t encoded[RUNTIME_STATE_PAYLOAD_BYTES];
+    encode_runtime_state(state, encoded);
+    write_snapshot(&meta_->runtime_state, &meta_->runtime_state.seqlock, encoded);
+  }
   void set_chassis_observation(const ChassisObservation & obs)
   {
-    meta_->chassis_observation = obs;
+    std::uint8_t encoded[CHASSIS_OBSERVATION_PAYLOAD_BYTES];
+    encode_chassis_observation(obs, encoded);
+    write_snapshot(
+      &meta_->chassis_observation, &meta_->chassis_observation.seqlock, encoded);
   }
   // 与 Rust 侧 TalosPublisher::publish_ground_truth 相同的 seqlock 提交序：
   // 写前置奇、写后置偶，两端各一道 release 栅栏。消费端读到奇数或前后不等就重试。
@@ -163,13 +171,10 @@ public:
   //     点都记得改一份副本；写法本身仍是非原子的，且 TSan 会如实报 race。
   void set_ground_truth(const GroundTruthBatch & batch)
   {
-    const std::uint32_t begin = (gt_seq_ + 1) | 1u;
-    store_seq(begin);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    std::memcpy(&meta_->ground_truth, &batch, GROUND_TRUTH_PAYLOAD_BYTES);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    gt_seq_ = begin + 1;
-    store_seq(gt_seq_);
+    std::uint8_t encoded[GROUND_TRUTH_PAYLOAD_BYTES];
+    encode_ground_truth_batch(batch, encoded);
+    write_snapshot(&meta_->ground_truth, &meta_->ground_truth.seqlock, encoded);
+    gt_seq_ = ground_truth_seq();
   }
 
   // 故意把真值区停在"写一半"的状态：置奇序号并写入 batch，但**不**收尾置偶。
@@ -179,9 +184,11 @@ public:
   void begin_torn_ground_truth(const GroundTruthBatch & batch)
   {
     const std::uint32_t begin = (gt_seq_ + 1) | 1u;
-    store_seq(begin);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    std::memcpy(&meta_->ground_truth, &batch, GROUND_TRUTH_PAYLOAD_BYTES);
+    __atomic_store_n(&meta_->ground_truth.seqlock, begin, __ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    std::uint8_t encoded[GROUND_TRUTH_PAYLOAD_BYTES];
+    encode_ground_truth_batch(batch, encoded);
+    atomic_copy_to_shared(&meta_->ground_truth, encoded, GROUND_TRUTH_PAYLOAD_BYTES);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     gt_seq_ = begin;  // 停在奇数：区域标记为"正在写"
   }
@@ -319,6 +326,19 @@ private:
   void store_seq(std::uint32_t value)
   {
     __atomic_store_n(&meta_->ground_truth.seqlock, value, __ATOMIC_RELEASE);
+  }
+
+  template<std::size_t N>
+  static void write_snapshot(
+    void * destination, std::uint32_t * sequence, const std::uint8_t (&encoded)[N])
+  {
+    const std::uint32_t begin =
+      (__atomic_load_n(sequence, __ATOMIC_RELAXED) + 1u) | 1u;
+    __atomic_store_n(sequence, begin, __ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    atomic_copy_to_shared(destination, encoded, N);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(sequence, begin + 1u, __ATOMIC_RELEASE);
   }
 
   static bool make_region(

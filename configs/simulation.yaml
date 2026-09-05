@@ -224,10 +224,35 @@ sim:
   #                            而 fire_allowed() 要求 faults()==FAULT_NONE，
   #                            于是 --allow-fire 也永远打不出一发（实测
   #                            plan_fire 0 / fire 0 / suppressed_fire 152）。
-  # 现在取"实测 p99 之上、心跳超时 500ms 之下"的 450ms：仍然是真实的过期保护
-  # （断流 450ms 即禁火并安全停止），只是把判据对齐到本机真实延迟。
-  # 帧率/回读延迟改善后应当同步调回。
+  # 450ms 仅是本机图像链路的断流/过期保护，不是闭环验收的开火预算。
+  # 开火还必须满足下面的 command_age 与受控运动学误差上限；预算应在受控底盘
+  # yaw、平移和目标旋转速率下重新测量后确定，不能由单机 p99 单独推导。
   max_frame_age_ms: 450.0
+  # 允许发布/消费 wall clock 的微小采样抖动；更远的未来帧直接拒绝。
+  max_future_frame_ms: 5.0
+  # 世界观测年龄预算。0 表示仅测量、不为默认运行开启开火预算；
+  # closed_loop + --allow-fire 必须用 CLI 或配置显式提供正值。
+  max_command_age_ms: 0.0
+  # 严格闭环报告的最低证据量。单次 p99 不能替代受控运动学预算验证。
+  strict_min_frames: 30
+  strict_min_gt_coverage: 0.95
+  strict_min_matched_eval_samples: 10
+  # Buff truth-contract error thresholds. Strict must score these, not only counts/launch.
+  strict_center_error_m: 0.15
+  strict_angle_error_rad: 0.2
+  strict_speed_error_radps: 0.4
+  strict_gimbal_error_deg: 3.0
+  # 动态误差上限：age_s * (底盘 yaw rate + 目标旋转 rate) 与
+  # age_s * (平移速度 + 目标旋转 rate * 板心半径)。超出即禁止开火。
+  dynamic_max_angle_error_deg: 5.0
+  dynamic_max_position_error_m: 0.25
+  controlled_max_yaw_rate_radps: 3.0
+  controlled_max_translation_speed_mps: 2.0
+  controlled_max_target_rotation_radps: 2.51
+  controlled_max_target_translation_speed_mps: 0.5
+  # Worst-case command publication -> simulator consume delay (seconds).
+  # Bound uses max(this, measured send-to-consume p99) when samples exist.
+  command_to_consume_delay_s: 0.02
   heartbeat_timeout_ms: 500.0
   read_timeout_ms: 1000.0
   # 断流看门狗：距上一帧到达超过这个时间就置 FAULT_NO_NEW_FRAME。

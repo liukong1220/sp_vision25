@@ -8,7 +8,7 @@
 // 而不是一个显式的错误。因此这里对每个结构体都做 sizeof / alignof / offsetof
 // 编译期断言，不允许只靠“字段名看起来一样”来判定 ABI 兼容。
 //
-// 上游基线：SHM_MAGIC = 0x54414C05，SHM_VERSION = 3。
+// 上游基线：SHM_MAGIC = 0x54414C05，SHM_VERSION = 4。
 //
 // 三缓冲的 `state` 在 Rust 侧是 `AtomicU8`。这里刻意用裸 `std::uint8_t` 保持
 // 结构体是纯 POD（可 offsetof、可 static_assert 标准布局），原子语义由
@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <cstring>
 
 #if !defined(__GNUC__) && !defined(__clang__)
 #error "sim_io shared-memory layout relies on __atomic_* builtins (GCC/Clang)."
@@ -27,12 +28,13 @@ namespace sim_io
 // ---------------------------------------------------------------- 协议常量 --
 
 constexpr std::uint32_t SHM_MAGIC = 0x54414C05u;
-// 协议版本。v2 -> v3：poses[Muzzle] 由“云台局部平移 + 单位四元数”改为**完整世界
+// 协议版本。v2 -> v3 保留世界枪口语义，v4 增加原子单槽快照与命令消费回执。
+// v3 的 poses[Muzzle] 由“云台局部平移 + 单位四元数”改为**完整世界
 // 位姿**（见 PoseIndex 的注释），并启用 ShmHeader::capabilities 能力位。
 //
 // 字节布局没有变，所以这次升版号纯粹为了拦住语义不兼容：旧发布端 + 新消费端能
 // mmap 成功、能读出数字，只是把局部偏移当世界坐标用，得到的是一个静默的错误答案。
-constexpr std::uint32_t SHM_VERSION = 3u;
+constexpr std::uint32_t SHM_VERSION = 4u;
 
 // ShmHeader::capabilities 的位定义。
 //
@@ -41,7 +43,7 @@ constexpr std::uint32_t SHM_VERSION = 3u;
 // 不会。不看能力位就只能靠“读出来是否全零”去猜，而全零同样是合法数据，于是
 // **新消费端对着不发真值的发布端会静默失去真值**。
 constexpr std::uint32_t CAP_GROUND_TRUTH = 1u << 0;
-// poses[Muzzle] 是世界位姿（v3 语义）。未置位表示 v2 的局部平移语义。
+// poses[Muzzle] 是世界位姿（v3/v4 语义）。未置位表示 v2 的局部平移语义。
 constexpr std::uint32_t CAP_MUZZLE_WORLD_POSE = 1u << 1;
 constexpr std::uint32_t CAP_CHASSIS_OBSERVATION = 1u << 2;
 constexpr std::uint32_t CAP_RUNTIME_STATE = 1u << 3;
@@ -124,6 +126,7 @@ struct alignas(64) PoseMeta
   float position[3];
   // Rust 侧发布顺序是 [w, x, y, z]。
   float quaternion[4];
+  std::uint8_t pad0_[4];
   std::uint64_t timestamp_ns;
   std::uint8_t pad_[16];
 };
@@ -135,7 +138,8 @@ struct alignas(32) GimbalCmd
   float pitch_deg;
   float distance_m;
   std::uint8_t fire_advice;
-  std::uint8_t pad_[11];
+  std::uint8_t pad_[3];
+  std::uint64_t command_seq;
 };
 
 struct alignas(64) CameraInfo
@@ -165,7 +169,8 @@ struct alignas(64) ChassisObservation
   float rpy_rad[3];
   float gyro_xyz_radps[3];
   float accel_xyz_mps2[3];
-  std::uint8_t pad_[16];
+  std::uint32_t seqlock;
+  std::uint8_t pad_[12];
 };
 
 template <typename Slot>
@@ -213,7 +218,10 @@ struct alignas(32) GroundTruthTarget
   // 无意义。占用原 pad_[24] 的前 16 字节，结构体大小和其余偏移不变。
   float armor_position[3];
   std::uint8_t armor_position_valid;
-  std::uint8_t pad_[11];
+  // 前哨站少于三块同半径板、或没有相机参考时的退化标记；valid 保持独立。
+  std::uint8_t armor_position_degraded;
+  std::uint16_t identity;
+  std::uint8_t pad_[8];
 };
 
 struct alignas(64) GroundTruthRune
@@ -223,7 +231,7 @@ struct alignas(64) GroundTruthRune
   std::uint8_t team;
   std::uint8_t rune_mode;
   std::uint8_t mechanism_state;
-  std::uint8_t pad1_;
+  std::uint8_t pad0_;
   float r_center_odom[3];
   float radius;
   float current_angle;
@@ -236,7 +244,10 @@ struct alignas(64) GroundTruthRune
   float relative_time;
   std::int32_t blade_id;
   std::uint8_t target_activations[5];
-  std::uint8_t pad_[20];
+  std::uint8_t pad_act_[3];
+  float target_point_odom[3];
+  std::uint16_t identity;
+  std::uint8_t pad_[34];
 };
 
 struct alignas(64) GroundTruthBatch
@@ -245,7 +256,9 @@ struct alignas(64) GroundTruthBatch
   std::uint64_t timestamp_ns;
   std::uint32_t target_count;
   std::uint32_t rune_count;
+  std::uint8_t pad_before_targets[8];
   GroundTruthTarget targets[GROUND_TRUTH_MAX_TARGETS];
+  std::uint8_t pad_before_runes[32];
   GroundTruthRune runes[GROUND_TRUTH_MAX_RUNES];
   // seqlock 序号。发布端写前置奇、写完置偶；读端读到奇数或前后不一致就重试。
   // 原来靠 "memcpy 前后读 frame_seq 相等" 近似判断整块稳定，这不是同步保证：
@@ -263,13 +276,26 @@ struct alignas(64) GroundTruthBatch
 // 写端等于用非原子写踩自己的同步变量。标记之后只有 pad_，所以这段前缀已覆盖
 // 全部有效字段。
 constexpr std::size_t GROUND_TRUTH_PAYLOAD_BYTES = 1600;
+constexpr std::size_t CHASSIS_OBSERVATION_PAYLOAD_BYTES = 112;
 
 struct alignas(64) RuntimeState
 {
   std::uint64_t timestamp_ns;
   std::uint8_t following;
-  std::uint8_t pad_[55];
+  std::uint8_t pad0_[3];
+  std::uint32_t projectile_launch;
+  std::uint32_t projectile_hit;
+  std::uint32_t consumed_commands;
+  std::uint32_t consumed_control_commands;
+  std::uint32_t consumed_fire_commands;
+  std::uint64_t frame_seq;
+  std::uint64_t last_command_seq;
+  std::uint64_t last_command_consume_timestamp_ns;
+  std::uint32_t seqlock;
+  std::uint8_t pad_[4];
 };
+
+constexpr std::size_t RUNTIME_STATE_PAYLOAD_BYTES = 56;
 
 struct ShmMetaRegion
 {
@@ -309,8 +335,10 @@ SIM_IO_ASSERT_LAYOUT(PoseMeta, 64, 64);
 SIM_IO_ASSERT_OFFSET(PoseMeta, frame_seq, 0);
 SIM_IO_ASSERT_OFFSET(PoseMeta, position, 8);
 SIM_IO_ASSERT_OFFSET(PoseMeta, quaternion, 20);
+SIM_IO_ASSERT_OFFSET(PoseMeta, pad0_, 36);
 SIM_IO_ASSERT_OFFSET(PoseMeta, timestamp_ns, 40);
 SIM_IO_ASSERT_OFFSET(PoseMeta, pad_, 48);
+static_assert(sizeof(PoseMeta{}.pad_) == 16, "PoseMeta pad occupies former implicit hole");
 
 SIM_IO_ASSERT_LAYOUT(GimbalCmd, 32, 32);
 SIM_IO_ASSERT_OFFSET(GimbalCmd, timestamp_ns, 0);
@@ -318,6 +346,7 @@ SIM_IO_ASSERT_OFFSET(GimbalCmd, yaw_deg, 8);
 SIM_IO_ASSERT_OFFSET(GimbalCmd, pitch_deg, 12);
 SIM_IO_ASSERT_OFFSET(GimbalCmd, distance_m, 16);
 SIM_IO_ASSERT_OFFSET(GimbalCmd, fire_advice, 20);
+SIM_IO_ASSERT_OFFSET(GimbalCmd, command_seq, 24);
 
 SIM_IO_ASSERT_LAYOUT(CameraInfo, 128, 64);
 SIM_IO_ASSERT_OFFSET(CameraInfo, timestamp_ns, 0);
@@ -342,6 +371,7 @@ SIM_IO_ASSERT_OFFSET(ChassisObservation, alpha_z_radps2, 72);
 SIM_IO_ASSERT_OFFSET(ChassisObservation, rpy_rad, 76);
 SIM_IO_ASSERT_OFFSET(ChassisObservation, gyro_xyz_radps, 88);
 SIM_IO_ASSERT_OFFSET(ChassisObservation, accel_xyz_mps2, 100);
+SIM_IO_ASSERT_OFFSET(ChassisObservation, seqlock, 112);
 
 SIM_IO_ASSERT_LAYOUT(ImageTripleBuffer, 192, 64);
 SIM_IO_ASSERT_LAYOUT(PoseTripleBuffer, 256, 64);
@@ -371,6 +401,8 @@ SIM_IO_ASSERT_OFFSET(GroundTruthTarget, vyaw, 32);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, yaw, 36);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, armor_position, 40);
 SIM_IO_ASSERT_OFFSET(GroundTruthTarget, armor_position_valid, 52);
+SIM_IO_ASSERT_OFFSET(GroundTruthTarget, armor_position_degraded, 53);
+SIM_IO_ASSERT_OFFSET(GroundTruthTarget, identity, 54);
 
 SIM_IO_ASSERT_LAYOUT(GroundTruthRune, 128, 64);
 SIM_IO_ASSERT_OFFSET(GroundTruthRune, r_center_odom, 20);
@@ -382,11 +414,18 @@ SIM_IO_ASSERT_OFFSET(GroundTruthRune, sin_amplitude, 48);
 SIM_IO_ASSERT_OFFSET(GroundTruthRune, relative_time, 64);
 SIM_IO_ASSERT_OFFSET(GroundTruthRune, blade_id, 68);
 SIM_IO_ASSERT_OFFSET(GroundTruthRune, target_activations, 72);
+SIM_IO_ASSERT_OFFSET(GroundTruthRune, target_point_odom, 80);
+SIM_IO_ASSERT_OFFSET(GroundTruthRune, pad0_, 19);
+SIM_IO_ASSERT_OFFSET(GroundTruthRune, pad_act_, 77);
+SIM_IO_ASSERT_OFFSET(GroundTruthRune, identity, 92);
+SIM_IO_ASSERT_OFFSET(GroundTruthRune, pad_, 94);
 
 SIM_IO_ASSERT_LAYOUT(GroundTruthBatch, 1664, 64);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, target_count, 16);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, rune_count, 20);
+SIM_IO_ASSERT_OFFSET(GroundTruthBatch, pad_before_targets, 24);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, targets, 32);
+SIM_IO_ASSERT_OFFSET(GroundTruthBatch, pad_before_runes, 1056);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, runes, 1088);
 SIM_IO_ASSERT_OFFSET(GroundTruthBatch, seqlock, 1600);
 static_assert(
@@ -395,6 +434,22 @@ static_assert(
 
 SIM_IO_ASSERT_LAYOUT(RuntimeState, 64, 64);
 SIM_IO_ASSERT_OFFSET(RuntimeState, following, 8);
+SIM_IO_ASSERT_OFFSET(RuntimeState, pad0_, 9);
+SIM_IO_ASSERT_OFFSET(RuntimeState, projectile_launch, 12);
+SIM_IO_ASSERT_OFFSET(RuntimeState, projectile_hit, 16);
+SIM_IO_ASSERT_OFFSET(RuntimeState, consumed_commands, 20);
+SIM_IO_ASSERT_OFFSET(RuntimeState, consumed_control_commands, 24);
+SIM_IO_ASSERT_OFFSET(RuntimeState, consumed_fire_commands, 28);
+SIM_IO_ASSERT_OFFSET(RuntimeState, frame_seq, 32);
+SIM_IO_ASSERT_OFFSET(RuntimeState, last_command_seq, 40);
+SIM_IO_ASSERT_OFFSET(RuntimeState, last_command_consume_timestamp_ns, 48);
+SIM_IO_ASSERT_OFFSET(RuntimeState, seqlock, 56);
+static_assert(
+  CHASSIS_OBSERVATION_PAYLOAD_BYTES == offsetof(ChassisObservation, seqlock),
+  "ChassisObservation payload must stop before seqlock");
+static_assert(
+  RUNTIME_STATE_PAYLOAD_BYTES == offsetof(RuntimeState, seqlock),
+  "RuntimeState payload must stop before seqlock");
 
 SIM_IO_ASSERT_LAYOUT(ShmMetaRegion, 3712, 64);
 SIM_IO_ASSERT_OFFSET(ShmMetaRegion, header, 0);
@@ -408,6 +463,311 @@ SIM_IO_ASSERT_OFFSET(ShmMetaRegion, runtime_state, 3648);
 
 static_assert(IMAGE_SIZE == 4665600, "image size mismatch");
 static_assert(IMAGE_POOL_SIZE == 13996800, "image pool size mismatch");
+
+// ------------------------------------------------------- 共享内存原子操作原语 --
+
+// 固定单槽快照的 payload 不能用普通 memcpy：seqlock 能检测一次拷贝跨越写入，
+// 但不能把冲突的非原子访问变成语言层有定义的行为。协议 v4 规定这些共享字节
+// 只能通过原子 byte 操作访问；本地临时结构仍是普通对象。
+inline void atomic_copy_to_shared(void * destination, const void * source, std::size_t bytes)
+{
+  auto * dst = static_cast<std::uint8_t *>(destination);
+  const auto * src = static_cast<const std::uint8_t *>(source);
+  for (std::size_t i = 0; i < bytes; ++i)
+    __atomic_store_n(dst + i, src[i], __ATOMIC_RELAXED);
+}
+
+inline void atomic_copy_from_shared(void * destination, const void * source, std::size_t bytes)
+{
+  auto * dst = static_cast<std::uint8_t *>(destination);
+  const auto * src = static_cast<const std::uint8_t *>(source);
+  for (std::size_t i = 0; i < bytes; ++i)
+    dst[i] = __atomic_load_n(src + i, __ATOMIC_RELAXED);
+}
+
+inline void store_le_u16(std::uint8_t * p, std::uint16_t v)
+{
+  p[0] = static_cast<std::uint8_t>(v);
+  p[1] = static_cast<std::uint8_t>(v >> 8);
+}
+
+inline void store_le_u32(std::uint8_t * p, std::uint32_t v)
+{
+  p[0] = static_cast<std::uint8_t>(v);
+  p[1] = static_cast<std::uint8_t>(v >> 8);
+  p[2] = static_cast<std::uint8_t>(v >> 16);
+  p[3] = static_cast<std::uint8_t>(v >> 24);
+}
+
+inline void store_le_u64(std::uint8_t * p, std::uint64_t v)
+{
+  store_le_u32(p, static_cast<std::uint32_t>(v));
+  store_le_u32(p + 4, static_cast<std::uint32_t>(v >> 32));
+}
+
+inline void store_le_i32(std::uint8_t * p, std::int32_t v)
+{
+  store_le_u32(p, static_cast<std::uint32_t>(v));
+}
+
+inline void store_le_f32(std::uint8_t * p, float v)
+{
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &v, sizeof(bits));
+  store_le_u32(p, bits);
+}
+
+inline std::uint16_t load_le_u16(const std::uint8_t * p)
+{
+  return static_cast<std::uint16_t>(
+    static_cast<std::uint16_t>(p[0]) | (static_cast<std::uint16_t>(p[1]) << 8));
+}
+
+inline std::uint32_t load_le_u32(const std::uint8_t * p)
+{
+  return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+    (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+inline std::uint64_t load_le_u64(const std::uint8_t * p)
+{
+  return static_cast<std::uint64_t>(load_le_u32(p)) |
+    (static_cast<std::uint64_t>(load_le_u32(p + 4)) << 32);
+}
+
+inline std::int32_t load_le_i32(const std::uint8_t * p)
+{
+  return static_cast<std::int32_t>(load_le_u32(p));
+}
+
+inline float load_le_f32(const std::uint8_t * p)
+{
+  const std::uint32_t bits = load_le_u32(p);
+  float v = 0.0f;
+  std::memcpy(&v, &bits, sizeof(v));
+  return v;
+}
+
+inline void encode_ground_truth_target(const GroundTruthTarget & src, std::uint8_t * dst)
+{
+  std::size_t off = 0;
+  store_le_u64(dst + off, src.frame_seq); off += 8;
+  store_le_u64(dst + off, src.timestamp_ns); off += 8;
+  dst[off++] = src.team;
+  dst[off++] = src.armor_label;
+  dst[off++] = src.is_outpost;
+  dst[off++] = src.pad1_;
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.position[i]); off += 4; }
+  store_le_f32(dst + off, src.vyaw); off += 4;
+  store_le_f32(dst + off, src.yaw); off += 4;
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.armor_position[i]); off += 4; }
+  dst[off++] = src.armor_position_valid;
+  dst[off++] = src.armor_position_degraded;
+  store_le_u16(dst + off, src.identity); off += 2;
+  std::memcpy(dst + off, src.pad_, 8); off += 8;
+  (void)off;
+}
+
+inline GroundTruthTarget decode_ground_truth_target(const std::uint8_t * src)
+{
+  GroundTruthTarget out{};
+  std::size_t off = 0;
+  out.frame_seq = load_le_u64(src + off); off += 8;
+  out.timestamp_ns = load_le_u64(src + off); off += 8;
+  out.team = src[off++];
+  out.armor_label = src[off++];
+  out.is_outpost = src[off++];
+  out.pad1_ = src[off++];
+  for (int i = 0; i < 3; ++i) { out.position[i] = load_le_f32(src + off); off += 4; }
+  out.vyaw = load_le_f32(src + off); off += 4;
+  out.yaw = load_le_f32(src + off); off += 4;
+  for (int i = 0; i < 3; ++i) { out.armor_position[i] = load_le_f32(src + off); off += 4; }
+  out.armor_position_valid = src[off++];
+  out.armor_position_degraded = src[off++];
+  out.identity = load_le_u16(src + off); off += 2;
+  std::memcpy(out.pad_, src + off, 8); off += 8;
+  (void)off;
+  return out;
+}
+
+inline void encode_ground_truth_rune(const GroundTruthRune & src, std::uint8_t * dst)
+{
+  std::size_t off = 0;
+  store_le_u64(dst + off, src.frame_seq); off += 8;
+  store_le_u64(dst + off, src.timestamp_ns); off += 8;
+  dst[off++] = src.team;
+  dst[off++] = src.rune_mode;
+  dst[off++] = src.mechanism_state;
+  dst[off++] = src.pad0_;
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.r_center_odom[i]); off += 4; }
+  store_le_f32(dst + off, src.radius); off += 4;
+  store_le_f32(dst + off, src.current_angle); off += 4;
+  store_le_f32(dst + off, src.v_roll); off += 4;
+  store_le_i32(dst + off, src.direction); off += 4;
+  store_le_f32(dst + off, src.sin_amplitude); off += 4;
+  store_le_f32(dst + off, src.sin_omega); off += 4;
+  store_le_f32(dst + off, src.sin_phase); off += 4;
+  store_le_f32(dst + off, src.sin_offset); off += 4;
+  store_le_f32(dst + off, src.relative_time); off += 4;
+  store_le_i32(dst + off, src.blade_id); off += 4;
+  std::memcpy(dst + off, src.target_activations, 5); off += 5;
+  std::memcpy(dst + off, src.pad_act_, 3); off += 3;
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.target_point_odom[i]); off += 4; }
+  store_le_u16(dst + off, src.identity); off += 2;
+  std::memcpy(dst + off, src.pad_, 34); off += 34;
+  (void)off;
+}
+
+inline GroundTruthRune decode_ground_truth_rune(const std::uint8_t * src)
+{
+  GroundTruthRune out{};
+  std::size_t off = 0;
+  out.frame_seq = load_le_u64(src + off); off += 8;
+  out.timestamp_ns = load_le_u64(src + off); off += 8;
+  out.team = src[off++];
+  out.rune_mode = src[off++];
+  out.mechanism_state = src[off++];
+  out.pad0_ = src[off++];
+  for (int i = 0; i < 3; ++i) { out.r_center_odom[i] = load_le_f32(src + off); off += 4; }
+  out.radius = load_le_f32(src + off); off += 4;
+  out.current_angle = load_le_f32(src + off); off += 4;
+  out.v_roll = load_le_f32(src + off); off += 4;
+  out.direction = load_le_i32(src + off); off += 4;
+  out.sin_amplitude = load_le_f32(src + off); off += 4;
+  out.sin_omega = load_le_f32(src + off); off += 4;
+  out.sin_phase = load_le_f32(src + off); off += 4;
+  out.sin_offset = load_le_f32(src + off); off += 4;
+  out.relative_time = load_le_f32(src + off); off += 4;
+  out.blade_id = load_le_i32(src + off); off += 4;
+  std::memcpy(out.target_activations, src + off, 5); off += 5;
+  std::memcpy(out.pad_act_, src + off, 3); off += 3;
+  for (int i = 0; i < 3; ++i) { out.target_point_odom[i] = load_le_f32(src + off); off += 4; }
+  out.identity = load_le_u16(src + off); off += 2;
+  std::memcpy(out.pad_, src + off, 34); off += 34;
+  (void)off;
+  return out;
+}
+
+inline void encode_ground_truth_batch(
+  const GroundTruthBatch & src, std::uint8_t dst[GROUND_TRUTH_PAYLOAD_BYTES])
+{
+  std::size_t off = 0;
+  store_le_u64(dst + off, src.frame_seq); off += 8;
+  store_le_u64(dst + off, src.timestamp_ns); off += 8;
+  store_le_u32(dst + off, src.target_count); off += 4;
+  store_le_u32(dst + off, src.rune_count); off += 4;
+  std::memcpy(dst + off, src.pad_before_targets, 8); off += 8;
+  for (std::size_t i = 0; i < GROUND_TRUTH_MAX_TARGETS; ++i) {
+    encode_ground_truth_target(src.targets[i], dst + off);
+    off += 64;
+  }
+  std::memcpy(dst + off, src.pad_before_runes, 32); off += 32;
+  for (std::size_t i = 0; i < GROUND_TRUTH_MAX_RUNES; ++i) {
+    encode_ground_truth_rune(src.runes[i], dst + off);
+    off += 128;
+  }
+  (void)off;
+}
+
+inline GroundTruthBatch decode_ground_truth_batch(
+  const std::uint8_t src[GROUND_TRUTH_PAYLOAD_BYTES])
+{
+  GroundTruthBatch out{};
+  std::size_t off = 0;
+  out.frame_seq = load_le_u64(src + off); off += 8;
+  out.timestamp_ns = load_le_u64(src + off); off += 8;
+  out.target_count = load_le_u32(src + off); off += 4;
+  out.rune_count = load_le_u32(src + off); off += 4;
+  std::memcpy(out.pad_before_targets, src + off, 8); off += 8;
+  for (std::size_t i = 0; i < GROUND_TRUTH_MAX_TARGETS; ++i) {
+    out.targets[i] = decode_ground_truth_target(src + off);
+    off += 64;
+  }
+  std::memcpy(out.pad_before_runes, src + off, 32); off += 32;
+  for (std::size_t i = 0; i < GROUND_TRUTH_MAX_RUNES; ++i) {
+    out.runes[i] = decode_ground_truth_rune(src + off);
+    off += 128;
+  }
+  (void)off;
+  return out;
+}
+
+inline void encode_chassis_observation(
+  const ChassisObservation & src, std::uint8_t dst[CHASSIS_OBSERVATION_PAYLOAD_BYTES])
+{
+  std::size_t off = 0;
+  store_le_u64(dst + off, src.frame_seq); off += 8;
+  store_le_u64(dst + off, src.timestamp_ns); off += 8;
+  store_le_f32(dst + off, src.dt_s); off += 4;
+  for (int i = 0; i < 2; ++i) { store_le_f32(dst + off, src.v_body[i]); off += 4; }
+  store_le_f32(dst + off, src.wz_radps); off += 4;
+  for (int i = 0; i < 4; ++i) { store_le_f32(dst + off, src.wheel_linear_mps[i]); off += 4; }
+  for (int i = 0; i < 4; ++i) { store_le_f32(dst + off, src.wheel_angular_radps[i]); off += 4; }
+  for (int i = 0; i < 2; ++i) { store_le_f32(dst + off, src.a_body[i]); off += 4; }
+  store_le_f32(dst + off, src.alpha_z_radps2); off += 4;
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.rpy_rad[i]); off += 4; }
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.gyro_xyz_radps[i]); off += 4; }
+  for (int i = 0; i < 3; ++i) { store_le_f32(dst + off, src.accel_xyz_mps2[i]); off += 4; }
+  (void)off;
+}
+
+inline ChassisObservation decode_chassis_observation(
+  const std::uint8_t src[CHASSIS_OBSERVATION_PAYLOAD_BYTES])
+{
+  ChassisObservation out{};
+  std::size_t off = 0;
+  out.frame_seq = load_le_u64(src + off); off += 8;
+  out.timestamp_ns = load_le_u64(src + off); off += 8;
+  out.dt_s = load_le_f32(src + off); off += 4;
+  for (int i = 0; i < 2; ++i) { out.v_body[i] = load_le_f32(src + off); off += 4; }
+  out.wz_radps = load_le_f32(src + off); off += 4;
+  for (int i = 0; i < 4; ++i) { out.wheel_linear_mps[i] = load_le_f32(src + off); off += 4; }
+  for (int i = 0; i < 4; ++i) { out.wheel_angular_radps[i] = load_le_f32(src + off); off += 4; }
+  for (int i = 0; i < 2; ++i) { out.a_body[i] = load_le_f32(src + off); off += 4; }
+  out.alpha_z_radps2 = load_le_f32(src + off); off += 4;
+  for (int i = 0; i < 3; ++i) { out.rpy_rad[i] = load_le_f32(src + off); off += 4; }
+  for (int i = 0; i < 3; ++i) { out.gyro_xyz_radps[i] = load_le_f32(src + off); off += 4; }
+  for (int i = 0; i < 3; ++i) { out.accel_xyz_mps2[i] = load_le_f32(src + off); off += 4; }
+  (void)off;
+  return out;
+}
+
+inline void encode_runtime_state(
+  const RuntimeState & src, std::uint8_t dst[RUNTIME_STATE_PAYLOAD_BYTES])
+{
+  std::size_t off = 0;
+  store_le_u64(dst + off, src.timestamp_ns); off += 8;
+  dst[off++] = src.following;
+  std::memcpy(dst + off, src.pad0_, 3); off += 3;
+  store_le_u32(dst + off, src.projectile_launch); off += 4;
+  store_le_u32(dst + off, src.projectile_hit); off += 4;
+  store_le_u32(dst + off, src.consumed_commands); off += 4;
+  store_le_u32(dst + off, src.consumed_control_commands); off += 4;
+  store_le_u32(dst + off, src.consumed_fire_commands); off += 4;
+  store_le_u64(dst + off, src.frame_seq); off += 8;
+  store_le_u64(dst + off, src.last_command_seq); off += 8;
+  store_le_u64(dst + off, src.last_command_consume_timestamp_ns); off += 8;
+  (void)off;
+}
+
+inline RuntimeState decode_runtime_state(const std::uint8_t src[RUNTIME_STATE_PAYLOAD_BYTES])
+{
+  RuntimeState out{};
+  std::size_t off = 0;
+  out.timestamp_ns = load_le_u64(src + off); off += 8;
+  out.following = src[off++];
+  std::memcpy(out.pad0_, src + off, 3); off += 3;
+  out.projectile_launch = load_le_u32(src + off); off += 4;
+  out.projectile_hit = load_le_u32(src + off); off += 4;
+  out.consumed_commands = load_le_u32(src + off); off += 4;
+  out.consumed_control_commands = load_le_u32(src + off); off += 4;
+  out.consumed_fire_commands = load_le_u32(src + off); off += 4;
+  out.frame_seq = load_le_u64(src + off); off += 8;
+  out.last_command_seq = load_le_u64(src + off); off += 8;
+  out.last_command_consume_timestamp_ns = load_le_u64(src + off); off += 8;
+  (void)off;
+  return out;
+}
 
 // ------------------------------------------------------- 三缓冲原子操作原语 --
 //

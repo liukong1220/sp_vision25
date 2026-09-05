@@ -83,18 +83,23 @@ std::uint8_t armor_name_to_label(auto_aim::ArmorName name)
   }
 }
 
-bool GroundTruthEvaluator::fetch(std::uint64_t image_frame_seq)
+bool GroundTruthEvaluator::fetch(
+  std::uint64_t image_frame_seq, std::uint64_t image_timestamp_ns)
 {
+  ++fetch_attempts_;
   fetched_ = false;
   GroundTruthBatch batch{};
   // 只认 consume_frame() 在事务窗口里拷下来的那一份，绝不在这里现读槽位。
   // 本函数在检测/解算之后调用，距 consume_frame() 已有 ~250 ms，那时背压早已放开，
   // 槽位可能已经被后面若干帧覆盖——现读必然读到更新的批次，同帧校验恒不命中。
-  if (!client_.frame_ground_truth(&batch)) return false;
+  if (!client_.frame_ground_truth(&batch)) {
+    ++fetch_missing_;
+    return false;
+  }
 
   if (batch.frame_seq != image_frame_seq) {
     ++seq_mismatches_;
-    // 协议 v3 规定图像、同帧姿态、同帧真值三者 frame_seq 严格相等，没有任何允许
+    // 协议 v4 规定图像、同帧姿态、同帧真值三者 frame_seq/timestamp_ns 严格相等，没有任何允许
     // 的偏移，所以这里任何一次计数都是协议违例，而不是"正常的一两帧延迟"。
     // 保留 skew 的方向与幅度是为了区分违例来源：
     //   d < 0（真值更旧）= 发布端没把真值放进图像那次事务；
@@ -107,10 +112,34 @@ bool GroundTruthEvaluator::fetch(std::uint64_t image_frame_seq)
     ++seq_skew_samples_;
     return false;
   }
-  if (batch.target_count > GROUND_TRUTH_MAX_TARGETS) return false;
+  if (batch.timestamp_ns != image_timestamp_ns) {
+    ++timestamp_mismatches_;
+    return false;
+  }
+  for (std::uint32_t i = 0; i < batch.target_count && i < GROUND_TRUTH_MAX_TARGETS; ++i) {
+    if (
+      batch.targets[i].frame_seq != image_frame_seq ||
+      batch.targets[i].timestamp_ns != image_timestamp_ns) {
+      ++timestamp_mismatches_;
+      return false;
+    }
+  }
+  for (std::uint32_t i = 0; i < batch.rune_count && i < GROUND_TRUTH_MAX_RUNES; ++i) {
+    if (
+      batch.runes[i].frame_seq != image_frame_seq ||
+      batch.runes[i].timestamp_ns != image_timestamp_ns) {
+      ++timestamp_mismatches_;
+      return false;
+    }
+  }
+  if (batch.target_count > GROUND_TRUTH_MAX_TARGETS) {
+    ++fetch_missing_;
+    return false;
+  }
 
   batch_ = batch;
   fetched_ = true;
+  ++fetch_success_;
   return true;
 }
 
@@ -190,7 +219,10 @@ GtError GroundTruthEvaluator::evaluate(
     find_by_label(armor_name_to_label(name), estimate_in_odom, &ambiguous);
   if (!gt.has_value()) {
     gt = find_nearest(estimate_in_odom, gate_m);
-    if (gt.has_value()) out.matched_by_nearest = true;
+    if (gt.has_value()) {
+      out.matched_by_nearest = true;
+      ++nearest_matches_;
+    }
   }
   if (!gt.has_value()) return out;
   if (ambiguous) ++ambiguous_matches_;
@@ -202,17 +234,21 @@ GtError GroundTruthEvaluator::evaluate(
   out.ambiguous = ambiguous;
   out.armor_label = gt->armor_label;
   out.team = gt->team;
+  out.identity = gt->identity;
   out.gt_position = p;
   if (gt->armor_position_valid != 0) {
     out.has_armor_position = true;
     out.gt_armor_position =
       Eigen::Vector3d(gt->armor_position[0], gt->armor_position[1], gt->armor_position[2]);
   }
+  out.armor_position_degraded = gt->armor_position_degraded != 0;
+  if (out.armor_position_degraded) ++degraded_matches_;
   out.pos_err_m = d.norm();
   out.xy_err_m = d.head<2>().norm();
   out.z_err_m = std::abs(d.z());
   out.yaw_err_rad = std::abs(normalize_angle(yaw - static_cast<double>(gt->yaw)));
   out.vyaw_err_radps = std::abs(vyaw - static_cast<double>(gt->vyaw));
+  out.gt_vyaw_radps = static_cast<double>(gt->vyaw);
   return out;
 }
 
@@ -252,11 +288,17 @@ void GroundTruthEvaluator::reset()
   yaw_err_.clear();
   vyaw_err_.clear();
   seq_mismatches_ = 0;
+  timestamp_mismatches_ = 0;
+  fetch_attempts_ = 0;
+  fetch_success_ = 0;
+  fetch_missing_ = 0;
   seq_skew_samples_ = 0;
   seq_skew_sum_ = 0;
   seq_skew_min_ = 0;
   seq_skew_max_ = 0;
   ambiguous_matches_ = 0;
+  nearest_matches_ = 0;
+  degraded_matches_ = 0;
   fetched_ = false;
 }
 

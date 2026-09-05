@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "simulation/io/testing/fake_publisher.hpp"
+#include "simulation/io/strict_closed_loop.hpp"
 #include "tools/path.hpp"
 
 namespace
@@ -40,6 +41,95 @@ void check(bool ok, const std::string & what, const std::string & detail = "")
   if (!ok) ++g_failures;
   std::printf("%-52s %s%s%s\n", what.c_str(), ok ? "ok" : "FAIL", detail.empty() ? "" : "  ",
               detail.c_str());
+}
+
+void check_strict_predicate_counterexamples()
+{
+  using sim_io::OldEvalTruthStats;
+  using sim_io::evaluate_strict_closed_loop;
+  using sim_io::inputs_from_old_stats;
+  using sim_io::old_eval_truth_contract;
+  using sim_io::passing_strict_inputs;
+
+  const auto all_pass = evaluate_strict_closed_loop(passing_strict_inputs());
+  check(all_pass.passed, "strict all-true passes");
+  check(all_pass.truth_contract, "strict all-true truth_contract");
+  const char * names[] = {
+    "enough_frames",
+    "enough_gt_fetches",
+    "enough_gt_coverage",
+    "no_gt_mismatch",
+    "no_gt_timestamp_mismatch",
+    "no_gt_ambiguous",
+    "no_gt_nearest",
+    "no_degraded_armor",
+    "enough_matched_samples",
+    "dynamic_budget_ok",
+    "controlled_motion_observed",
+    "closed_loop_mode",
+    "algorithm_chains",
+    "offending==0",
+    "suppressed_fires==0",
+    "color_gate",
+    "shot_evidence",
+    "no_shot_aiming",
+  };
+  for (const char * name : names) {
+    check(all_pass.criterion.find(name) != std::string::npos, std::string("criterion names ") + name);
+  }
+  check(all_pass.criterion.find("allow_fire") == std::string::npos, "criterion omits allow_fire");
+
+  OldEvalTruthStats base;
+  base.do_eval = true;
+  base.attempts = 100;
+  base.frames = 100;
+  base.success = 100;
+  base.mismatch = 0;
+  base.timestamp_mismatch = 0;
+  base.coverage = true;
+  base.matched_samples = true;
+  base.count = 8;
+  base.min_frames = 30;
+  base.ambiguous = 0;
+  base.nearest = 0;
+  base.degraded = 0;
+
+  auto expect_old_pass_new_fail = [](const OldEvalTruthStats & stats, const std::string & what) {
+    check(old_eval_truth_contract(stats), what + ": old expression true");
+    const auto result = evaluate_strict_closed_loop(inputs_from_old_stats(stats));
+    check(!result.passed, what + ": new predicate false");
+    check(!result.truth_contract, what + ": truth_contract false");
+  };
+
+  {
+    auto stats = base;
+    stats.ambiguous = 3;
+    expect_old_pass_new_fail(stats, "ambiguous!=0");
+  }
+  {
+    auto stats = base;
+    stats.nearest = 2;
+    expect_old_pass_new_fail(stats, "nearest!=0");
+  }
+  {
+    auto stats = base;
+    stats.degraded = 1;
+    expect_old_pass_new_fail(stats, "degraded!=0");
+  }
+  {
+    auto stats = base;
+    stats.frames = 10;
+    stats.attempts = 10;
+    stats.success = 10;
+    expect_old_pass_new_fail(stats, "frames_ok<min");
+  }
+  {
+    auto stats = base;
+    stats.frames = 8;
+    stats.attempts = 8;
+    stats.success = 8;
+    expect_old_pass_new_fail(stats, "gt_fetches<min");
+  }
 }
 
 std::string read_file(const std::string & path)
@@ -118,6 +208,7 @@ struct Producer
   sim_io::testing::FakePublisher & pub;
   std::atomic<bool> running{true};
   std::atomic<bool> heartbeat{true};
+  std::atomic<bool> following{true};
 
   std::atomic<std::uint64_t> published{0};
   std::atomic<std::uint64_t> cmds{0};
@@ -128,6 +219,11 @@ struct Producer
   std::atomic<std::uint64_t> control_after_heartbeat_off{0};
 
   std::vector<std::uint8_t> rgb;
+  std::uint32_t consumed_commands = 0;
+  std::uint32_t consumed_control_commands = 0;
+  std::uint32_t consumed_fire_commands = 0;
+  std::uint64_t last_command_seq = 0;
+  std::uint64_t last_command_consume_timestamp_ns = 0;
 
   explicit Producer(sim_io::testing::FakePublisher & p) : pub(p), rgb(sim_io::IMAGE_SIZE)
   {
@@ -144,6 +240,11 @@ struct Producer
   {
     sim_io::GimbalCmd cmd{};
     while (pub.recv_gimbal_cmd(&cmd)) {
+      ++consumed_commands;
+      if (cmd.distance_m != -1.0f) ++consumed_control_commands;
+      if (cmd.fire_advice == 1) ++consumed_fire_commands;
+      last_command_seq = cmd.command_seq;
+      last_command_consume_timestamp_ns = sim_io::testing::FakePublisher::now_ns();
       ++cmds;
       if (!heartbeat.load()) ++cmds_after_heartbeat_off;
       if (cmd.distance_m == -1.0f) {
@@ -170,6 +271,16 @@ struct Producer
       drain_cmds();
       if (heartbeat.load()) {
         const std::uint64_t ts = sim_io::testing::FakePublisher::now_ns();
+        sim_io::RuntimeState runtime{};
+        runtime.timestamp_ns = ts;
+        runtime.frame_seq = seq;
+        runtime.following = following.load() ? 1 : 0;
+        runtime.consumed_commands = consumed_commands;
+        runtime.consumed_control_commands = consumed_control_commands;
+        runtime.consumed_fire_commands = consumed_fire_commands;
+        runtime.last_command_seq = last_command_seq;
+        runtime.last_command_consume_timestamp_ns = last_command_consume_timestamp_ns;
+        pub.set_runtime_state(runtime);
         if (pub.try_publish_synchronized_frame(
               rgb.data(), seq, ts, identity, odom, muzzle, camera)) {
           ++published;
@@ -190,6 +301,8 @@ int main(int argc, char * argv[])
     return 2;
   }
   const std::string binary = argv[1];
+
+  check_strict_predicate_counterexamples();
 
   const std::string dir = "/tmp/sim_entry_smoke_" + std::to_string(::getpid());
   if (::mkdir(dir.c_str(), 0777) != 0 && errno != EEXIST) {

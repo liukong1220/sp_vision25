@@ -18,6 +18,8 @@ const char * to_string(PoseValidity validity)
       return "QuaternionNorm";
     case PoseValidity::BadTimestamp:
       return "BadTimestamp";
+    case PoseValidity::FrameContract:
+      return "FrameContract";
   }
   return "Unknown";
 }
@@ -49,6 +51,8 @@ std::string describe_faults(std::uint32_t faults)
     {FAULT_REARM_PENDING, "rearm_pending"},
     {FAULT_COMMAND_AGE, "command_age"},
     {FAULT_CAPABILITY_MISSING, "capability_missing"},
+    {FAULT_DYNAMIC_ERROR, "dynamic_error"},
+    {FAULT_NOT_FOLLOWING, "not_following"},
   };
 
   std::string out;
@@ -77,6 +81,8 @@ const FaultEntry kFaults[] = {
   {FAULT_REARM_PENDING, "rearm_pending"},
   {FAULT_COMMAND_AGE, "command_age"},
   {FAULT_CAPABILITY_MISSING, "capability_missing"},
+  {FAULT_DYNAMIC_ERROR, "dynamic_error"},
+  {FAULT_NOT_FOLLOWING, "not_following"},
 };
 constexpr std::size_t fault_table_size() { return sizeof(kFaults) / sizeof(kFaults[0]); }
 }  // namespace
@@ -154,6 +160,13 @@ PoseValidity SimGimbal::update(const FrameBundle & bundle, const FrameStamps & s
   // 无意义的结果（dt<=0）。第一帧（has_prev_ == false）没有比较基准，放过。
   if (has_prev_ && bundle.timestamp_ns <= prev_timestamp_ns_) {
     return reject(PoseValidity::BadTimestamp);
+  }
+
+  for (int i = 0; i <= static_cast<int>(PoseIndex::Camera); ++i) {
+    if (
+      !bundle.pose_present[i] || bundle.poses[i].frame_seq != bundle.frame_seq ||
+      bundle.poses[i].timestamp_ns != bundle.timestamp_ns)
+      return reject(PoseValidity::FrameContract);
   }
 
   for (int i = 0; i < static_cast<int>(POSE_CHANNEL_COUNT); ++i) {
@@ -283,7 +296,9 @@ bool SimGimbal::command_age_exceeded() const
 {
   if (config_.max_command_age_ms <= 0.0) return false;
   if (!has_state_) return false;  // 没状态由 FAULT_STARTUP 负责，不在这里重复
-  return command_age_ms() > config_.max_command_age_ms;
+  const double age_ms = command_age_ms();
+  // 负年龄意味着命令依据的观测来自未来。它不能因为数值上小于正预算而绕过年龄门。
+  return age_ms < 0.0 || age_ms > config_.max_command_age_ms;
 }
 
 std::uint32_t SimGimbal::faults() const
@@ -432,8 +447,10 @@ bool SimGimbal::send(
     fire_out = false;
   }
 
-  const GimbalCmd cmd = encode(control, fire_out, yaw_rad, pitch_rad, distance_m);
+  GimbalCmd cmd = encode(control, fire_out, yaw_rad, pitch_rad, distance_m);
+  cmd.command_seq = ++last_command_seq_;
   if (!client_.publish_gimbal_cmd(cmd)) return false;
+  last_command_ = cmd;
 
   ++sent_commands_;
   if (cmd.fire_advice == 1) {

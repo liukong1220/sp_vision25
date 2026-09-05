@@ -24,6 +24,8 @@ const char * to_string(ConsumeStatus status)
       return "PoseMissing";
     case ConsumeStatus::PoseSeqMismatch:
       return "PoseSeqMismatch";
+    case ConsumeStatus::PoseTimestampMismatch:
+      return "PoseTimestampMismatch";
     case ConsumeStatus::SeqRegressed:
       return "SeqRegressed";
     case ConsumeStatus::ImageInvalid:
@@ -40,6 +42,25 @@ const char * to_string(ConsumeStatus status)
 
 namespace
 {
+template<std::size_t N>
+bool read_snapshot(
+  const void * shared, const std::uint32_t * sequence, std::uint8_t (&encoded)[N],
+  std::uint32_t * captured_sequence)
+{
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const std::uint32_t before = __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+    if (before == 0u || (before & 1u) != 0u) continue;
+    atomic_copy_from_shared(encoded, shared, N);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const std::uint32_t after = __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+    if (before == after) {
+      if (captured_sequence != nullptr) *captured_sequence = before;
+      return true;
+    }
+  }
+  return false;
+}
+
 struct MapResult
 {
   void * addr = nullptr;
@@ -250,11 +271,13 @@ void SharedMemoryClient::close()
   has_frame_ground_truth_ = false;
 }
 
-ConsumeStatus SharedMemoryClient::drain_poses(FrameBundle * bundle, std::uint64_t image_seq)
+ConsumeStatus SharedMemoryClient::drain_poses(
+  FrameBundle * bundle, std::uint64_t image_seq, std::uint64_t image_timestamp_ns)
 {
   const int required = static_cast<int>(PoseIndex::Camera);  // 0..=3 参与背压握手
   bool missing = false;
   bool mismatch = false;
+  bool timestamp_mismatch = false;
 
   for (int i = 0; i < static_cast<int>(POSE_CHANNEL_COUNT); ++i) {
     bool corrupted = false;
@@ -268,6 +291,7 @@ ConsumeStatus SharedMemoryClient::drain_poses(FrameBundle * bundle, std::uint64_
     if (pose != nullptr) {
       bundle->poses[i] = *pose;
       if (i <= required && pose->frame_seq != image_seq) mismatch = true;
+      if (i <= required && pose->timestamp_ns != image_timestamp_ns) timestamp_mismatch = true;
     } else {
       bundle->poses[i] = PoseMeta{};
       if (i <= required) missing = true;
@@ -276,6 +300,7 @@ ConsumeStatus SharedMemoryClient::drain_poses(FrameBundle * bundle, std::uint64_
 
   if (missing) return ConsumeStatus::PoseMissing;
   if (mismatch) return ConsumeStatus::PoseSeqMismatch;
+  if (timestamp_mismatch) return ConsumeStatus::PoseTimestampMismatch;
   return ConsumeStatus::Ok;
 }
 
@@ -357,7 +382,7 @@ ConsumeStatus SharedMemoryClient::consume_frame(FrameBundle * bundle)
   }
 
   // 无论这一帧是否可用，pose 通道都必须排空，否则背压会让仿真端停止出图。
-  const ConsumeStatus pose_status = drain_poses(bundle, meta.seq);
+  const ConsumeStatus pose_status = drain_poses(bundle, meta.seq, meta.timestamp_ns);
 
   bundle->frame_seq = meta.seq;
   bundle->timestamp_ns = meta.timestamp_ns;
@@ -433,16 +458,40 @@ const CameraInfo * SharedMemoryClient::camera_info() const
   return connected() ? &meta_->camera_info : nullptr;
 }
 
-const RuntimeState * SharedMemoryClient::runtime_state() const
+bool SharedMemoryClient::read_runtime_state(RuntimeState * out) const
 {
-  if (!connected()) return nullptr;
-  // 缺位时返回 nullptr，不返回恒零的 RuntimeState。理由见头文件：零值会把
+  if (!connected() || out == nullptr) return false;
+  // 缺位时返回 false，不返回恒零的 RuntimeState。理由见头文件：零值会把
   // "发布端不报这个字段"误诊成"仿真端没订阅云台命令"。
   if (!has_capability(CAP_RUNTIME_STATE)) {
     ++runtime_state_unsupported_;
-    return nullptr;
+    return false;
   }
-  return &meta_->runtime_state;
+  std::uint8_t encoded[RUNTIME_STATE_PAYLOAD_BYTES];
+  std::uint32_t captured_sequence = 0;
+  if (!read_snapshot(
+        &meta_->runtime_state, &meta_->runtime_state.seqlock, encoded, &captured_sequence)) {
+    ++runtime_state_snapshot_failures_;
+    return false;
+  }
+  RuntimeState snapshot = decode_runtime_state(encoded);
+  snapshot.seqlock = captured_sequence;
+  *out = snapshot;
+  return true;
+}
+
+std::optional<std::uint32_t> SharedMemoryClient::projectile_launch_count() const
+{
+  RuntimeState state{};
+  if (!read_runtime_state(&state)) return std::nullopt;
+  return state.projectile_launch;
+}
+
+std::optional<std::uint32_t> SharedMemoryClient::projectile_hit_count() const
+{
+  RuntimeState state{};
+  if (!read_runtime_state(&state)) return std::nullopt;
+  return state.projectile_hit;
 }
 
 bool SharedMemoryClient::read_chassis_observation(ChassisObservation * out) const
@@ -454,8 +503,16 @@ bool SharedMemoryClient::read_chassis_observation(ChassisObservation * out) cons
     ++chassis_observation_unsupported_;
     return false;
   }
-  if (meta_->chassis_observation.timestamp_ns == 0) return false;
-  *out = meta_->chassis_observation;
+  std::uint8_t encoded[CHASSIS_OBSERVATION_PAYLOAD_BYTES];
+  std::uint32_t captured_sequence = 0;
+  if (!read_snapshot(
+        &meta_->chassis_observation, &meta_->chassis_observation.seqlock, encoded,
+        &captured_sequence))
+    return false;
+  ChassisObservation snapshot = decode_chassis_observation(encoded);
+  if (snapshot.timestamp_ns == 0) return false;
+  snapshot.seqlock = captured_sequence;
+  *out = snapshot;
   return true;
 }
 
@@ -489,19 +546,15 @@ bool SharedMemoryClient::read_ground_truth(GroundTruthBatch * out) const
   // 只拷 GROUND_TRUTH_PAYLOAD_BYTES 字节的前缀，绝不整块 memcpy：标记正被发布端
   // 并发修改，用非原子读去读它本身就是数据竞争（UB），编译器也可以把这次读与下面
   // 那次 __atomic_load_n 合并或重排。标记之后只有 pad_，前缀已覆盖全部有效字段。
-  for (int attempt = 0; attempt < 8; ++attempt) {
-    const std::uint32_t before = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
-    if ((before & 1u) != 0u) continue;  // 写入进行中
-    std::memcpy(out, &meta_->ground_truth, GROUND_TRUTH_PAYLOAD_BYTES);
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    const std::uint32_t after = __atomic_load_n(&meta_->ground_truth.seqlock, __ATOMIC_ACQUIRE);
-    if (before != after) continue;
-    // out 是调用方的私有内存，这里补齐标记与填充，让整块自洽。
-    out->seqlock = before;
-    std::memset(out->pad_, 0, sizeof(out->pad_));
-    return before != 0u;
-  }
-  return false;
+  std::uint32_t captured_sequence = 0;
+  std::uint8_t encoded[GROUND_TRUTH_PAYLOAD_BYTES];
+  if (!read_snapshot(
+        &meta_->ground_truth, &meta_->ground_truth.seqlock, encoded, &captured_sequence))
+    return false;
+  *out = decode_ground_truth_batch(encoded);
+  out->seqlock = captured_sequence;
+  std::memset(out->pad_, 0, sizeof(out->pad_));
+  return true;
 }
 
 }  // namespace sim_io

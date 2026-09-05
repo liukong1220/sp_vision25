@@ -105,6 +105,7 @@ void stamp(GroundTruthBatch * b, std::uint32_t gen)
     r.relative_time = f;
     r.blade_id = static_cast<std::int32_t>(gen);
     for (auto & a : r.target_activations) a = u8;
+    r.target_point_odom[0] = r.target_point_odom[1] = r.target_point_odom[2] = f;
   }
 }
 
@@ -166,6 +167,10 @@ std::string find_mixed_field(const GroundTruthBatch & b)
           break;
         }
       }
+      if (bad == nullptr &&
+          (r.target_point_odom[0] != f || r.target_point_odom[1] != f ||
+           r.target_point_odom[2] != f))
+        bad = "target_point_odom";
     }
     if (bad != nullptr) {
       std::snprintf(buf, sizeof(buf), "runes[%zu].%s", i, bad);
@@ -277,7 +282,7 @@ void run_ground_truth_transaction_test()
       if (direct.frame_seq != bundle.frame_seq) ++stale_slot_reads;
     }
 
-    if (ev.fetch(bundle.frame_seq)) ++fetched;
+    if (ev.fetch(bundle.frame_seq, bundle.timestamp_ns)) ++fetched;
   }
 
   stop.store(true, std::memory_order_relaxed);
@@ -307,6 +312,9 @@ void run_ground_truth_transaction_test()
   check(ev.seq_mismatches() == 0, "seq_mismatches == 0（协议不允许任何偏移）", detail);
   check(ev.seq_skew_samples() == 0, "没有任何一帧产生 skew 样本", detail);
   check(fetched == frames_ok, "每一个成功消费的帧都取到了同帧真值", detail);
+  check(ev.fetch_attempts() == frames_ok, "fetch 尝试覆盖每一个成功消费帧", detail);
+  check(ev.fetch_success() == fetched, "fetch_success 与同帧取到数一致", detail);
+  check(ev.fetch_missing() == 0, "完整发布端没有真值 missing", detail);
   check(
     client.ground_truth_captures() == frames_ok, "ground_truth_captures 与消费帧数一致",
     detail);
@@ -391,6 +399,7 @@ int main()
       stamp(&batch, gen);
       pub.set_ground_truth(batch);
       writes.store(gen, std::memory_order_relaxed);
+      if ((gen & 0xffu) == 0u) std::this_thread::yield();
       ++gen;
     }
   });

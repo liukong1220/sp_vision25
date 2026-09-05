@@ -31,6 +31,8 @@ void check_u64(const char * what, unsigned long long actual, unsigned long long 
 #define CHECK_ALIGN(type, expected) check_u64(#type " alignof", alignof(type), expected)
 #define CHECK_OFFSET(type, field, expected) \
   check_u64(#type "::" #field " offset", offsetof(type, field), expected)
+#define CHECK_FIELD_SIZE(type, field, expected) \
+  check_u64(#type "::" #field " size", sizeof(type{}.field), expected)
 
 int main()
 {
@@ -42,13 +44,15 @@ int main()
   // v2 -> v3：从 ShmHeader::_pad 划出 capabilities，并把 poses[Muzzle] 由“云台局部
   // 平移”改为“枪口世界位姿”。两者都是**语义**变更，字节布局没动，所以只有版本号
   // 能拦住“旧发布端 + 新消费端”这种能 mmap 成功却静默读错语义的组合。
-  check_u64("SHM_VERSION", SHM_VERSION, 3);
+  check_u64("SHM_VERSION", SHM_VERSION, 4);
   check_u64("CAP_GROUND_TRUTH", CAP_GROUND_TRUTH, 1);
   check_u64("CAP_MUZZLE_WORLD_POSE", CAP_MUZZLE_WORLD_POSE, 2);
   check_u64("CAP_CHASSIS_OBSERVATION", CAP_CHASSIS_OBSERVATION, 4);
   check_u64("CAP_RUNTIME_STATE", CAP_RUNTIME_STATE, 8);
   check_u64("SIMULATOR_CAPABILITIES", SIMULATOR_CAPABILITIES, 0b1111);
   check_u64("GROUND_TRUTH_PAYLOAD_BYTES", GROUND_TRUTH_PAYLOAD_BYTES, 1600);
+  check_u64("CHASSIS_OBSERVATION_PAYLOAD_BYTES", CHASSIS_OBSERVATION_PAYLOAD_BYTES, 112);
+  check_u64("RUNTIME_STATE_PAYLOAD_BYTES", RUNTIME_STATE_PAYLOAD_BYTES, 56);
   check_u64("IMAGE_WIDTH", IMAGE_WIDTH, 1440);
   check_u64("IMAGE_HEIGHT", IMAGE_HEIGHT, 1080);
   check_u64("IMAGE_CHANNELS", IMAGE_CHANNELS, 3);
@@ -113,12 +117,15 @@ int main()
   CHECK_OFFSET(PoseMeta, position, 8);
   CHECK_OFFSET(PoseMeta, quaternion, 20);
   CHECK_OFFSET(PoseMeta, timestamp_ns, 40);
+  CHECK_OFFSET(PoseMeta, pad_, 48);
+  CHECK_FIELD_SIZE(PoseMeta, pad_, 16);
 
   CHECK_OFFSET(GimbalCmd, timestamp_ns, 0);
   CHECK_OFFSET(GimbalCmd, yaw_deg, 8);
   CHECK_OFFSET(GimbalCmd, pitch_deg, 12);
   CHECK_OFFSET(GimbalCmd, distance_m, 16);
   CHECK_OFFSET(GimbalCmd, fire_advice, 20);
+  CHECK_OFFSET(GimbalCmd, command_seq, 24);
 
   CHECK_OFFSET(ShmHeader, magic, 0);
   CHECK_OFFSET(ShmHeader, version, 4);
@@ -147,6 +154,10 @@ int main()
   CHECK_OFFSET(GroundTruthTarget, position, 20);
   CHECK_OFFSET(GroundTruthTarget, vyaw, 32);
   CHECK_OFFSET(GroundTruthTarget, yaw, 36);
+  CHECK_OFFSET(GroundTruthTarget, armor_position, 40);
+  CHECK_OFFSET(GroundTruthTarget, armor_position_valid, 52);
+  CHECK_OFFSET(GroundTruthTarget, armor_position_degraded, 53);
+  CHECK_OFFSET(GroundTruthTarget, identity, 54);
 
   CHECK_OFFSET(GroundTruthBatch, frame_seq, 0);
   CHECK_OFFSET(GroundTruthBatch, timestamp_ns, 8);
@@ -159,6 +170,15 @@ int main()
 
   CHECK_OFFSET(RuntimeState, timestamp_ns, 0);
   CHECK_OFFSET(RuntimeState, following, 8);
+  CHECK_OFFSET(RuntimeState, projectile_launch, 12);
+  CHECK_OFFSET(RuntimeState, projectile_hit, 16);
+  CHECK_OFFSET(RuntimeState, consumed_commands, 20);
+  CHECK_OFFSET(RuntimeState, consumed_control_commands, 24);
+  CHECK_OFFSET(RuntimeState, consumed_fire_commands, 28);
+  CHECK_OFFSET(RuntimeState, frame_seq, 32);
+  CHECK_OFFSET(RuntimeState, last_command_seq, 40);
+  CHECK_OFFSET(RuntimeState, last_command_consume_timestamp_ns, 48);
+  CHECK_OFFSET(RuntimeState, seqlock, 56);
 
   std::printf("--- 三缓冲字段偏移 -----------------------------------------------------\n");
   CHECK_OFFSET(ImageTripleBuffer, state, 0);
@@ -177,6 +197,98 @@ int main()
   CHECK_OFFSET(ShmMetaRegion, chassis_observation, 1856);
   CHECK_OFFSET(ShmMetaRegion, ground_truth, 1984);
   CHECK_OFFSET(ShmMetaRegion, runtime_state, 3648);
+
+  std::printf("--- 显式填充 / payload==seqlock / 具名字段尺寸和 ----------------\n");
+  check_u64(
+    "ChassisObservation payload==seqlock", CHASSIS_OBSERVATION_PAYLOAD_BYTES,
+    offsetof(ChassisObservation, seqlock));
+  check_u64(
+    "RuntimeState payload==seqlock", RUNTIME_STATE_PAYLOAD_BYTES,
+    offsetof(RuntimeState, seqlock));
+  check_u64(
+    "GroundTruthBatch payload==seqlock", GROUND_TRUTH_PAYLOAD_BYTES,
+    offsetof(GroundTruthBatch, seqlock));
+
+  CHECK_OFFSET(ChassisObservation, seqlock, 112);
+  CHECK_OFFSET(ChassisObservation, pad_, 116);
+  CHECK_FIELD_SIZE(ChassisObservation, pad_, 12);
+  CHECK_OFFSET(RuntimeState, pad0_, 9);
+  CHECK_FIELD_SIZE(RuntimeState, pad0_, 3);
+  CHECK_OFFSET(RuntimeState, pad_, 60);
+  CHECK_FIELD_SIZE(RuntimeState, pad_, 4);
+
+  CHECK_OFFSET(GroundTruthTarget, pad1_, 19);
+  CHECK_FIELD_SIZE(GroundTruthTarget, pad1_, 1);
+  CHECK_OFFSET(GroundTruthTarget, identity, 54);
+  CHECK_OFFSET(GroundTruthTarget, pad_, 56);
+  CHECK_FIELD_SIZE(GroundTruthTarget, pad_, 8);
+
+  CHECK_OFFSET(GroundTruthRune, pad0_, 19);
+  CHECK_FIELD_SIZE(GroundTruthRune, pad0_, 1);
+  CHECK_OFFSET(GroundTruthRune, pad_act_, 77);
+  CHECK_FIELD_SIZE(GroundTruthRune, pad_act_, 3);
+  CHECK_OFFSET(GroundTruthRune, target_point_odom, 80);
+  CHECK_OFFSET(GroundTruthRune, identity, 92);
+  CHECK_FIELD_SIZE(GroundTruthRune, identity, 2);
+  CHECK_OFFSET(GroundTruthRune, pad_, 94);
+  CHECK_FIELD_SIZE(GroundTruthRune, pad_, 34);
+
+  CHECK_OFFSET(GroundTruthBatch, pad_before_targets, 24);
+  CHECK_FIELD_SIZE(GroundTruthBatch, pad_before_targets, 8);
+  CHECK_OFFSET(GroundTruthBatch, pad_before_runes, 1056);
+  CHECK_FIELD_SIZE(GroundTruthBatch, pad_before_runes, 32);
+  CHECK_OFFSET(GroundTruthBatch, pad_, 1604);
+  CHECK_FIELD_SIZE(GroundTruthBatch, pad_, 60);
+
+  {
+    ChassisObservation chassis{};
+    check_u64(
+      "ChassisObservation payload named-field size sum",
+      sizeof(chassis.frame_seq) + sizeof(chassis.timestamp_ns) + sizeof(chassis.dt_s) +
+        sizeof(chassis.v_body) + sizeof(chassis.wz_radps) + sizeof(chassis.wheel_linear_mps) +
+        sizeof(chassis.wheel_angular_radps) + sizeof(chassis.a_body) +
+        sizeof(chassis.alpha_z_radps2) + sizeof(chassis.rpy_rad) + sizeof(chassis.gyro_xyz_radps) +
+        sizeof(chassis.accel_xyz_mps2),
+      CHASSIS_OBSERVATION_PAYLOAD_BYTES);
+    RuntimeState runtime{};
+    check_u64(
+      "RuntimeState payload named-field size sum",
+      sizeof(runtime.timestamp_ns) + sizeof(runtime.following) + sizeof(runtime.pad0_) +
+        sizeof(runtime.projectile_launch) + sizeof(runtime.projectile_hit) +
+        sizeof(runtime.consumed_commands) + sizeof(runtime.consumed_control_commands) +
+        sizeof(runtime.consumed_fire_commands) + sizeof(runtime.frame_seq) +
+        sizeof(runtime.last_command_seq) + sizeof(runtime.last_command_consume_timestamp_ns),
+      RUNTIME_STATE_PAYLOAD_BYTES);
+    GroundTruthTarget target{};
+    check_u64(
+      "GroundTruthTarget named-field size sum",
+      sizeof(target.frame_seq) + sizeof(target.timestamp_ns) + sizeof(target.team) +
+        sizeof(target.armor_label) + sizeof(target.is_outpost) + sizeof(target.pad1_) +
+        sizeof(target.position) + sizeof(target.vyaw) + sizeof(target.yaw) +
+        sizeof(target.armor_position) + sizeof(target.armor_position_valid) +
+        sizeof(target.armor_position_degraded) + sizeof(target.identity) + sizeof(target.pad_),
+      sizeof(GroundTruthTarget));
+    GroundTruthRune rune{};
+    check_u64(
+      "GroundTruthRune named-field size sum",
+      sizeof(rune.frame_seq) + sizeof(rune.timestamp_ns) + sizeof(rune.team) +
+        sizeof(rune.rune_mode) + sizeof(rune.mechanism_state) + sizeof(rune.pad0_) +
+        sizeof(rune.r_center_odom) + sizeof(rune.radius) + sizeof(rune.current_angle) +
+        sizeof(rune.v_roll) + sizeof(rune.direction) + sizeof(rune.sin_amplitude) +
+        sizeof(rune.sin_omega) + sizeof(rune.sin_phase) + sizeof(rune.sin_offset) +
+        sizeof(rune.relative_time) + sizeof(rune.blade_id) + sizeof(rune.target_activations) +
+        sizeof(rune.pad_act_) + sizeof(rune.target_point_odom) + sizeof(rune.identity) +
+        sizeof(rune.pad_),
+      sizeof(GroundTruthRune));
+    GroundTruthBatch batch{};
+    check_u64(
+      "GroundTruthBatch named-field size sum",
+      sizeof(batch.frame_seq) + sizeof(batch.timestamp_ns) + sizeof(batch.target_count) +
+        sizeof(batch.rune_count) + sizeof(batch.pad_before_targets) + sizeof(batch.targets) +
+        sizeof(batch.pad_before_runes) + sizeof(batch.runes) + sizeof(batch.seqlock) +
+        sizeof(batch.pad_),
+      sizeof(GroundTruthBatch));
+  }
 
   std::printf("--- 三缓冲初始状态 -----------------------------------------------------\n");
   {

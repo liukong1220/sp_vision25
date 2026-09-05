@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "shared_memory_layout.hpp"
@@ -28,6 +29,7 @@ enum class ConsumeStatus
   Ok,               // 完整且同帧一致
   PoseMissing,      // 图像到了但某个必需 pose 通道没有新数据
   PoseSeqMismatch,  // pose 的 frame_seq 与图像不一致，该帧必须丢弃
+  PoseTimestampMismatch,  // pose 的 timestamp_ns 与图像不一致
   SeqRegressed,     // 帧号未前进（重复或倒退），通常意味着仿真端重启
   ImageInvalid,     // 分辨率/格式/buffer_id 超出协议约定
   Corrupted,        // 三缓冲索引越界，共享内存已不可信
@@ -157,13 +159,16 @@ public:
 
   const CameraInfo * camera_info() const;
 
-  // 发布端未声明 CAP_RUNTIME_STATE 时返回 **nullptr** 并累加
-  // runtime_state_unsupported()，绝不返回一块恒零的 RuntimeState。
+  // 发布端未声明 CAP_RUNTIME_STATE 时返回 false 并累加
+  // runtime_state_unsupported()，绝不返回一块恒零的 RuntimeState；快照本身也受 v4
+  // seqlock 保护。
   //
   // 返回零值是有害的：following=0 会被读成"仿真端没订阅云台命令"，于是排查方向
   // 被引到"去按 F5 / 设 DAEDALUS_FORCE_AUTO_AIM"上，而真实原因是发布端根本不报
   // 这个字段。调用方必须把 nullptr 当作"不可知"，而不是"没订阅"。
-  const RuntimeState * runtime_state() const;
+  bool read_runtime_state(RuntimeState * out) const;
+  std::optional<std::uint32_t> projectile_launch_count() const;
+  std::optional<std::uint32_t> projectile_hit_count() const;
 
   // 发布端未声明 CAP_CHASSIS_OBSERVATION 时返回 false 并累加
   // chassis_observation_unsupported()。全零的 ChassisObservation 是一份合法读数
@@ -193,6 +198,10 @@ public:
   // 成功在事务窗口里拷到批次的帧数。与 consumed_frames() 之差就是"取不到真值"的帧数。
   std::uint64_t ground_truth_captures() const { return ground_truth_captures_; }
   std::uint64_t runtime_state_unsupported() const { return runtime_state_unsupported_; }
+  std::uint64_t runtime_state_snapshot_failures() const
+  {
+    return runtime_state_snapshot_failures_;
+  }
   std::uint64_t chassis_observation_unsupported() const
   {
     return chassis_observation_unsupported_;
@@ -234,6 +243,7 @@ private:
   bool has_frame_ground_truth_ = false;
   std::uint64_t ground_truth_captures_ = 0;
   mutable std::uint64_t runtime_state_unsupported_ = 0;
+  mutable std::uint64_t runtime_state_snapshot_failures_ = 0;
   mutable std::uint64_t chassis_observation_unsupported_ = 0;
   // open()/remap() 时记录的文件身份，用于发现"文件被删掉又重建"。
   std::uint64_t meta_dev_ = 0;
@@ -242,7 +252,8 @@ private:
   std::uint64_t pool_ino_ = 0;
 
   // 无论图像是否合法都要排空 pose 通道，否则仿真端背压会锁死。
-  ConsumeStatus drain_poses(FrameBundle * bundle, std::uint64_t image_seq);
+  ConsumeStatus drain_poses(
+    FrameBundle * bundle, std::uint64_t image_seq, std::uint64_t image_timestamp_ns);
 };
 
 }  // namespace sim_io

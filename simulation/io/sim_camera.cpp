@@ -228,6 +228,7 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
     case ConsumeStatus::ImageInvalid:
     case ConsumeStatus::PoseMissing:
     case ConsumeStatus::PoseSeqMismatch:
+    case ConsumeStatus::PoseTimestampMismatch:
     case ConsumeStatus::SeqRegressed:
       ++rejected_frames_;
       return ReadStatus::Rejected;
@@ -239,8 +240,14 @@ ReadStatus SimCamera::try_read(cv::Mat & img, std::chrono::steady_clock::time_po
   const auto steady_ts = clock_.to_steady(bundle.timestamp_ns);
   const double age_ms = std::chrono::duration<double, std::milli>(now - steady_ts).count();
 
-  // 源时间戳落在未来：时钟不同步或跳变，帧龄不可信。计数但不当成过期帧丢弃。
-  if (age_ms < 0.0) ++future_frames_;
+  // 源时间戳允许有限的调度/采样抖动；超出容差说明时钟不同步或跳变，不能进入算法。
+  if (age_ms < 0.0) {
+    ++future_frames_;
+    if (-age_ms > config_.max_future_frame_ms) {
+      ++rejected_frames_;
+      return ReadStatus::Rejected;
+    }
+  }
 
   if (age_ms > config_.max_frame_age_ms) {
     ++stale_frames_;

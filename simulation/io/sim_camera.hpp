@@ -37,6 +37,7 @@ const char * to_string(ReadStatus status);
 struct SimCameraConfig
 {
   double max_frame_age_ms = 100.0;      // 超过即视为过期帧
+  double max_future_frame_ms = 5.0;      // 允许的未来时间戳抖动；超出即拒绝
   double heartbeat_timeout_ms = 500.0;  // 心跳停滞超过此值视为仿真端离线
   double read_timeout_ms = 1000.0;      // 阻塞 read 的等待上限
   double poll_interval_us = 200.0;      // 轮询间隔

@@ -9,6 +9,7 @@
 add_library(sim_io STATIC
   clock_bridge.cpp
   shared_memory_client.cpp
+  report_metadata.cpp
   sim_camera.cpp
   sim_gimbal.cpp
   sim_ground_truth.cpp
@@ -25,6 +26,7 @@ target_link_libraries(sim_io PUBLIC
   ${OpenCV_LIBS}
   Eigen3::Eigen
   tools
+  nlohmann_json::nlohmann_json
 )
 
 target_compile_options(sim_io PRIVATE -Wall -Wextra)

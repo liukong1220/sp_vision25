@@ -274,7 +274,12 @@ int main()
       sim_io::FrameBundle fb{};
       fb.frame_seq = 424242;
       fb.timestamp_ns = realtime_now_ns();
-      for (int c = 0; c < sim_io::POSE_CHANNEL_COUNT; ++c) fb.pose_present[c] = true;
+      for (int c = 0; c < sim_io::POSE_CHANNEL_COUNT; ++c) {
+        fb.pose_present[c] = true;
+        fb.poses[c].frame_seq = fb.frame_seq;
+        fb.poses[c].timestamp_ns = fb.timestamp_ns;
+        fb.poses[c].quaternion[0] = 1.0f;
+      }
       auto & gp = fb.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)];
       for (int c = 0; c < 4; ++c) gp.quaternion[c] = q_roll[c];
       probe.update(fb, stamps_now());
@@ -330,8 +335,9 @@ int main()
 
   // 帧号跳变：last_seq 停在 3（回退帧不推进基准），跳到 10 应记 6 个丢帧。
   const std::uint64_t skipped_before = cam.client().skipped_frames();
-  pub.publish_pose_bundle(10, realtime_now_ns(), quat);
-  pub.publish_image(pattern2.data.data(), 10, realtime_now_ns());
+  const std::uint64_t seq10_timestamp = realtime_now_ns();
+  pub.publish_pose_bundle(10, seq10_timestamp, quat);
+  pub.publish_image(pattern2.data.data(), 10, seq10_timestamp);
   st = cam.try_read(img, ts);
   check(st == sim_io::ReadStatus::Ok, "跳号帧本身可用");
   check(
@@ -355,6 +361,13 @@ int main()
   st = cam.try_read(img, ts);
   check(st == sim_io::ReadStatus::Rejected, "分辨率不符被拒绝");
 
+  // frame_seq 相同但 timestamp 不同也必须拒绝，不能把相邻帧姿态拼到图像上。
+  const std::uint64_t pose_timestamp = realtime_now_ns();
+  pub.publish_pose_bundle(15, pose_timestamp, quat);
+  pub.publish_image(pattern2.data.data(), 15, pose_timestamp + 1'000'000ull);
+  st = cam.try_read(img, ts);
+  check(st == sim_io::ReadStatus::Rejected, "姿态与图像 timestamp 不一致被拒绝");
+
   // 关键：上面这些被拒绝的帧必须已经把 pose 通道排空，否则背压会锁死仿真端。
   check(pub.synchronized_frame_consumed(), "被拒绝的帧同样完成了背压排空");
   check(
@@ -376,13 +389,20 @@ int main()
   check(cam.stale_frames() == stale_before + 1, "stale_frames 计数 +1");
   check(img.empty(), "过期帧不返回图像");
 
-  // 未来帧：时间戳超前，帧龄为负，计入 future_frames 但不当过期丢弃。
+  // 容差内的未来帧允许进入；超出有限容差必须拒绝。
   const std::uint64_t future_before = cam.future_frames();
-  pub.publish_pose_bundle(22, realtime_now_ns() + 50'000'000ull, quat);
-  pub.publish_image(pattern.data.data(), 22, realtime_now_ns() + 50'000'000ull);
+  const std::uint64_t near_future = realtime_now_ns() + 4'000'000ull;
+  pub.publish_pose_bundle(22, near_future, quat);
+  pub.publish_image(pattern.data.data(), 22, near_future);
   st = cam.try_read(img, ts);
-  check(st == sim_io::ReadStatus::Ok, "未来帧仍然可用");
+  check(st == sim_io::ReadStatus::Ok, "容差内未来帧仍然可用");
   check(cam.future_frames() == future_before + 1, "future_frames 计数 +1");
+
+  const std::uint64_t far_future = realtime_now_ns() + 50'000'000ull;
+  pub.publish_pose_bundle(23, far_future, quat);
+  pub.publish_image(pattern.data.data(), 23, far_future);
+  st = cam.try_read(img, ts);
+  check(st == sim_io::ReadStatus::Rejected, "超出容差的未来帧被拒绝");
 
   // 时钟桥：给定一个 40ms 前的源时间戳，算出的帧龄应当接近 40ms。
   const double bridged_ms = std::chrono::duration<double, std::milli>(
@@ -486,7 +506,7 @@ int main()
     g2.update(cam.last_bundle(), cam.last_stamps());
     for (std::uint32_t f : {sim_io::FAULT_HEARTBEAT_LOST, sim_io::FAULT_NO_NEW_FRAME,
                             sim_io::FAULT_TARGET_LOST, sim_io::FAULT_CLOCK_JUMP,
-                            sim_io::FAULT_FRAME_FAULT}) {
+                            sim_io::FAULT_FRAME_FAULT, sim_io::FAULT_NOT_FOLLOWING}) {
       g2.set_fault(f, true);
       g2.send(true, true, 0.0, 0.0, 3.0);
       sim_io::GimbalCmd cf{};
@@ -556,9 +576,21 @@ int main()
     // 先喂一帧好的，建立基准（也验证正常路径返回 Ok）。
     sim_io::FrameBundle good = cam.last_bundle();
     good.timestamp_ns = realtime_now_ns();
+    for (int c = 0; c <= static_cast<int>(sim_io::PoseIndex::Camera); ++c) {
+      good.pose_present[c] = true;
+      good.poses[c].frame_seq = good.frame_seq;
+      good.poses[c].timestamp_ns = good.timestamp_ns;
+    }
     check(gv.update(good, now_sp) == sim_io::PoseValidity::Ok, "合法位姿返回 Ok");
     const double yaw_good = gv.yaw();
     const std::uint64_t invalid_before = gv.invalid_poses();
+    auto set_pose_timestamp = [](sim_io::FrameBundle & bundle) {
+      for (int c = 0; c <= static_cast<int>(sim_io::PoseIndex::Camera); ++c) {
+        bundle.pose_present[c] = true;
+        bundle.poses[c].frame_seq = bundle.frame_seq;
+        bundle.poses[c].timestamp_ns = bundle.timestamp_ns;
+      }
+    };
 
     // timestamp_ns == 0：未初始化槽位的典型表现。
     sim_io::FrameBundle b0 = good;
@@ -570,6 +602,7 @@ int main()
     // 时间戳倒退。
     sim_io::FrameBundle bb = good;
     bb.timestamp_ns = good.timestamp_ns - 1000000ull;
+    set_pose_timestamp(bb);
     check(
       gv.update(bb, now_sp) == sim_io::PoseValidity::BadTimestamp,
       "时间戳倒退被拒 (BadTimestamp)");
@@ -577,6 +610,7 @@ int main()
     // NaN 位置。
     sim_io::FrameBundle bn = good;
     bn.timestamp_ns = good.timestamp_ns + 10000000ull;
+    set_pose_timestamp(bn);
     bn.poses[static_cast<int>(sim_io::PoseIndex::Odom)].position[1] = std::nanf("");
     check(
       gv.update(bn, now_sp) == sim_io::PoseValidity::NonFinite, "NaN 位置被拒 (NonFinite)");
@@ -584,6 +618,7 @@ int main()
     // inf 四元数分量。
     sim_io::FrameBundle bi = good;
     bi.timestamp_ns = good.timestamp_ns + 11000000ull;
+    set_pose_timestamp(bi);
     bi.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[2] =
       std::numeric_limits<float>::infinity();
     check(
@@ -592,6 +627,7 @@ int main()
     // 全零四元数（未初始化槽位）：模长 0。
     sim_io::FrameBundle bz = good;
     bz.timestamp_ns = good.timestamp_ns + 12000000ull;
+    set_pose_timestamp(bz);
     for (int i = 0; i < 4; ++i)
       bz.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[i] = 0.0f;
     check(
@@ -601,6 +637,7 @@ int main()
     // 模长明显偏离 1。
     sim_io::FrameBundle bs = good;
     bs.timestamp_ns = good.timestamp_ns + 13000000ull;
+    set_pose_timestamp(bs);
     for (int i = 0; i < 4; ++i)
       bs.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)].quaternion[i] *= 3.0f;
     check(
@@ -616,6 +653,7 @@ int main()
     // 恢复：合法帧应当清掉该故障位。
     sim_io::FrameBundle bok = good;
     bok.timestamp_ns = good.timestamp_ns + 20000000ull;
+    set_pose_timestamp(bok);
     check(gv.update(bok, now_sp) == sim_io::PoseValidity::Ok, "恢复帧返回 Ok");
     check((gv.faults() & sim_io::FAULT_POSE_INVALID) == 0, "合法帧清掉 FAULT_POSE_INVALID");
   }
@@ -719,8 +757,25 @@ int main()
       // "set_ground_truth 之后让评估器现读槽位"的路径已经不存在了。
       // seq 从 2 起：上面第 9 节刚消费掉 seq=1，帧号必须严格前进。
       auto publish_and_consume = [&](const sim_io::GroundTruthBatch * gt, std::uint64_t seq) {
+        const std::uint64_t frame_timestamp = realtime_now_ns();
+        sim_io::GroundTruthBatch stamped{};
+        const sim_io::GroundTruthBatch * published_gt = nullptr;
+        if (gt != nullptr) {
+          stamped = *gt;
+          stamped.frame_seq = seq;
+          stamped.timestamp_ns = frame_timestamp;
+          for (std::uint32_t i = 0; i < stamped.target_count; ++i) {
+            stamped.targets[i].frame_seq = seq;
+            stamped.targets[i].timestamp_ns = frame_timestamp;
+          }
+          for (std::uint32_t i = 0; i < stamped.rune_count; ++i) {
+            stamped.runes[i].frame_seq = seq;
+            stamped.runes[i].timestamp_ns = frame_timestamp;
+          }
+          published_gt = &stamped;
+        }
         const bool sent = pub3.try_publish_synchronized_frame(
-          pattern.data.data(), seq, realtime_now_ns(), quat, nullptr, nullptr, nullptr, gt);
+          pattern.data.data(), seq, frame_timestamp, quat, nullptr, nullptr, nullptr, published_gt);
         const auto rs = cam.try_read(img, ts);
         return sent && rs == sim_io::ReadStatus::Ok && cam.last_frame_seq() == seq;
       };
@@ -753,7 +808,10 @@ int main()
       const Eigen::Vector3d est(2.9, 0.45, 0.2);
 
       sim_io::GroundTruthEvaluator ev_blue(cam.client(), sim_io::GT_TEAM_BLUE);
-      check(ev_blue.fetch(2), "同事务提交的真值可读且同帧");
+      check(ev_blue.fetch(2, cam.last_timestamp_ns()), "同事务提交的真值可读且同帧");
+      check(ev_blue.fetch_attempts() == 1, "fetch_attempts 记录同帧尝试");
+      check(ev_blue.fetch_success() == 1, "fetch_success 记录同帧成功");
+      check(ev_blue.fetch_missing() == 0, "同帧真值不存在 missing");
       check(ev_blue.target_count() == 2, "读到 2 个目标");
       const auto err_blue = ev_blue.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_blue.valid, "蓝方评估命中");
@@ -767,7 +825,7 @@ int main()
       // 反向验证：指定红方时必须匹配红方，即使估计值离蓝方近得多。
       // 这条能区分"真的按队伍过滤"和"恰好选了最近的一个"。
       sim_io::GroundTruthEvaluator ev_red(cam.client(), sim_io::GT_TEAM_RED);
-      check(ev_red.fetch(2), "红方评估器读到同一批真值");
+      check(ev_red.fetch(2, cam.last_timestamp_ns()), "红方评估器读到同一批真值");
       const auto err_red = ev_red.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_red.valid && err_red.team == sim_io::GT_TEAM_RED, "指定红方时匹配红方");
       check_near(err_red.gt_position.x(), 1.0, 1e-5, "红方真值位置正确（未被蓝方抢走）");
@@ -780,7 +838,7 @@ int main()
       dup.targets[1].frame_seq = 3;
       check(publish_and_consume(&dup, 3), "第 3 帧同事务提交");
       sim_io::GroundTruthEvaluator ev_dup(cam.client(), sim_io::GT_TEAM_BLUE);
-      check(ev_dup.fetch(3), "重复标签批次可读");
+      check(ev_dup.fetch(3, cam.last_timestamp_ns()), "重复标签批次可读");
       const auto err_dup = ev_dup.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_dup.valid, "重复标签仍给出结果");
       check(err_dup.ambiguous, "同队重复 label 上报 ambiguous");
@@ -788,8 +846,14 @@ int main()
       check_near(err_dup.gt_position.x(), 3.0, 1e-5, "歧义时取距估计值最近的那辆");
 
       // 帧号不一致必须拒绝：不能拿别的帧的真值评估这一帧的估计。
-      check(!ev_dup.fetch(999), "帧号不匹配的真值被拒");
+      check(!ev_dup.fetch(999, cam.last_timestamp_ns()), "帧号不匹配的真值被拒");
       check(ev_dup.seq_mismatches() >= 1, "seq_mismatches 计数增加");
+      check(ev_dup.fetch_attempts() == 2, "mismatch 也计入 fetch_attempts");
+      check(ev_dup.fetch_success() == 1, "mismatch 不计入 fetch_success");
+      check(
+        !ev_dup.fetch(3, cam.last_timestamp_ns() + 1),
+        "帧号相同但 ground truth timestamp 不匹配时拒绝");
+      check(ev_dup.timestamp_mismatches() == 1, "timestamp_mismatches 计数增加");
 
       // 撕裂注入。这是评审第 4 条的核心：原来消费端靠"memcpy 前后 frame_seq
       // 相等"近似判断整块稳定，而同一帧号内重发时 frame_seq 根本不变、body 却在
@@ -814,7 +878,9 @@ int main()
         cam.client().ground_truth_captures() == captures_before_torn,
         "撕裂帧不计入 ground_truth_captures");
       sim_io::GroundTruthEvaluator ev_torn(cam.client(), sim_io::GT_TEAM_BLUE);
-      check(!ev_torn.fetch(4), "撕裂期间 fetch 失败而不是返回半份数据");
+      check(
+        !ev_torn.fetch(4, cam.last_timestamp_ns()),
+        "撕裂期间 fetch 失败而不是返回半份数据");
 
       // 收尾提交后恢复可读，且读回的是完整的新内容。
       pub3.set_ground_truth(torn);
@@ -830,7 +896,7 @@ int main()
       noarmor.targets[1].armor_position_valid = 0;
       check(publish_and_consume(&noarmor, 5), "第 5 帧同事务提交");
       sim_io::GroundTruthEvaluator ev_na(cam.client(), sim_io::GT_TEAM_BLUE);
-      check(ev_na.fetch(5), "无板心批次可读");
+      check(ev_na.fetch(5, cam.last_timestamp_ns()), "无板心批次可读");
       const auto err_na = ev_na.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_na.valid, "无板心时整车中心评估仍可用");
       check(!err_na.has_armor_position, "armor_position_valid=0 时不带回板心");
@@ -838,7 +904,7 @@ int main()
       // GT_TEAM_ANY 只允许诊断用：它会把自家车也纳入匹配，这里显式验证这一点，
       // 以免有人以为 any 是"更宽松但无害"。
       sim_io::GroundTruthEvaluator ev_any(cam.client(), sim_io::GT_TEAM_ANY);
-      check(ev_any.fetch(5), "any 评估器可读");
+      check(ev_any.fetch(5, cam.last_timestamp_ns()), "any 评估器可读");
       const auto err_any = ev_any.evaluate(auto_aim::three, est, 0.0, 0.0);
       check(err_any.valid && err_any.ambiguous, "GT_TEAM_ANY 下红蓝同号互相污染，报歧义");
 
@@ -893,7 +959,7 @@ int main()
       // 估计值故意放在红方前哨站附近（距红 0.2 m，距蓝 ~9 m）。
       const Eigen::Vector3d op_est(5.6, -1.25, 1.20);
       sim_io::GroundTruthEvaluator ev_op(cam.client(), sim_io::GT_TEAM_BLUE);
-      check(ev_op.fetch(6), "前哨站真值批次可读且同帧");
+      check(ev_op.fetch(6, cam.last_timestamp_ns()), "前哨站真值批次可读且同帧");
       check(ev_op.target_count() == 2, "读到红蓝两座前哨站");
       const auto err_op = ev_op.evaluate(auto_aim::outpost, op_est, -0.70, -2.5133);
       check(err_op.valid, "前哨站评估命中");
@@ -912,7 +978,9 @@ int main()
       // 反向：指定红方时必须拿到红方那座，且 vyaw 符号相反（顺时针 vs 逆时针）。
       // 这条同时把"vyaw 是有符号量、不是转速绝对值"钉在协议层。
       sim_io::GroundTruthEvaluator ev_op_red(cam.client(), sim_io::GT_TEAM_RED);
-      check(ev_op_red.fetch(6), "红方评估器读到同一批前哨站真值");
+      check(
+        ev_op_red.fetch(6, cam.last_timestamp_ns()),
+        "红方评估器读到同一批前哨站真值");
       const auto err_op_red = ev_op_red.evaluate(auto_aim::outpost, op_est, 0.30, 2.5133);
       check(
         err_op_red.valid && err_op_red.team == sim_io::GT_TEAM_RED, "指定红方时匹配红方前哨站");
@@ -1061,7 +1129,12 @@ int main()
       sim_io::FrameBundle b1{};
       b1.frame_seq = 100;
       b1.timestamp_ns = t_late;
-      for (int c = 0; c < sim_io::POSE_CHANNEL_COUNT; ++c) b1.pose_present[c] = true;
+      for (int c = 0; c < sim_io::POSE_CHANNEL_COUNT; ++c) {
+        b1.pose_present[c] = true;
+        b1.poses[c].frame_seq = b1.frame_seq;
+        b1.poses[c].timestamp_ns = b1.timestamp_ns;
+        b1.poses[c].quaternion[0] = 1.0f;
+      }
       auto & g1 = b1.poses[static_cast<int>(sim_io::PoseIndex::Gimbal)];
       for (int c = 0; c < 4; ++c) g1.quaternion[c] = quat[c];
       check(
@@ -1072,6 +1145,10 @@ int main()
       sim_io::FrameBundle b2 = b1;
       b2.frame_seq = 101;
       b2.timestamp_ns = t_late - 5000000000ull;
+      for (int c = 0; c <= static_cast<int>(sim_io::PoseIndex::Camera); ++c) {
+        b2.poses[c].frame_seq = b2.frame_seq;
+        b2.poses[c].timestamp_ns = b2.timestamp_ns;
+      }
       const auto v_back = rb.update(b2, stamps_now());
       check(
         v_back == sim_io::PoseValidity::BadTimestamp, "回拨帧先被判 BadTimestamp",
@@ -1082,6 +1159,10 @@ int main()
       sim_io::FrameBundle b3 = b2;
       b3.frame_seq = 102;
       b3.timestamp_ns = b2.timestamp_ns + 20000000ull;
+      for (int c = 0; c <= static_cast<int>(sim_io::PoseIndex::Camera); ++c) {
+        b3.poses[c].frame_seq = b3.frame_seq;
+        b3.poses[c].timestamp_ns = b3.timestamp_ns;
+      }
       check(
         rb.update(b3, stamps_now()) == sim_io::PoseValidity::BadTimestamp,
         "不 reset 时后续帧继续被拒（复现锁死）");
@@ -1155,7 +1236,7 @@ int main()
     pub_nogt.unlink_files();
   }
 
-  // 14b. CAP_RUNTIME_STATE 缺位：runtime_state() 必须返回 nullptr 而不是恒零结构。
+  // 14b. CAP_RUNTIME_STATE 缺位：read_runtime_state() 必须失败而不是返回恒零结构。
   {
     // 恒零的 RuntimeState 里 following==0，会被读成"仿真端没订阅云台命令"，
     // 于是排查方向被引到"按 F5 / 设 DAEDALUS_FORCE_AUTO_AIM"，而真实原因是发布端
@@ -1178,14 +1259,16 @@ int main()
     sim_io::SimCamera cam4b(c4b);
     check(cam4b.open(&e4b), "连接不声明 RuntimeState 的发布端");
     const std::uint64_t rt_unsup_before = cam4b.client().runtime_state_unsupported();
-    check(cam4b.client().runtime_state() == nullptr, "缺位时 runtime_state() 返回 nullptr");
+    sim_io::RuntimeState rt_out{};
+    check(!cam4b.client().read_runtime_state(&rt_out), "缺位时 runtime state 快照读取失败");
     check(
       cam4b.client().runtime_state_unsupported() == rt_unsup_before + 1,
       "runtime_state_unsupported 计数 +1");
 
     pub_nort.set_capabilities(sim_io::SIMULATOR_CAPABILITIES);
-    const auto * rt_out = cam4b.client().runtime_state();
-    check(rt_out != nullptr && rt_out->following == 1, "补上能力位后读到 following=1");
+    check(
+      cam4b.client().read_runtime_state(&rt_out) && rt_out.following == 1,
+      "补上能力位后读到 following=1");
 
     cam4b.close();
     pub_nort.destroy();
@@ -1358,6 +1441,21 @@ int main()
     sim_io::GimbalCmd cmd15{};
     check(pub15.recv_gimbal_cmd(&cmd15) && cmd15.fire_advice == 1, "开火命令真的发了出去");
     check(gim15.command_age_violations() == 0, "未设预算时不计违规");
+
+    // 未来源时间戳不能以负数年龄绕过开火年龄门。
+    sim_io::SimGimbalConfig g15_future = g15;
+    g15_future.max_command_age_ms = 1000.0;
+    sim_io::SimGimbal gim15_future(cam15.client(), g15_future);
+    auto future_stamps = stamps;
+    future_stamps.source = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    check(
+      gim15_future.update(cam15.last_bundle(), future_stamps) == sim_io::PoseValidity::Ok,
+      "未来 source 时间戳的位姿仍通过结构校验");
+    check(gim15_future.command_age_ms() < 0.0, "未来 source 产生负 command_age");
+    check(
+      (gim15_future.faults() & sim_io::FAULT_COMMAND_AGE) != 0 &&
+        !gim15_future.fire_allowed(),
+      "负 command_age 不能绕过开火年龄门");
 
     // 设了预算就必须拦住，而且理由必须是 command_age 而不是 state_stale。
     sim_io::SimGimbalConfig g15b = g15;

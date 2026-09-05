@@ -56,6 +56,9 @@ enum SafetyFault : std::uint32_t
   // 判断仿真端到底有没有订阅云台命令）。缺位期间禁止开火——把"不可知"当成"正常"
   // 才是真正危险的那一种降级。
   FAULT_CAPABILITY_MISSING = 1u << 11,
+  // 受控运动学预算无法证明当前命令的动态角/位置误差在开火上限内。
+  FAULT_DYNAMIC_ERROR = 1u << 12,
+  FAULT_NOT_FOLLOWING = 1u << 13,
 };
 
 // update() 对输入位姿的校验结果。Ok 之外的一律不更新云台状态：
@@ -66,6 +69,7 @@ enum class PoseValidity
   NonFinite,       // position/quaternion 里有 NaN 或 Inf
   QuaternionNorm,  // 四元数模长偏离 1 太多（含全零）
   BadTimestamp,    // timestamp_ns 为 0 或相对上一帧倒退
+  FrameContract,   // pose 与图像的 frame_seq/timestamp_ns 不一致
 };
 
 const char * to_string(PoseValidity validity);
@@ -272,6 +276,8 @@ public:
   std::uint64_t fire_commands() const { return fire_commands_; }
   std::uint64_t suppressed_fires() const { return suppressed_fires_; }
   std::uint64_t safe_stops() const { return safe_stops_; }
+  std::uint64_t last_command_seq() const { return last_command_seq_; }
+  const GimbalCmd & last_command() const { return last_command_; }
   const SimGimbalConfig & config() const { return config_; }
 
 private:
@@ -313,6 +319,8 @@ private:
   std::uint64_t suppressed_fires_ = 0;
   std::uint64_t safe_stops_ = 0;
   std::uint16_t bullet_count_ = 0;
+  std::uint64_t last_command_seq_ = 0;
+  GimbalCmd last_command_{};
   PoseValidity last_validity_ = PoseValidity::Ok;
   std::uint64_t invalid_poses_ = 0;
 

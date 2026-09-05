@@ -32,12 +32,14 @@ struct GtError
   bool valid = false;
   std::uint8_t armor_label = 0;
   std::uint8_t team = GT_TEAM_ANY;
+  std::uint16_t identity = 0;
   auto_aim::ArmorName name = auto_aim::not_armor;
   double pos_err_m = 0.0;
   double xy_err_m = 0.0;
   double z_err_m = 0.0;
   double yaw_err_rad = 0.0;
   double vyaw_err_radps = 0.0;
+  double gt_vyaw_radps = 0.0;
   Eigen::Vector3d gt_position{Eigen::Vector3d::Zero()};
   Eigen::Vector3d est_position{Eigen::Vector3d::Zero()};
 
@@ -45,6 +47,7 @@ struct GtError
   // 瞄准误差必须用板心；估计误差（pos_err_m）仍以整车中心为基准，因为
   // Tracker 的 EKF 状态 (CX,CY,CZ) 估的就是车心。
   bool has_armor_position = false;
+  bool armor_position_degraded = false;
   Eigen::Vector3d gt_armor_position{Eigen::Vector3d::Zero()};
 
   // 匹配是否发生了歧义：同一批真值里有多个目标同时满足 (team, label)。
@@ -82,12 +85,20 @@ public:
 
   std::uint8_t enemy_team() const { return enemy_team_; }
   std::uint64_t ambiguous_matches() const { return ambiguous_matches_; }
+  std::uint64_t nearest_matches() const { return nearest_matches_; }
+  std::uint64_t degraded_matches() const { return degraded_matches_; }
+
+  // fetch() 的统计覆盖每一次调用，而不是只覆盖有 Tracker 目标的帧。
+  std::uint64_t fetch_attempts() const { return fetch_attempts_; }
+  std::uint64_t fetch_success() const { return fetch_success_; }
+  std::uint64_t fetch_missing() const { return fetch_missing_; }
 
   // 取本帧真值批次。数据来自 SharedMemoryClient::frame_ground_truth()，即
   // consume_frame() 在发布事务窗口里拷下来的那一份；仅当其 frame_seq 与图像
-  // frame_seq 相等时才认为可用。协议 v3 规定两者严格相等，所以 seq_mismatches
+  // frame_seq/timestamp_ns 同时相等时才认为可用。协议 v4 规定两者严格相等，所以
+  // seq_mismatches
   // 的期望值是 0，任何非零都是协议违例。
-  bool fetch(std::uint64_t image_frame_seq);
+  bool fetch(std::uint64_t image_frame_seq, std::uint64_t image_timestamp_ns);
 
   // 只读最新一批真值，不校验帧号。**仅供人看的诊断输出**（例如确认场景里目标
   // 到底在哪个方向），绝不能用于 evaluate()/record()，否则等于拿不同帧的真值
@@ -98,6 +109,7 @@ public:
   std::uint64_t frame_seq() const { return batch_.frame_seq; }
   std::uint32_t target_count() const { return fetched_ ? batch_.target_count : 0; }
   std::uint64_t seq_mismatches() const { return seq_mismatches_; }
+  std::uint64_t timestamp_mismatches() const { return timestamp_mismatches_; }
   // 真值帧号减图像帧号的统计，仅在违例样本上累计（见 fetch()）。
   std::uint64_t seq_skew_samples() const { return seq_skew_samples_; }
   double seq_skew_mean() const
@@ -124,12 +136,18 @@ private:
   GroundTruthBatch batch_{};
   bool fetched_ = false;
   std::uint64_t seq_mismatches_ = 0;
+  std::uint64_t timestamp_mismatches_ = 0;
+  std::uint64_t fetch_attempts_ = 0;
+  std::uint64_t fetch_success_ = 0;
+  std::uint64_t fetch_missing_ = 0;
   std::uint64_t seq_skew_samples_ = 0;
   std::int64_t seq_skew_sum_ = 0;
   std::int64_t seq_skew_min_ = 0;
   std::int64_t seq_skew_max_ = 0;
   std::uint8_t enemy_team_ = GT_TEAM_ANY;
   std::uint64_t ambiguous_matches_ = 0;
+  std::uint64_t nearest_matches_ = 0;
+  std::uint64_t degraded_matches_ = 0;
 
   std::vector<double> pos_err_;
   std::vector<double> xy_err_;
