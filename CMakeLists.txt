@@ -96,6 +96,7 @@ set(SP_VISION_RUNTIME_TARGETS
   auto_buff_debug_mpc
   uav
   uav_debug
+  sim_auto_buff
 )
 
 ##################calibration################
@@ -173,11 +174,19 @@ target_link_libraries(estimator_pipeline_test Eigen3::Eigen)
 add_executable(target_13d_test tests/target_13d_test.cpp)
 target_link_libraries(target_13d_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
 
+add_executable(buff_safety_test tests/buff_safety_test.cpp)
+target_link_libraries(buff_safety_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff auto_aim tools io)
+add_executable(buff_counterexample_test tests/buff_counterexample_test.cpp)
+target_link_libraries(buff_counterexample_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff auto_aim tools io)
+
 ##################simulation##################
 # 仿真专用入口：复用 YOLO/Solver/Tracker/Planner，但相机与云台走共享内存，
 # 不初始化物理相机与串口。真实机器入口 (standard / mt_standard / ...) 保持不变。
 add_executable(sim_auto_aim src/sim_auto_aim.cpp)
 target_link_libraries(sim_auto_aim ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io sim_io)
+add_executable(sim_auto_buff src/sim_auto_buff.cpp)
+target_link_libraries(sim_auto_buff ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io sim_io)
+target_link_libraries(sim_auto_buff auto_aim)
 
 # ABI 合同测试：只依赖布局头，不需要 OpenCV 之外的任何运行时。
 add_executable(sim_ipc_contract_test tests/sim_ipc_contract_test.cpp)
@@ -208,6 +217,11 @@ target_link_libraries(sim_geometry_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools a
 add_executable(sim_entry_smoke_test tests/sim_entry_smoke_test.cpp)
 target_link_libraries(sim_entry_smoke_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
 add_dependencies(sim_entry_smoke_test sim_auto_aim)
+add_executable(sim_buff_entry_smoke_test tests/sim_buff_entry_smoke_test.cpp)
+target_link_libraries(sim_buff_entry_smoke_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
+add_dependencies(sim_buff_entry_smoke_test sim_auto_buff)
+add_executable(sim_dynamic_budget_test tests/sim_dynamic_budget_test.cpp)
+target_link_libraries(sim_dynamic_budget_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim sim_io)
 
 list(APPEND SP_VISION_RUNTIME_TARGETS
   sim_auto_aim
@@ -229,11 +243,18 @@ if(BUILD_TESTING)
     NAME sim_entry_smoke_test
     COMMAND sim_entry_smoke_test $<TARGET_FILE:sim_auto_aim>
   )
+  add_test(
+    NAME sim_buff_entry_smoke_test
+    COMMAND sim_buff_entry_smoke_test $<TARGET_FILE:sim_auto_buff>
+  )
+  add_test(NAME sim_dynamic_budget_test COMMAND sim_dynamic_budget_test)
   add_test(NAME estimator_pipeline_test COMMAND estimator_pipeline_test)
   add_test(
     NAME target_13d_test
     COMMAND target_13d_test ${PROJECT_SOURCE_DIR}/configs/demo.yaml
   )
+  add_test(NAME buff_safety_test COMMAND buff_safety_test)
+  add_test(NAME buff_counterexample_test COMMAND buff_counterexample_test)
 endif()
 
 # 这些测试/调试程序本身就是现场定位问题常用的入口，

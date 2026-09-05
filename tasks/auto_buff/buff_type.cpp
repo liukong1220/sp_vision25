@@ -5,6 +5,19 @@
 #include "tools/logger.hpp"
 namespace auto_buff
 {
+const char * to_string(PowerRuneMode mode)
+{
+  switch (mode) {
+    case PowerRuneMode::Unknown:
+      return "unknown";
+    case PowerRuneMode::Small:
+      return "small";
+    case PowerRuneMode::Big:
+      return "big";
+  }
+  return "unknown";
+}
+
 FanBlade::FanBlade(
   const std::vector<cv::Point2f> & kpt, cv::Point2f keypoints_center, FanBlade_type t)
 : center(keypoints_center), type(t)
@@ -18,8 +31,9 @@ FanBlade::FanBlade(FanBlade_type t) : type(t)
 }
 
 PowerRune::PowerRune(
-  std::vector<FanBlade> & ts, const cv::Point2f center, std::optional<PowerRune> last_powerrune)
-: r_center(center), light_num(ts.size())
+  std::vector<FanBlade> & ts, const cv::Point2f center, std::optional<PowerRune> last_powerrune,
+  PowerRuneMode mode)
+: r_center(center), light_num(ts.size()), mode_(mode)
 {
   /// 找出target
 

@@ -7,6 +7,7 @@
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/opencv.hpp>
 #include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@ namespace auto_buff
 {
 const int INF = 1000000;
 enum PowerRune_type { SMALL, BIG };
+enum class PowerRuneMode : std::uint8_t { Unknown = 0, Small = 1, Big = 2 };
+
+const char * to_string(PowerRuneMode mode);
 enum FanBlade_type { _target, _unlight, _light };
 enum Track_status { TRACK, TEM_LOSE, LOSE };
 
@@ -53,16 +57,20 @@ public:
 
   explicit PowerRune(
     std::vector<FanBlade> & ts, const cv::Point2f r_center,
-    std::optional<PowerRune> last_powerrune);
+    std::optional<PowerRune> last_powerrune,
+    PowerRuneMode mode = PowerRuneMode::Unknown);
   explicit PowerRune() = default;
 
   FanBlade & target() { return fanblades[0]; };
 
   bool is_unsolve() const { return unsolvable_; }
+  PowerRuneMode mode() const { return mode_; }
+  void set_mode(PowerRuneMode mode) { mode_ = mode; }
 
 private:
   double target_angle_;
   bool unsolvable_ = false;
+  PowerRuneMode mode_ = PowerRuneMode::Unknown;
 
   double atan_angle(cv::Point2f v) const;  // [0, 2CV_PI]
 };

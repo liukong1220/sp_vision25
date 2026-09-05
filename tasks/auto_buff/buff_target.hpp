@@ -4,6 +4,7 @@
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
 #include <optional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@ public:
   Voter();
   void vote(const double angle_last, const double angle_now);
   int clockwise();
+  void reset();
 
 private:
   int clockwise_;
@@ -39,8 +41,9 @@ public:
     std::chrono::steady_clock::time_point & timestamp) = 0;  // 纯虚函数
 
   virtual void predict(double dt) = 0;  // 纯虚函数
+  virtual std::unique_ptr<Target> clone() const = 0;
 
-  Eigen::Vector3d point_buff2world(const Eigen::Vector3d & point_in_buff) const;
+  virtual Eigen::Vector3d point_buff2world(const Eigen::Vector3d & point_in_buff) const;
 
   bool is_unsolve() const;
 
@@ -64,6 +67,9 @@ protected:
   Voter voter;  // 逆时针-1 顺时针1
   bool first_in_;
   bool unsolvable_;
+  int lost_count_ = 0;
+  bool has_start_timestamp_ = false;
+  std::chrono::steady_clock::time_point start_timestamp_{};
 };
 
 /// SmallTarget子类
@@ -77,6 +83,7 @@ public:
     const std::optional<PowerRune> & p, std::chrono::steady_clock::time_point & timestamp) override;
 
   void predict(double dt) override;
+  std::unique_ptr<Target> clone() const override { return std::make_unique<SmallTarget>(*this); }
 
 private:
   void init(double nowtime, const PowerRune & p) override;
@@ -100,6 +107,8 @@ public:
     const std::optional<PowerRune> & p, std::chrono::steady_clock::time_point & timestamp) override;
 
   void predict(double dt) override;
+  std::unique_ptr<Target> clone() const override { return std::make_unique<BigTarget>(*this); }
+  std::size_t fitter_sample_count() const { return spd_fitter_.sample_count(); }
 
 private:
   void init(double nowtime, const PowerRune & p) override;
@@ -110,7 +119,7 @@ private:
 
   tools::RansacSineFitter spd_fitter_;
 
-  double fit_spd_;
+  double fit_spd_ = 1.1775;
 };
 
 }  // namespace auto_buff

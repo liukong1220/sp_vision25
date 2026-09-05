@@ -6,6 +6,8 @@ namespace auto_buff
 
 Voter::Voter() : clockwise_(0) {}
 
+void Voter::reset() { clockwise_ = 0; }
+
 void Voter::vote(const double angle_last, const double angle_now)
 {
   if (std::abs(clockwise_) > 50) return;
@@ -50,15 +52,17 @@ void SmallTarget::get_target(
   const std::optional<PowerRune> & p, std::chrono::steady_clock::time_point & timestamp)
 {
   // 如果没有识别，退出函数
-  static int lost_cn = 0;
   if (!p.has_value()) {
     unsolvable_ = true;
-    lost_cn++;
+    ++lost_count_;
     return;
   }
 
-  static std::chrono::steady_clock::time_point start_timestamp = timestamp;
-  auto time_gap = tools::delta_time(timestamp, start_timestamp);
+  if (!has_start_timestamp_) {
+    start_timestamp_ = timestamp;
+    has_start_timestamp_ = true;
+  }
+  auto time_gap = tools::delta_time(timestamp, start_timestamp_);
 
   // init
   if (first_in_) {
@@ -68,13 +72,15 @@ void SmallTarget::get_target(
   }
 
   // 处理识别时间间隔过大
-  if (lost_cn > 6) {
+  if (lost_count_ > 6) {
     unsolvable_ = true;
     tools::logger()->debug("[Target] 丢失buff");
-    lost_cn = 0;
+    lost_count_ = 0;
     first_in_ = true;
+    has_start_timestamp_ = false;
     return;
   }
+  lost_count_ = 0;
 
   // kalman update
   unsolvable_ = false;
@@ -360,31 +366,39 @@ void BigTarget::get_target(
   const std::optional<PowerRune> & p, std::chrono::steady_clock::time_point & timestamp)
 {
   // 如果没有识别，退出函数
-  static int lost_cn = 0;
   if (!p.has_value()) {
     unsolvable_ = true;
-    lost_cn++;
+    ++lost_count_;
     return;
   }
 
-  static std::chrono::steady_clock::time_point start_timestamp = timestamp;
-  auto time_gap = tools::delta_time(timestamp, start_timestamp);
+  if (!has_start_timestamp_) {
+    start_timestamp_ = timestamp;
+    has_start_timestamp_ = true;
+  }
+  auto time_gap = tools::delta_time(timestamp, start_timestamp_);
 
   // init
   if (first_in_) {
     unsolvable_ = true;
     init(time_gap, p.value());
     first_in_ = false;
+    lost_count_ = 0;
+    return;
   }
 
   // 处理识别时间间隔过大
-  if (lost_cn > 6) {
+  if (lost_count_ > 6) {
     unsolvable_ = true;
     tools::logger()->debug("[Target] 丢失buff");
-    lost_cn = 0;
+    lost_count_ = 0;
     first_in_ = true;
+    has_start_timestamp_ = false;
+    voter.reset();
+    spd_fitter_.reset();
     return;
   }
+  lost_count_ = 0;
 
   // kalman update
   unsolvable_ = false;
@@ -395,7 +409,14 @@ void BigTarget::get_target(
     ekf_.x[7] > 1.045 * 1.5 || ekf_.x[7] < 0.78 / 1.5 || ekf_.x[8] > 2.0 * 1.5 ||
     ekf_.x[8] < 1.884 / 1.5) {
     tools::logger()->debug("[Target] 大符角度发散a: {:.2f}b:{:.2f}", ekf_.x[7], ekf_.x[8]);
+    // Divergence invalidates this frame and the accumulated sine model.  Keeping either
+    // would let Aimer clone a stale EKF and issue control/fire during the next frame.
+    unsolvable_ = true;
     first_in_ = true;
+    has_start_timestamp_ = false;
+    lost_count_ = 0;
+    voter.reset();
+    spd_fitter_.reset();
     return;
   }
 }
@@ -643,13 +664,30 @@ void BigTarget::update(double nowtime, const PowerRune & p)
 
   // 对ekf速度进行最小二乘拟合 ekf_.x[6] -> fitting_speed -> predict position
   if (ekf_.x[6] < 2.1 && ekf_.x[6] >= 0) spd_fitter_.add_data(nowtime, ekf_.x[6]);
+  if (spd_fitter_.sample_count() < 3) {
+    // A first fit needs three independent samples.  The EKF state is retained for
+    // diagnostics, but no control or fire command is valid until the model is fitted.
+    unsolvable_ = true;
+    lasttime_ = nowtime;
+    return;
+  }
   spd_fitter_.fit();
+  if (spd_fitter_.best_result_.inliers < 3 ||
+      !std::isfinite(spd_fitter_.best_result_.A) ||
+      !std::isfinite(spd_fitter_.best_result_.omega) ||
+      !std::isfinite(spd_fitter_.best_result_.phi) ||
+      !std::isfinite(spd_fitter_.best_result_.C)) {
+    unsolvable_ = true;
+    lasttime_ = nowtime;
+    return;
+  }
 
   fit_spd_ = spd_fitter_.sine_function(
     nowtime, spd_fitter_.best_result_.A, spd_fitter_.best_result_.omega,
     spd_fitter_.best_result_.phi, spd_fitter_.best_result_.C);
 
-  spd = voter.clockwise() * (ekf_.x[5] - anglelast) / (nowtime - lasttime_);  // 仅供调试
+  const double dt = nowtime - lasttime_;
+  spd = dt > 1e-9 ? voter.clockwise() * (ekf_.x[5] - anglelast) / dt : 0.0;  // 仅供调试
   spd = fit_spd_;
   if (std::abs(spd) > 4) spd = 0;
 

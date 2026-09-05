@@ -17,11 +17,14 @@ class Buff_Detector
 public:
   Buff_Detector(const std::string & config);
 
-  std::optional<PowerRune> detect_24(cv::Mat & bgr_img);
+  std::optional<PowerRune> detect_24(
+    cv::Mat & bgr_img, PowerRuneMode mode = PowerRuneMode::Unknown);
 
-  std::optional<PowerRune> detect(cv::Mat & bgr_img);
+  std::optional<PowerRune> detect(
+    cv::Mat & bgr_img, PowerRuneMode mode = PowerRuneMode::Unknown);
 
-std::optional<PowerRune> detect_debug(cv::Mat & bgr_img, cv::Point2f v);
+  std::optional<PowerRune> detect_debug(
+    cv::Mat & bgr_img, cv::Point2f v, PowerRuneMode mode = PowerRuneMode::Unknown);
 
 private:
   void handle_img(const cv::Mat & bgr_img, cv::Mat & dilated_img);

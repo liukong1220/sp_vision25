@@ -24,6 +24,12 @@ void RansacSineFitter::add_data(double t, double v)
   fit_data_.emplace_back(std::make_pair(t, v));
 }
 
+void RansacSineFitter::reset()
+{
+  fit_data_.clear();
+  best_result_ = Result{};
+}
+
 void RansacSineFitter::fit()
 {
   if (fit_data_.size() < 3) return;

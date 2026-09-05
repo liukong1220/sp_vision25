@@ -28,6 +28,10 @@ public:
 
   void fit();
 
+  // Drop all accumulated samples and the last model after a tracker reset or divergence.
+  void reset();
+  std::size_t sample_count() const { return fit_data_.size(); }
+
   double sine_function(double t, double A, double omega, double phi, double C)
   {
     return A * std::sin(omega * t + phi) + C;

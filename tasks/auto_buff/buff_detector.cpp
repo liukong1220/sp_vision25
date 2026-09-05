@@ -86,7 +86,7 @@ void Buff_Detector::handle_lose()
   status_ = TEM_LOSE;
 }
 
-std::optional<PowerRune> Buff_Detector::detect_24(cv::Mat & bgr_img)
+std::optional<PowerRune> Buff_Detector::detect_24(cv::Mat & bgr_img, PowerRuneMode mode)
 {
   /// onnx 模型检测
 
@@ -106,7 +106,7 @@ std::optional<PowerRune> Buff_Detector::detect_24(cv::Mat & bgr_img)
 
   /// 生成PowerRune
   auto r_center = get_r_center(fanblades, bgr_img);
-  PowerRune powerrune(fanblades, r_center, last_powerrune_);
+  PowerRune powerrune(fanblades, r_center, last_powerrune_, mode);
 
   /// handle error
   if (powerrune.is_unsolve()) {
@@ -122,7 +122,7 @@ std::optional<PowerRune> Buff_Detector::detect_24(cv::Mat & bgr_img)
   return P;
 }
 
-std::optional<PowerRune> Buff_Detector::detect(cv::Mat & bgr_img)
+std::optional<PowerRune> Buff_Detector::detect(cv::Mat & bgr_img, PowerRuneMode mode)
 {
   /// onnx 模型检测
 
@@ -143,7 +143,7 @@ std::optional<PowerRune> Buff_Detector::detect(cv::Mat & bgr_img)
 
   /// 生成PowerRune
   auto r_center = get_r_center(fanblades, bgr_img);
-  PowerRune powerrune(fanblades, r_center, last_powerrune_);
+  PowerRune powerrune(fanblades, r_center, last_powerrune_, mode);
 
   /// handle error
   if (powerrune.is_unsolve()) {
@@ -159,7 +159,8 @@ std::optional<PowerRune> Buff_Detector::detect(cv::Mat & bgr_img)
   return P;
 }
 
-std::optional<PowerRune> Buff_Detector::detect_debug(cv::Mat & bgr_img, cv::Point2f v)
+std::optional<PowerRune> Buff_Detector::detect_debug(
+  cv::Mat & bgr_img, cv::Point2f v, PowerRuneMode mode)
 {
   /// onnx 模型检测
 
@@ -185,7 +186,7 @@ std::optional<PowerRune> Buff_Detector::detect_debug(cv::Mat & bgr_img, cv::Poin
     }
   }
   if (fanblades.empty()) return std::nullopt;
-  PowerRune powerrune(fanblades, r_center, std::nullopt);
+  PowerRune powerrune(fanblades, r_center, std::nullopt, mode);
 
   std::optional<PowerRune> P;
   P.emplace(powerrune);
