@@ -116,6 +116,8 @@ int main()
   CHECK_OFFSET(PoseMeta, frame_seq, 0);
   CHECK_OFFSET(PoseMeta, position, 8);
   CHECK_OFFSET(PoseMeta, quaternion, 20);
+  CHECK_OFFSET(PoseMeta, pad0_, 36);
+  CHECK_FIELD_SIZE(PoseMeta, pad0_, 4);
   CHECK_OFFSET(PoseMeta, timestamp_ns, 40);
   CHECK_OFFSET(PoseMeta, pad_, 48);
   CHECK_FIELD_SIZE(PoseMeta, pad_, 16);

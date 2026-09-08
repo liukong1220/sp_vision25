@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <vector>
 
 #include "tasks/auto_buff/buff_aimer.hpp"
 #include "tasks/auto_buff/buff_target.hpp"
@@ -183,6 +184,7 @@ int main()
     target.get_target(std::optional<auto_buff::PowerRune>(rune), ts);
     check(target.is_unsolve(), "big first fit unsolvable");
     check(target.fitter_sample_count() == 0, "big first fit fitter empty");
+    check(!target.predicted_sine_phase().has_value(), "big first fit predicted_phase unavailable");
     const auto command = aimer.aim(target, ts, 24.0, false);
     check(!command.control && !command.shoot, "big first fit no control/fire");
     check(aimer.last_status() == auto_buff::Aimer::SolveStatus::NoTarget, "big first fit Aimer NoTarget");
@@ -198,6 +200,7 @@ int main()
     }
     check(target.is_unsolve(), "big 1-2 samples unsolvable");
     check(target.fitter_sample_count() < 3, "big 1-2 samples fitter count");
+    check(!target.predicted_sine_phase().has_value(), "big 1-2 samples predicted_phase unavailable");
     auto ts = t0 + std::chrono::milliseconds(40);
     const auto command = aimer.aim(target, ts, 24.0, false);
     check(!command.control && !command.shoot, "big 1-2 samples no control/fire");
@@ -256,6 +259,58 @@ int main()
     auto ts = t0 + std::chrono::milliseconds(260);
     const auto command = aimer.aim(target, ts, 24.0, false);
     check(!command.control && !command.shoot, "big loss recovery no control/fire");
+  }
+
+  {
+    auto_buff::SmallTarget small;
+    check(!small.predicted_sine_phase().has_value(), "small has no sine phase");
+
+    tools::RansacSineFitter fitter(100, 0.5, 1.884, 2.000);
+    constexpr double amplitude = 0.90;
+    constexpr double omega = 1.94;
+    constexpr double phi = 0.40;
+    constexpr double offset = 2.09 - amplitude;
+    for (int i = 0; i < 40; ++i) {
+      const double t = i * 0.02;
+      fitter.add_data(t, amplitude * std::sin(omega * t + phi) + offset);
+    }
+    fitter.fit();
+    check(fitter.best_result_.inliers >= 3, "ransac sine model has inliers");
+    check(std::isfinite(fitter.best_result_.phi), "ransac sine phase is finite");
+
+    auto_buff::BigTarget target;
+    double angle = 0.0;
+    std::optional<double> predicted;
+    for (int i = 0; i < 40; ++i) {
+      const double t = i * 0.02;
+      const double speed = amplitude * std::sin(omega * t) + offset;
+      angle += speed * 0.02;
+      auto ts = t0 + std::chrono::milliseconds(20 * i);
+      auto rune = make_big_rune(angle);
+      target.get_target(std::optional<auto_buff::PowerRune>(rune), ts);
+      predicted = target.predicted_sine_phase();
+      if (predicted.has_value()) break;
+    }
+
+    std::vector<double> predicted_phase;
+    std::vector<double> small_phase;
+    std::vector<double> fitter_phase;
+    if (small.predicted_sine_phase().has_value() && std::isfinite(*small.predicted_sine_phase()))
+      small_phase.push_back(*small.predicted_sine_phase());
+    if (predicted.has_value() && std::isfinite(*predicted))
+      predicted_phase.push_back(*predicted);
+    if (fitter.best_result_.inliers >= 3 && std::isfinite(fitter.best_result_.phi))
+      fitter_phase.push_back(fitter.best_result_.phi);
+    check(small_phase.empty(), "small predicted_phase stats stay empty, not forged 0");
+    check(
+      fitter_phase.size() >= 1 && std::isfinite(fitter_phase.front()),
+      "predicted_phase stats contain a numeric sample, not just a JSON key");
+    check(
+      predicted_phase.size() >= 1 && std::isfinite(predicted_phase.front()),
+      "BigTarget predicted_phase stats contain a numeric sample, not just a JSON key");
+    check(
+      predicted.has_value() && std::isfinite(*predicted),
+      "big target after sine observations exposes finite predicted_phase");
   }
 
   std::printf("buff_safety_test: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);

@@ -45,6 +45,7 @@
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/yaml.hpp"
+#include "tools/img_tools.hpp"
 
 namespace
 {
@@ -67,6 +68,7 @@ const std::string keys =
   "{bias-yaw-deg   | 0.0                   | probe 模式的 yaw 固定偏置(度)，用来把云台指向某个方向}"
   "{bias-pitch-deg | 0.0                   | probe 模式的 pitch 固定偏置(度)，正=低头(ROS 约定)}"
   "{dump-detect    | 0                     | 打印前 N 帧的检测/跟踪明细(排查为什么检到了却跟不上)}"
+  "{show-detect    |                       | 打开装甲板识别窗口(imshow sp_vision25 detection)，并落盘叠加图}"
   "{enemy-team     |                       | 覆盖真值评估的敌方队伍: red / blue / any}"
   // 这两个必须是**字符串**键。OpenCV 的 CommandLineParser 解析不了 "nan" 这个
   // 默认值：get<double>() 会静默返回 0.0（实测），而 has() 对有默认值的键恒为
@@ -166,6 +168,7 @@ int main(int argc, char * argv[])
     return 2;
   }
   const int dump_detect = cli.get<int>("dump-detect");
+  const bool show_detect = cli.has("show-detect");
   const double duration_s = cli.get<double>("duration-s");
   const bool allow_fire = cli.has("allow-fire");
   const bool allow_colorblind_fire = cli.has("allow-colorblind-fire");
@@ -970,7 +973,7 @@ int main(int argc, char * argv[])
     // 单帧 PnP 世界坐标：静止目标的单帧解应当恒定，若它随云台反馈角跳变，
     // 就说明图像与同帧位姿没对齐（而不是检测或 EKF 的问题）。
     std::list<auto_aim::Armor> armors_dbg;
-    if (dump_detect > 0 && static_cast<int>(frames) <= dump_detect) {
+    if (show_detect || (dump_detect > 0 && static_cast<int>(frames) <= dump_detect)) {
       armors_dbg = armors;
       for (auto & a : armors_dbg) solver.solve(a);
     }
@@ -1013,6 +1016,36 @@ int main(int argc, char * argv[])
         "[sim] detect#{} seq={} fb=({:+.2f},{:+.2f})deg state={} armors={} -> track={}", frames,
         bundle.frame_seq, gimbal.yaw() * 57.2957795130823, gimbal.pitch() * 57.2957795130823,
         tracker->state(), desc, tdesc);
+    }
+    if (show_detect) {
+      cv::Mat overlay = img.clone();
+      tools::draw_text(
+        overlay,
+        fmt::format(
+          "[{}] {} det={} tracked={} fire={}", frames, tracker->state(), armors_dbg.size(),
+          target.has_value() ? 1 : 0, allow_fire ? "cli" : "disabled"),
+        {10, 30}, {255, 255, 255}, 0.8, 2);
+      for (const auto & a : armors_dbg) {
+        const cv::Scalar box_color = (a.color == auto_aim::Color::red) ? cv::Scalar(0, 0, 255)
+          : (a.color == auto_aim::Color::blue) ? cv::Scalar(255, 0, 0)
+          : cv::Scalar(0, 255, 255);
+        tools::draw_points(overlay, a.points, box_color);
+        tools::draw_text(
+          overlay,
+          fmt::format(
+            "{:.2f} {} {}", a.confidence, auto_aim::COLORS[a.color], auto_aim::ARMOR_NAMES[a.name]),
+          a.center, box_color, 0.6, 2);
+      }
+      cv::Mat vis;
+      cv::resize(overlay, vis, {}, 0.5, 0.5);
+      cv::imshow("sp_vision25 detection", vis);
+      cv::waitKey(1);
+      if (static_cast<int>(frames) <= std::max(12, dump_detect)) {
+        cv::imwrite(fmt::format("/tmp/sim_detect_overlay_{}.png", frames), overlay);
+      }
+      if (frames % 5 == 0) {
+        cv::imwrite("/tmp/sim_detect_overlay_latest.png", overlay);
+      }
     }
 
     const double lost_ms = std::chrono::duration<double, std::milli>(

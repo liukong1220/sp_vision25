@@ -362,6 +362,16 @@ Eigen::MatrixXd SmallTarget::h_jacobian() const
 
 BigTarget::BigTarget() : Target(), spd_fitter_(100, 0.5, 1.884, 2.000) {}
 
+std::optional<double> BigTarget::predicted_sine_phase() const
+{
+  const auto & result = spd_fitter_.best_result_;
+  if (result.inliers < 3 || !std::isfinite(result.A) || !std::isfinite(result.omega) ||
+      !std::isfinite(result.phi) || !std::isfinite(result.C)) {
+    return std::nullopt;
+  }
+  return result.phi;
+}
+
 void BigTarget::get_target(
   const std::optional<PowerRune> & p, std::chrono::steady_clock::time_point & timestamp)
 {

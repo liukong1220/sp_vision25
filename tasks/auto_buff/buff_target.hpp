@@ -48,6 +48,8 @@ public:
   bool is_unsolve() const;
 
   Eigen::VectorXd ekf_x() const;
+  // Fitted RansacSineFitter phase. SmallTarget has no sine model and must stay nullopt.
+  virtual std::optional<double> predicted_sine_phase() const { return std::nullopt; }
 
   double spd = 0;  //调试用
 
@@ -109,6 +111,7 @@ public:
   void predict(double dt) override;
   std::unique_ptr<Target> clone() const override { return std::make_unique<BigTarget>(*this); }
   std::size_t fitter_sample_count() const { return spd_fitter_.sample_count(); }
+  std::optional<double> predicted_sine_phase() const override;
 
 private:
   void init(double nowtime, const PowerRune & p) override;

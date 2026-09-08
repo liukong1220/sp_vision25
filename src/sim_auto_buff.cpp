@@ -605,6 +605,9 @@ int main(int argc, char * argv[])
         }
         if (state.size() > 5 && std::isfinite(state[5])) sample.current_angle = state[5];
         if (state.size() > 6 && std::isfinite(state[6])) sample.current_speed = state[6];
+        const auto predicted_phase = target->predicted_sine_phase();
+        if (predicted_phase.has_value() && std::isfinite(*predicted_phase))
+          sample.predicted_phase = predicted_phase;
       } else if (routed.has_value()) {
         sample.estimated_center = routed->xyz_in_world;
         sample.current_angle = routed->ypr_in_world[2];
