@@ -19,7 +19,7 @@ namespace auto_aim
 {
 YOLOV8::YOLOV8(const std::string & config_path, bool debug)
 : config_path_(tools::resolve_config_path_string(config_path)),
-  classifier_(config_path), detector_(config_path), debug_(debug)
+  classifier_(config_path), detector_(config_path, false), debug_(debug)
 {
   auto yaml = tools::load(config_path_);
 
@@ -28,6 +28,9 @@ YOLOV8::YOLOV8(const std::string & config_path, bool debug)
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
   min_confidence_ = yaml["min_confidence"].as<double>();
+  score_threshold_ =
+    static_cast<float>(tools::read_or<double>(yaml, "score_threshold", 0.7));
+  traditional_fallback_ = tools::read_or<bool>(yaml, "traditional_fallback", false);
   int x = 0, y = 0, width = 0, height = 0;
   x = yaml["roi"]["x"].as<int>();
   y = yaml["roi"]["y"].as<int>();
@@ -109,7 +112,11 @@ std::list<Armor> YOLOV8::detect(const cv::Mat & raw_img, int frame_count)
   auto output_shape = output_tensor.get_shape();
   cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
 
-  return parse(scale, output, raw_img, frame_count);
+  auto armors = parse(scale, output, raw_img, frame_count);
+  if (armors.empty() && traditional_fallback_) {
+    armors = detector_.detect(raw_img, frame_count);
+  }
+  return armors;
 }
 
 void YOLOV8::refresh_runtime_params_if_needed()
@@ -213,7 +220,7 @@ std::list<Armor> YOLOV8::parse(
 bool YOLOV8::check_name(const Armor & armor) const
 {
   auto name_ok = armor.name != ArmorName::not_armor;
-  auto confidence_ok = armor.confidence > min_confidence_;
+  auto confidence_ok = armor.confidence >= min_confidence_;
 
   // 保存不确定的图案，用于分类器的迭代
   // if (name_ok && !confidence_ok) save(armor);

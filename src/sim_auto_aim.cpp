@@ -1018,6 +1018,11 @@ int main(int argc, char * argv[])
         tracker->state(), desc, tdesc);
     }
     if (show_detect) {
+      static bool detect_window_ready = false;
+      if (!detect_window_ready) {
+        cv::namedWindow("sp_vision25 detection", cv::WINDOW_NORMAL);
+        detect_window_ready = true;
+      }
       cv::Mat overlay = img.clone();
       tools::draw_text(
         overlay,
@@ -1025,6 +1030,11 @@ int main(int argc, char * argv[])
           "[{}] {} det={} tracked={} fire={}", frames, tracker->state(), armors_dbg.size(),
           target.has_value() ? 1 : 0, allow_fire ? "cli" : "disabled"),
         {10, 30}, {255, 255, 255}, 0.8, 2);
+      if (armors_dbg.empty()) {
+        tools::draw_text(
+          overlay, "det=0: YOLO empty after score/name/type filter", {10, 64}, {0, 255, 255}, 0.7,
+          2);
+      }
       for (const auto & a : armors_dbg) {
         const cv::Scalar box_color = (a.color == auto_aim::Color::red) ? cv::Scalar(0, 0, 255)
           : (a.color == auto_aim::Color::blue) ? cv::Scalar(255, 0, 0)

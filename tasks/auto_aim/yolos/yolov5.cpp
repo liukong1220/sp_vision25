@@ -24,6 +24,8 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
   device_ = yaml["device"].as<std::string>();
   binary_threshold_ = yaml["threshold"].as<double>();
   min_confidence_ = yaml["min_confidence"].as<double>();
+  score_threshold_ =
+    static_cast<float>(tools::read_or<double>(yaml, "score_threshold", 0.7));
   int x = 0, y = 0, width = 0, height = 0;
   x = yaml["roi"]["x"].as<int>();
   y = yaml["roi"]["y"].as<int>();
@@ -31,6 +33,7 @@ YOLOV5::YOLOV5(const std::string & config_path, bool debug)
   height = yaml["roi"]["height"].as<int>();
   use_roi_ = yaml["use_roi"].as<bool>();
   use_traditional_ = yaml["use_traditional"].as<bool>();
+  traditional_fallback_ = tools::read_or<bool>(yaml, "traditional_fallback", false);
   roi_ = cv::Rect(x, y, width, height);
   offset_ = cv::Point2f(x, y);
 
@@ -105,7 +108,11 @@ std::list<Armor> YOLOV5::detect(const cv::Mat & raw_img, int frame_count)
   auto output_shape = output_tensor.get_shape();
   cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
 
-  return parse(scale, output, raw_img, frame_count);
+  auto armors = parse(scale, output, raw_img, frame_count);
+  if (armors.empty() && traditional_fallback_) {
+    armors = detector_.detect(raw_img, frame_count);
+  }
+  return armors;
 }
 
 void YOLOV5::refresh_runtime_params_if_needed()
@@ -134,9 +141,11 @@ std::list<Armor> YOLOV5::parse(
   std::vector<float> confidences;
   std::vector<cv::Rect> boxes;
   std::vector<std::vector<cv::Point2f>> armors_key_points;
+  float max_score = 0.f;
   for (int r = 0; r < output.rows; r++) {
     double score = output.at<float>(r, 8);
     score = sigmoid(score);
+    if (score > max_score) max_score = static_cast<float>(score);
 
     if (score < score_threshold_) continue;
 
@@ -197,13 +206,17 @@ std::list<Armor> YOLOV5::parse(
   }
 
   tmp_img_ = bgr_img;
+  const std::size_t nms_count = armors.size();
+  std::size_t dropped_name = 0, dropped_type = 0;
   for (auto it = armors.begin(); it != armors.end();) {
     if (!check_name(*it)) {
+      ++dropped_name;
       it = armors.erase(it);
       continue;
     }
 
     if (!check_type(*it)) {
+      ++dropped_type;
       it = armors.erase(it);
       continue;
     }
@@ -214,6 +227,16 @@ std::list<Armor> YOLOV5::parse(
     ++it;
   }
 
+  if (armors.empty()) {
+    static int empty_logs = 0;
+    if (debug_ || empty_logs < 15) {
+      tools::logger()->info(
+        "[YOLOV5] nms={} kept=0 drop_name={} drop_type={} max_score={:.2f} min_conf={:.2f} score_th={:.2f}",
+        nms_count, dropped_name, dropped_type, max_score, min_confidence_, score_threshold_);
+      ++empty_logs;
+    }
+  }
+
   if (debug_) draw_detections(bgr_img, armors, frame_count);
 
   return armors;
@@ -222,7 +245,7 @@ std::list<Armor> YOLOV5::parse(
 bool YOLOV5::check_name(const Armor & armor) const
 {
   auto name_ok = armor.name != ArmorName::not_armor;
-  auto confidence_ok = armor.confidence > min_confidence_;
+  auto confidence_ok = armor.confidence >= min_confidence_;
 
   // 保存不确定的图案，用于神经网络的迭代
   // if (name_ok && !confidence_ok) save(armor);

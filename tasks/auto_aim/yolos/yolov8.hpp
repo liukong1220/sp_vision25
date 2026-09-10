@@ -34,11 +34,11 @@ private:
 
   std::string device_, model_path_;
   std::string save_path_, debug_path_;
-  bool debug_, use_roi_;
+  bool debug_, use_roi_, traditional_fallback_;
 
   const int class_num_ = 2;
   const float nms_threshold_ = 0.3;
-  const float score_threshold_ = 0.7;
+  float score_threshold_ = 0.7f;
   double min_confidence_, binary_threshold_;
 
   ov::Core core_;

@@ -8,8 +8,13 @@ yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
 device: CPU  # 仿真环境不保证有 iGPU，默认走 CPU
-min_confidence: 0.8
+# 实车 6m 前哨站经常 0.9+；合成图对 YOLO 是分布外，同样姿态经常只有 0.4~0.75，
+# 再用实车的 0.8 会把几乎所有框打掉（叠加图 det=0，前哨站明明在画面正中）。
+min_confidence: 0.25
+score_threshold: 0.20
 use_traditional: true
+# YOLO 空检时用灯条检测顶上。只影响 sim 入口，实车 YAML 没这个键。
+traditional_fallback: true
 
 #####-----ROI-----#####
 roi:
@@ -21,7 +26,7 @@ roi:
 use_roi: false
 
 #####-----传统方法参数-----#####
-threshold: 150
+threshold: 110
 max_angle_error: 45 # degree
 min_lightbar_ratio: 1.5
 max_lightbar_ratio: 20
@@ -38,8 +43,12 @@ max_rectangular_error: 25 # degree
 # (实测 tracked_frames 只有 5/91)。这里放宽到 0.35s，只是把“离线”判据对齐到
 # 本机真实帧率，不改变实车默认值。
 tracker_max_dt: 0.35
-min_detect_count: 3
+# 实车默认 3：要连续 3 帧才从 detecting 进 tracking。仿真前哨站识别是稀疏的
+# （历史定向实验 15/161），3 连击几乎凑不齐，Tracker 永远确认不了。仿真改为 1。
+min_detect_count: 1
 max_temp_lost_count: 15
+# 小陀螺板间空窗：仿真约 8fps，底盘 7.42rad/s 时每块板只露 1 帧。
+spin_max_temp_lost_count: 40
 
 outpost_max_temp_lost_count: 75
 # EKF 过程噪声。实车默认 100 / 400，仿真必须压到 1/500 才不发散，原因如下。
@@ -104,9 +113,10 @@ yaw_offset: 0.0
 # （2.50m 时 2.53deg，1.48m 时 4.27deg），因此 -7.0 只对这个场景成立，不能当成
 # 通用值写进来。要真正修掉得让弹道解算以枪口为原点，那属于算法侧改动，本次不做。
 pitch_offset: 0.0
-coming_angle: 50
-leaving_angle: 25
-decision_speed: 8
+coming_angle: 55
+leaving_angle: 30
+# 仿真底盘小陀螺 7.42rad/s，实车 8 会让它走低速延迟。对齐 planner/aimer 的 2rad/s 门。
+decision_speed: 2.0
 high_speed_delay_time: 0.07  # 略微减少高速延迟，进一步提高响应速度
 low_speed_delay_time: 0.10  # 略微减少低速延迟
 

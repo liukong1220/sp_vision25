@@ -135,6 +135,18 @@ bool accept_outpost_match(const OutpostMatchResult & match)
     match.reprojection_error < 90.0 && match.xy_error < 0.40 && match.z_error < 0.20 &&
     match.score < 36.0;
 }
+
+bool is_spin_infantry_name(ArmorName name)
+{
+  return name == ArmorName::two || name == ArmorName::three || name == ArmorName::four ||
+         name == ArmorName::five || name == ArmorName::sentry;
+}
+
+bool names_compatible(ArmorName tracked, ArmorName observed)
+{
+  if (tracked == observed) return true;
+  return is_spin_infantry_name(tracked) && is_spin_infantry_name(observed);
+}
 }  // namespace
 
 Tracker::Tracker(const std::string & config_path, Solver & solver)
@@ -153,6 +165,8 @@ Tracker::Tracker(const std::string & config_path, Solver & solver)
   max_temp_lost_count_ = yaml["max_temp_lost_count"].as<int>();
   outpost_max_temp_lost_count_ = yaml["outpost_max_temp_lost_count"].as<int>();
   normal_temp_lost_count_ = max_temp_lost_count_;
+  spin_max_temp_lost_count_ =
+    tools::read_or<int>(yaml, "spin_max_temp_lost_count", max_temp_lost_count_);
   max_dt_ = tools::read_or<double>(yaml, "tracker_max_dt", 0.1);
   outpost_radius_ = tools::read_or<double>(yaml, "outpost_radius", 0.2765);
   outpost_spin_speed_lock_ = tools::read_or<double>(yaml, "outpost_spin_speed_lock", 2.51);
@@ -460,8 +474,9 @@ void Tracker::state_machine(bool found)
     } else {
       temp_lost_count_++;
       if (target_.name == ArmorName::outpost)
-        //前哨站的temp_lost_count需要设置的大一些
         max_temp_lost_count_ = outpost_max_temp_lost_count_;
+      else if (std::abs(target_.ekf_x()[target_state::VYAW]) > 2.0)
+        max_temp_lost_count_ = spin_max_temp_lost_count_;
       else
         max_temp_lost_count_ = normal_temp_lost_count_;
 
@@ -521,7 +536,7 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
 
   int found_count = 0;
   for (const auto & armor : armors) {
-    if (armor.name != target_.name || armor.type != target_.armor_type) continue;
+    if (!names_compatible(target_.name, armor.name) || armor.type != target_.armor_type) continue;
     found_count++;
   }
 
@@ -566,7 +581,7 @@ bool Tracker::update_target(std::list<Armor> & armors, std::chrono::steady_clock
   bool accepted_measurement = false;
   for (auto & armor : armors) {
     if (
-      armor.name != target_.name || armor.type != target_.armor_type
+      !names_compatible(target_.name, armor.name) || armor.type != target_.armor_type
       //  || armor.center.x != min_x
     )
       continue;

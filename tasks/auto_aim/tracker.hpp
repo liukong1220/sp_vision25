@@ -42,6 +42,7 @@ private:
   int temp_lost_count_;
   int outpost_max_temp_lost_count_;
   int normal_temp_lost_count_;
+  int spin_max_temp_lost_count_;
   // 判定“相机离线”的帧间隔上限(秒)。超过就把状态打回 lost。
   // 默认 0.1 是按实车流水线速度定的；仿真里 CPU 上跑 YOLO 单帧就要 110ms 以上，
   // dt 恒大于 0.1，tracker 每帧都会被打回 lost，永远确认不了目标。

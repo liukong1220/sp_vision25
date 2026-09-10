@@ -45,7 +45,7 @@ std::list<Armor> Detector::detect(const cv::Mat & bgr_img, int frame_count)
   // 进行二值化
   cv::Mat binary_img;
   cv::threshold(gray_img, binary_img, threshold_, 255, cv::THRESH_BINARY);
-  cv::imshow("binary_img", binary_img);
+  if (debug_) cv::imshow("binary_img", binary_img);
 
   // 获取轮廓点
   std::vector<std::vector<cv::Point>> contours;
@@ -278,7 +278,7 @@ bool Detector::check_geometry(const Armor & armor) const
 bool Detector::check_name(const Armor & armor) const
 {
   auto name_ok = armor.name != ArmorName::not_armor;
-  auto confidence_ok = armor.confidence > min_confidence_;
+  auto confidence_ok = armor.confidence >= min_confidence_;
 
   // 保存不确定的图案，用于分类器的迭代
   if (name_ok && !confidence_ok) save(armor);
