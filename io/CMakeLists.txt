@@ -114,7 +114,7 @@ if(SP_VISION_HAS_MINDVISION_SDK)
   target_compile_definitions(io PUBLIC SP_VISION_HAS_MINDVISION_SDK=1)
 endif()
 
-target_link_libraries(io "${HIKROBOT_MVCAMERA_LIBRARY}" usb-1.0 yaml-cpp serial)
+target_link_libraries(io "${HIKROBOT_MVCAMERA_LIBRARY}" usb-1.0 yaml-cpp serial tools)
 
 ################## 检查 ROS 环境 ##################
 find_package(ament_cmake QUIET)
