@@ -83,6 +83,11 @@ IMU型号：使用C板内置BMI088作为IMU\
     cmake -B build
     make -C build/ -j`nproc`
     ```
+    在 ATS 2026 工作区中也可在工作区根目录用 colcon 编译，产物位于 `build/sp_vision25/`：
+    ```bash
+    colcon build --base-paths src --packages-select sp_vision25
+    ```
+    注：`tools` 编译为 STATIC 库（此前为 OBJECT 库），`io` 在 `io/CMakeLists.txt` 中显式链接 `tools`。
 
 3. 运行demo:
     ```bash
