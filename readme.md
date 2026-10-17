@@ -1,5 +1,8 @@
 # 同济大学SuperPower战队25赛季自瞄算法开源
 
+> ATS 2026 工作区集成说明：ROS 2 条件编译模式下，`sp_vision25` 使用 `io::GimbalTopicBridge` 访问云台话题，不直接打开云台串口；串口读写统一由 `standard_robot_pp_ros2` 负责。
+
+
 ## 本项目亮点
 - 无ROS依赖*，新同学无需学习ROS相关知识就能上手自瞄。
 - 完整工作流，包含开发、编译、调试、部署全流程。
@@ -87,7 +90,16 @@ IMU型号：使用C板内置BMI088作为IMU\
     ```bash
     colcon build --base-paths src --packages-select sp_vision25
     ```
+
+    ROS 2 模式验证：
+
+    ```bash
+    colcon test --base-paths src --packages-select sp_vision25
+    colcon test-result --test-result-base build/sp_vision25 --verbose
+    ```
+    当前 CTest 定向结果为 `2/2`。ROS 2 视觉桥订阅 `/serial/gimbal_state`（11 元、四元数 `wxyz`）并发布 `/serial/gimbal_cmd`（7 元、角度 rad）；串口链路心跳为 `/serial/link_up`。
     注：`tools` 编译为 STATIC 库（此前为 OBJECT 库），`io` 在 `io/CMakeLists.txt` 中显式链接 `tools`。
+    CMake 检测到 ROS 2 时定义 `SP_VISION_HAS_ROS2` 并编译 `GimbalTopicBridge`。
 
 3. 运行demo:
     ```bash
