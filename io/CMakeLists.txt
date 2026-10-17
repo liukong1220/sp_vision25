@@ -141,9 +141,15 @@ else()
     # `sp_vision25` 目前还是普通 CMake 工程，不是完整 ament 包，
     # 所以这里显式导入底层依赖，避免出现 “Target fastcdr not found”。
     # 添加 ROS2 相关的文件
-    target_sources(io PRIVATE ros2/publish2nav.cpp ros2/ros2.cpp ros2/subscribe2nav.cpp)
+    target_sources(io PRIVATE
+      ros2/publish2nav.cpp
+      ros2/ros2.cpp
+      ros2/subscribe2nav.cpp
+      ros2/gimbal_topic_bridge.cpp
+    )
 
     # 设置 ROS2 依赖
     include_directories(${std_msgs_INCLUDE_DIRS})
     ament_target_dependencies(io rclcpp std_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs sp_msgs)
+    target_compile_definitions(io PUBLIC SP_VISION_HAS_ROS2=1)
 endif()

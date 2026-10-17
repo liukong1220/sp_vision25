@@ -4,7 +4,11 @@
 #include <thread>
 
 #include "io/camera.hpp"
+#if defined(SP_VISION_HAS_ROS2)
+#include "io/ros2/gimbal_topic_bridge.hpp"
+#else
 #include "io/gimbal/gimbal.hpp"
+#endif
 #include "io/ros2/ros2.hpp"
 #include "io/usbcamera/usbcamera.hpp"
 #include "tasks/auto_aim/planner/planner.hpp"
@@ -34,7 +38,11 @@ int main(int argc, char * argv[])
   auto config_path = cli.get<std::string>(0);
 
   io::ROS2 ros2(config_path);
+#if defined(SP_VISION_HAS_ROS2)
+  io::GimbalTopicBridge gimbal;
+#else
   io::Gimbal gimbal(config_path);
+#endif
   io::Camera camera(config_path);
   // 当前实机还没有接入全向感知硬件，这里先不初始化侧向 / 后向相机，
   // 避免程序在启动阶段因为缺少设备而卡住。

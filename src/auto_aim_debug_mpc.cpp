@@ -9,7 +9,11 @@
 #include <opencv2/opencv.hpp>
 
 #include "io/camera.hpp"
+#if defined(SP_VISION_HAS_ROS2)
+#include "io/ros2/gimbal_topic_bridge.hpp"
+#else
 #include "io/gimbal/gimbal.hpp"
+#endif
 #include "tasks/auto_aim/planner/planner.hpp"
 #include "tasks/auto_aim/solver.hpp"
 #include "tasks/auto_aim/target.hpp"
@@ -154,7 +158,11 @@ int main(int argc, char * argv[])
       "Debug recording enabled: fps={} dir={}", record_debug_fps, record_debug_dir);
   }
 
+#if defined(SP_VISION_HAS_ROS2)
+  io::GimbalTopicBridge gimbal;
+#else
   io::Gimbal gimbal(config_path);
+#endif
   io::Camera camera(config_path);
 
   auto_aim::YOLO yolo(config_path, true);
