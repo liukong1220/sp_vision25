@@ -1,85 +1,91 @@
 #!/usr/bin/env bash
-# 文件名: run_with_watchdog.sh
-# 功能:
-# 1. 在新终端中启动一个“比赛运行型”程序（如 standard_mpc / sentry）
-# 2. 程序退出后自动重启
-# 3. 不附带浏览器 / Web 调试等待逻辑，尽量减少无关开销
-#
-# 适用场景:
-# - standard_mpc
-# - sentry
-# - standard
-# - mt_standard
-# - 其他比赛主入口程序
-
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "${ROOT_DIR}/../.." && pwd)"
 
-BIN_NAME="${1:-standard_mpc}"
-BIN_PATH="${ROOT_DIR}/build/${BIN_NAME}"
-
-# 第二个参数允许显式传配置文件；未提供时按主程序给常用默认值
+BIN_NAME="${1:-sentry}"
 DEFAULT_CONFIG="${ROOT_DIR}/configs/standard3.yaml"
-if [[ "${BIN_NAME}" == "sentry" ]]; then
+if [[ "${BIN_NAME}" == "sentry" || "${BIN_NAME}" == sentry_* ]]; then
   DEFAULT_CONFIG="${ROOT_DIR}/configs/sentry.yaml"
 fi
 CONFIG_PATH="${2:-${DEFAULT_CONFIG}}"
-
 RESTART_DELAY="${RESTART_DELAY:-2}"
 
-start_program_in_terminal() {
-    local title="${BIN_NAME}"
-    local inner_cmd="cd \"${ROOT_DIR}\" && \"${BIN_PATH}\" \"${CONFIG_PATH}\"; echo '程序已退出，窗口将关闭'; sleep 2"
+ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
+if [[ -z "${AMENT_PREFIX_PATH:-}" && -f "/opt/ros/${ROS_DISTRO_NAME}/setup.bash" ]]; then
+  set +u
+  # shellcheck disable=SC1090
+  source "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+  set -u
+fi
+if [[ -z "${COLCON_PREFIX_PATH:-}" && -f "${WORKSPACE_ROOT}/install/setup.bash" ]]; then
+  set +u
+  # shellcheck disable=SC1090
+  source "${WORKSPACE_ROOT}/install/setup.bash"
+  set -u
+fi
 
-    if command -v gnome-terminal >/dev/null 2>&1; then
-        gnome-terminal --title="${title}" -- bash -c "${inner_cmd}" &
-    elif command -v xfce4-terminal >/dev/null 2>&1; then
-        xfce4-terminal --title="${title}" --command="bash -c \"${inner_cmd}\"" &
-    elif command -v konsole >/dev/null 2>&1; then
-        konsole --hold -p tabtitle="${title}" -e bash -c "${inner_cmd}" &
-    elif command -v xterm >/dev/null 2>&1; then
-        xterm -T "${title}" -e bash -c "${inner_cmd}" &
-    else
-        echo "[比赛看门狗] 错误: 找不到可用的终端模拟器"
-        exit 1
-    fi
-
-    sleep 2
-    local pid
-    pid=$(pgrep -f "${BIN_PATH}" | head -1 || true)
-    echo "${pid}"
+resolve_binary() {
+  if [[ -x "${ROOT_DIR}/build/${BIN_NAME}" ]]; then
+    echo "${ROOT_DIR}/build/${BIN_NAME}"
+  elif [[ -x "${WORKSPACE_ROOT}/install/sp_vision25/lib/sp_vision25/${BIN_NAME}" ]]; then
+    echo "${WORKSPACE_ROOT}/install/sp_vision25/lib/sp_vision25/${BIN_NAME}"
+  else
+    return 1
+  fi
 }
 
-main() {
-    [[ ! -x "${BIN_PATH}" ]] && { echo "错误: ${BIN_PATH} 不可执行"; exit 1; }
+BIN_PATH="$(resolve_binary || true)"
+if [[ -z "${BIN_PATH}" ]]; then
+  echo "[vision_watchdog] ERROR: executable not found for '${BIN_NAME}' (checked build/ and install/)" >&2
+  exit 1
+fi
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "[vision_watchdog] ERROR: config file not found: ${CONFIG_PATH}" >&2
+  exit 1
+fi
 
-    echo "=========================================="
-    echo "比赛看门狗已启动 (按 Ctrl+C 彻底退出)"
-    echo "程序: ${BIN_PATH}"
-    echo "配置: ${CONFIG_PATH}"
-    echo "重启延迟: ${RESTART_DELAY} 秒"
-    echo "工作目录: ${ROOT_DIR}"
-    echo "=========================================="
+CHILD_PID=""
+STOP_REQUESTED=0
 
-    while true; do
-        echo "[$(date '+%H:%M:%S')] 启动比赛程序..."
-
-        local prog_pid
-        prog_pid=$(start_program_in_terminal)
-        if [[ -z "${prog_pid}" ]]; then
-            echo "[比赛看门狗] 警告: 无法获取程序 PID，可能启动失败，等待后重试"
-            sleep "${RESTART_DELAY}"
-            continue
-        fi
-
-        while kill -0 "${prog_pid}" 2>/dev/null; do
-            sleep 1
-        done
-
-        echo "[$(date '+%H:%M:%S')] 程序已退出，${RESTART_DELAY} 秒后重启..."
-        sleep "${RESTART_DELAY}"
+cleanup() {
+  STOP_REQUESTED=1
+  if [[ -n "${CHILD_PID}" ]] && kill -0 "${CHILD_PID}" 2>/dev/null; then
+    echo "[$(date '+%H:%M:%S')] 停止视觉程序 PID=${CHILD_PID}"
+    kill -TERM "${CHILD_PID}" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "${CHILD_PID}" 2>/dev/null || break
+      sleep 0.1
     done
+    kill -KILL "${CHILD_PID}" 2>/dev/null || true
+  fi
 }
+trap cleanup INT TERM EXIT
 
-main
+echo "=========================================="
+echo "视觉看门狗已启动 (按 Ctrl+C 退出)"
+echo "程序: ${BIN_PATH}"
+echo "配置: ${CONFIG_PATH}"
+echo "重启延迟: ${RESTART_DELAY} 秒"
+echo "工作目录: ${ROOT_DIR}"
+echo "=========================================="
+
+cd "${ROOT_DIR}"
+while (( ! STOP_REQUESTED )); do
+  echo "[$(date '+%H:%M:%S')] 启动视觉程序..."
+  "${BIN_PATH}" "${CONFIG_PATH}" &
+  CHILD_PID="$!"
+
+  set +e
+  wait "${CHILD_PID}"
+  EXIT_STATUS=$?
+  set -e
+  CHILD_PID=""
+
+  if (( STOP_REQUESTED )); then
+    break
+  fi
+  echo "[$(date '+%H:%M:%S')] 程序已退出 (status=${EXIT_STATUS})，${RESTART_DELAY} 秒后重启..."
+  sleep "${RESTART_DELAY}"
+done

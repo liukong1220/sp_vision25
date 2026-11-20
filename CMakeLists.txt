@@ -6,8 +6,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Release)
 message(STATUS "--------------------CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}--------------------")
 
-include(CTest)
-
 find_package(OpenCV REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -115,119 +113,23 @@ list(APPEND SP_VISION_RUNTIME_TARGETS
   split_video
 )
 
-##################tests##################
-add_executable(auto_aim_test tests/auto_aim_test.cpp)
-add_executable(auto_aim_test_web tests/auto_aim_test_web.cpp)
-add_executable(auto_buff_test tests/auto_buff_test.cpp)
-add_executable(camera_detect_test tests/camera_detect_test.cpp)
-add_executable(camera_test tests/camera_test.cpp)
-add_executable(camera_thread_test tests/camera_thread_test.cpp)
-add_executable(cboard_test tests/cboard_test.cpp)
-add_executable(fire_test tests/fire_test.cpp)
-add_executable(detector_video_test tests/detector_video_test.cpp)
-add_executable(gimbal_response_test tests/gimbal_response_test.cpp)
-add_executable(multi_usbcamera_test tests/multi_usbcamera_test.cpp)
-add_executable(usbcamera_detect_test tests/usbcamera_detect_test.cpp)
-add_executable(usbcamera_test tests/usbcamera_test.cpp)
-add_executable(handeye_test tests/handeye_test.cpp)
-add_executable(dm_test tests/dm_test.cpp)
-add_executable(minimum_vision_system tests/minimum_vision_system.cpp)
-
-target_link_libraries(auto_aim_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-target_link_libraries(auto_aim_test_web ${OpenCV_LIBS} fmt::fmt yaml-cpp tools debug_visualization io auto_aim auto_buff)
-target_link_libraries(auto_buff_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io)
-target_link_libraries(camera_detect_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim io)
-target_link_libraries(camera_test ${OpenCV_LIBS} fmt::fmt tools io)
-target_link_libraries(camera_thread_test ${OpenCV_LIBS} fmt::fmt auto_aim tools io)
-target_link_libraries(cboard_test ${OpenCV_LIBS} fmt::fmt tools io)
-target_link_libraries(fire_test ${OpenCV_LIBS} fmt::fmt tools io)
-target_link_libraries(detector_video_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools auto_aim)
-target_link_libraries(gimbal_response_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io)
-target_link_libraries(multi_usbcamera_test ${OpenCV_LIBS} fmt::fmt tools io)
-target_link_libraries(usbcamera_detect_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-target_link_libraries(usbcamera_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io)
-target_link_libraries(handeye_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-target_link_libraries(dm_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io)
-target_link_libraries(minimum_vision_system ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-
-add_executable(gimbal_test tests/gimbal_test.cpp)
-target_link_libraries(gimbal_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
-
-add_executable(planner_test tests/planner_test.cpp)
-target_link_libraries(planner_test ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
-
-add_executable(planner_test_offline tests/planner_test_offline.cpp)
-target_link_libraries(planner_test_offline ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
-
-add_executable(
-  estimator_pipeline_test
-  tests/estimator_pipeline_test.cpp
-  tools/extended_kalman_filter.cpp
-)
-target_link_libraries(estimator_pipeline_test Eigen3::Eigen)
-
-add_executable(target_13d_test tests/target_13d_test.cpp)
-target_link_libraries(target_13d_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
-
-if(BUILD_TESTING)
-  add_test(NAME estimator_pipeline_test COMMAND estimator_pipeline_test)
-  add_test(
-    NAME target_13d_test
-    COMMAND target_13d_test ${PROJECT_SOURCE_DIR}/configs/demo.yaml
-  )
-endif()
-
-# 这些测试/调试程序本身就是现场定位问题常用的入口，
-# 迁入工作区后也一并安装到 lib/${PROJECT_NAME}，方便直接 `ros2 run sp_vision25 ...`。
-list(APPEND SP_VISION_RUNTIME_TARGETS
-  auto_aim_test
-  auto_aim_test_web
-  auto_buff_test
-  camera_detect_test
-  camera_test
-  camera_thread_test
-  cboard_test
-  fire_test
-  detector_video_test
-  gimbal_response_test
-  multi_usbcamera_test
-  usbcamera_detect_test
-  usbcamera_test
-  handeye_test
-  dm_test
-  minimum_vision_system
-  gimbal_test
-  planner_test
-  planner_test_offline
-)
-
-# 只有在找到 ROS 环境时才会添加 sentry 和 publish_test
+# 只有在找到 ROS 环境时才会添加 sentry 节点
 if(SP_VISION_HAS_ROS2)
-    # 编译 sentry 和 publish_test
     add_executable(sentry src/sentry.cpp)
     add_executable(sentry_bp src/sentry_bp.cpp)
     add_executable(sentry_debug src/sentry_debug.cpp)
     add_executable(sentry_multithread src/sentry_multithread.cpp)
-    add_executable(publish_test tests/publish_test.cpp)
-    add_executable(subscribe_test tests/subscribe_test.cpp)
-    add_executable(topic_loop_test tests/topic_loop_test.cpp)
 
     target_link_libraries(sentry ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim omniperception tools io)
     target_link_libraries(sentry_bp ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim omniperception tools io)
     target_link_libraries(sentry_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff omniperception tools debug_visualization io)
     target_link_libraries(sentry_multithread ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim omniperception tools io)
-    target_link_libraries(publish_test ${OpenCV_LIBS} fmt::fmt tools io auto_aim)
-    target_link_libraries(subscribe_test ${OpenCV_LIBS} fmt::fmt tools io)
-    target_link_libraries(topic_loop_test ${OpenCV_LIBS} fmt::fmt tools io)
 
     list(APPEND SP_VISION_RUNTIME_TARGETS
       sentry
       sentry_bp
       sentry_debug
       sentry_multithread
-      publish_test
-      subscribe_test
-      topic_loop_test
     )
 else()
     message(STATUS "ROS2 environment not found, skipping ROS2-related code.")

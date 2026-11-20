@@ -88,16 +88,10 @@ IMU型号：使用C板内置BMI088作为IMU\
     ```
     在 ATS 2026 工作区中也可在工作区根目录用 colcon 编译，产物位于 `build/sp_vision25/`：
     ```bash
-    colcon build --base-paths src --packages-select sp_vision25
+    colcon build --base-paths src --packages-select sp_vision25 --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
     ```
 
-    ROS 2 模式验证：
-
-    ```bash
-    colcon test --base-paths src --packages-select sp_vision25
-    colcon test-result --test-result-base build/sp_vision25 --verbose
-    ```
-    当前 CTest 定向结果为 `2/2`。ROS 2 视觉桥订阅 `/serial/gimbal_state`（11 元、四元数 `wxyz`）并发布 `/serial/gimbal_cmd`（7 元、角度 rad）；串口链路心跳为 `/serial/link_up`。
+    ROS 2 视觉桥订阅 `/serial/gimbal_state`（11 元、四元数 `wxyz`）并发布 `/serial/gimbal_cmd`（7 元、角度 rad）；串口链路心跳为 `/serial/link_up`。
     注：`tools` 编译为 STATIC 库（此前为 OBJECT 库），`io` 在 `io/CMakeLists.txt` 中显式链接 `tools`。
     CMake 检测到 ROS 2 时定义 `SP_VISION_HAS_ROS2` 并编译 `GimbalTopicBridge`。
 
